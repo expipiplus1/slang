@@ -4275,7 +4275,10 @@ void TraceMotionRay<payload_t>(
     RayDesc                         Ray,
     inout payload_t                 Payload);
 
-__target_intrinsic(GLSL_NV_ray_tracing_motion, "traceMotionNV")
+__target_intrinsic(glsl, "traceMotionNV")
+__glsl_version(460)
+__glsl_extension(GLSL_NV_ray_tracing_motion)
+__glsl_extension(GL_EXT_ray_tracing)
 void __traceMotionRay(
     RaytracingAccelerationStructure AccelerationStructure,
     uint                            RayFlags,
@@ -4442,7 +4445,10 @@ float4x3 WorldToObject4x3();
 // The name of the following functions may change when DXR supports
 // a feature similar to the `GLSL_NV_ray_tracing_motion` extension
 
-__target_intrinsic(GLSL_NV_ray_tracing_motion, "(gl_CurrentRayTimeNV)")
+__target_intrinsic(glsl, "(gl_CurrentRayTimeNV)")
+__glsl_version(460)
+__glsl_extension(GLSL_NV_ray_tracing_motion)
+__glsl_extension(GL_EXT_ray_tracing)
 float RayCurrentTime();
 
 // Note: The provisional DXR spec included these unadorned
