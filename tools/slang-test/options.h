@@ -3,11 +3,11 @@
 #ifndef OPTIONS_H_INCLUDED
 #define OPTIONS_H_INCLUDED
 
-#include "../../source/core/dictionary.h"
+#include "../../source/core/slang-dictionary.h"
 
 #include "test-reporter.h"
 #include "../../source/core/slang-render-api-util.h"
-#include "../../source/core/smart-pointer.h"
+#include "../../source/core/slang-smart-pointer.h"
 
 // A category that a test can be tagged with
 struct TestCategory: public Slang::RefObject
@@ -49,6 +49,12 @@ struct Options
     // generate extra output (notably: command lines we run)
     bool shouldBeVerbose = false;
 
+    // When true results from ignored tests are not shown
+    bool hideIgnored = false;
+
+    // When true only tests that use an api that matches the enabledApis flags will run
+    bool apiOnly = false;
+
     // Use verbose paths
     bool verbosePaths = false;
 
@@ -72,7 +78,8 @@ struct Options
     // Exclude test that match one these categories
     Slang::Dictionary<TestCategory*, TestCategory*> excludeCategories;
 
-    // By default we can test against all apis
+    // By default we can test against all apis. If is set to anything other than AllOf only tests that *require* the API
+    // will be run.
     Slang::RenderApiFlags enabledApis = Slang::RenderApiFlag::AllOf;
 
     // The subCommand to execute. Will be empty if there is no subCommand 
@@ -84,7 +91,9 @@ struct Options
     // By default we potentially synthesize test for all 
     // TODO: Vulkan is disabled by default for now as the majority as vulkan synthesized tests
     // OpenGL is disabled for now
-    Slang::RenderApiFlags synthesizedTestApis = Slang::RenderApiFlag::AllOf & ~(Slang::RenderApiFlag::Vulkan | Slang::RenderApiFlag::OpenGl);
+    // CPU is disabled by default
+    // CUDA is disabled by default
+    Slang::RenderApiFlags synthesizedTestApis = Slang::RenderApiFlag::AllOf & ~(Slang::RenderApiFlag::Vulkan | Slang::RenderApiFlag::OpenGl | Slang::RenderApiFlag::CPU); 
 
     // The adapter to use. If empty will match first found adapter.
     Slang::String adapter;

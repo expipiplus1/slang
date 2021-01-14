@@ -10,3 +10,18 @@
 [submodule "external/imgui"]
 	path = external/imgui
 	url = https://github.com/ocornut/imgui.git
+[submodule "external/slang-binaries"]
+	path = external/slang-binaries
+	url = https://github.com/shader-slang/slang-binaries
+[submodule "external/spirv-tools"]
+	path = external/spirv-tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
+[submodule "external/spirv-headers"]
+	path = external/spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+[submodule "external/miniz"]
+	path = external/miniz
+	url = https://github.com/richgel999/miniz
+[submodule "external/lz4"]
+	path = external/lz4
+	url = https://github.com/lz4/lz4

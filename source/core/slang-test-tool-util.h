@@ -1,5 +1,5 @@
-#ifndef SLANG_TEST_TOOL_UTIL_H
-#define SLANG_TEST_TOOL_UTIL_H
+#ifndef SLANG_CORE_TEST_TOOL_UTIL_H
+#define SLANG_CORE_TEST_TOOL_UTIL_H
 
 #include "slang-std-writers.h"
 
@@ -46,6 +46,26 @@ struct TestToolUtil
 
         /// Given a slang result, returns a return code that can be returned from an executable
     static ToolReturnCode getReturnCode(SlangResult res);
+
+        /// Given the executable path (as located in Slang directory hierarchy), works out the absolute path to the root 
+    static SlangResult getRootPath(const char* exePath, String& outRootPath);
+
+        /// Given the exePath, give return the absolute path to the directory the exe is in
+    static SlangResult getExeDirectoryPath(const char* exePath, String& outExeDirectoryPath);
+
+        /// Sets the default preludes on the session based on the executable path
+    static SlangResult setSessionDefaultPreludeFromRootPath(const String& rootPath, slang::IGlobalSession* session);
+
+        /// Calculates the path that is the combination of parentPath, and relPath
+        /// And converts such that can be used as an include path (handling slashes)
+    static SlangResult getIncludePath(const String& parentPath, const char* relPath, String& outIncludePath);
+
+    
+        /// Sets the default preludes on the session based on the executable path
+    static SlangResult setSessionDefaultPreludeFromExePath(const char* exePath, slang::IGlobalSession* session);
+
+        /// Returns true if the StdLib should not be initialized immediately (eg when doing a -load-stdlib).
+    static bool hasDeferredStdLib(Index numArgs, const char*const* args);
 };
 
 } // namespace Slang

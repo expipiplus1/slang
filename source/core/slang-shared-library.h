@@ -1,27 +1,17 @@
-#ifndef SLANG_SHARED_LIBRARY_H_INCLUDED
-#define SLANG_SHARED_LIBRARY_H_INCLUDED
+#ifndef SLANG_CORE_SHARED_LIBRARY_H
+#define SLANG_CORE_SHARED_LIBRARY_H
 
 #include "../../slang.h"
 #include "../../slang-com-helper.h"
 #include "../../slang-com-ptr.h"
 
-#include "../core/platform.h"
-#include "../core/common.h"
-#include "../core/dictionary.h"
+#include "../core/slang-io.h"
+#include "../core/slang-platform.h"
+#include "../core/slang-common.h"
+#include "../core/slang-dictionary.h"
 
 namespace Slang
 {
-
-/* NOTE! Do not change this enum without making the appropriate changes to DefaultSharedLibraryLoader::s_libraryNames */
-enum class SharedLibraryType
-{
-    Unknown,            ///< Unknown compiler
-    Dxc,                ///< Dxc compiler
-    Fxc,                ///< Fxc compiler
-    Glslang,            ///< Slang specific glslang compiler
-    Dxil,               ///< Dxil is used with dxc
-    CountOf,
-};
 
 class DefaultSharedLibraryLoader : public ISlangSharedLibraryLoader
 {
@@ -35,19 +25,15 @@ public:
 
     // ISlangSharedLibraryLoader
     virtual SLANG_NO_THROW SlangResult SLANG_MCALL loadSharedLibrary(const char* path, 
-        ISlangSharedLibrary** sharedLibraryOut) SLANG_OVERRIDE;
+        ISlangSharedLibrary** outSharedLibrary) SLANG_OVERRIDE;
+
+    SlangResult loadPlatformSharedLibrary(const char* path, ISlangSharedLibrary** outSharedLibrary);
 
         /// Get the singleton
     static DefaultSharedLibraryLoader* getSingleton() { return &s_singleton; }
 
-        /// Get the type from the name
-    static SharedLibraryType getSharedLibraryTypeFromName(const UnownedStringSlice& name);
 
-        /// Get the name from the type, or nullptr if not known
-    static const char* getSharedLibraryNameFromType(SharedLibraryType type) { return s_libraryNames[int(type)]; }
-
-        /// Make a shared library to it's name
-    static const char* s_libraryNames[int(SharedLibraryType::CountOf)];
+    static SlangResult load(ISlangSharedLibraryLoader* loader, const String& path, const String& name, ISlangSharedLibrary** outLibrary);
 
 private:
         /// Make so not constructible
@@ -66,7 +52,7 @@ class DefaultSharedLibrary : public ISlangSharedLibrary, public RefObject
     SLANG_REF_OBJECT_IUNKNOWN_ALL
 
     // ISlangSharedLibrary
-    virtual SLANG_NO_THROW SlangFuncPtr SLANG_MCALL findFuncByName(char const* name) SLANG_OVERRIDE;
+    virtual SLANG_NO_THROW void* SLANG_MCALL findSymbolAddressByName(char const* name) SLANG_OVERRIDE;
 
         /// Ctor.
     DefaultSharedLibrary(const SharedLibrary::Handle sharedLibraryHandle):
@@ -84,37 +70,28 @@ class DefaultSharedLibrary : public ISlangSharedLibrary, public RefObject
     SharedLibrary::Handle m_sharedLibraryHandle = nullptr;
 };
 
-class ConfigurableSharedLibraryLoader: public ISlangSharedLibraryLoader, public RefObject
+class TemporarySharedLibrary : public DefaultSharedLibrary
 {
 public:
-    typedef Result (*Func)(const char* pathIn, const String& entryString, SharedLibrary::Handle& handleOut);
+    typedef DefaultSharedLibrary Super;
 
-    // IUnknown
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
+        /// Get the path to the shared library
+    const String& getPath() const { return m_path; }
 
-    // ISlangSharedLibraryLoader
-    virtual SLANG_NO_THROW SlangResult SLANG_MCALL loadSharedLibrary(const char* path, ISlangSharedLibrary** sharedLibraryOut) SLANG_OVERRIDE;
-
-        /// Function to replace the the path with entryString
-    static Result replace(const char* pathIn, const String& entryString, SharedLibrary::Handle& handleOut);
-        /// Function to change the path using the entryStrinct
-    static Result changePath(const char* pathIn, const String& entryString, SharedLibrary::Handle& handleOut);
-
-    void addEntry(const String& libName, Func func, const String& entryString) { m_entryMap.Add(libName, Entry{ func, entryString} ); }
-    void addEntry(SharedLibraryType libType, Func func, const String& entryString) { m_entryMap.Add(DefaultSharedLibraryLoader::getSharedLibraryNameFromType(libType), Entry { func, entryString} ); }
-
-    virtual ~ConfigurableSharedLibraryLoader() {}
-    protected:
-
-    struct Entry
+        /// Ctor
+    TemporarySharedLibrary(const SharedLibrary::Handle sharedLibraryHandle, const String& path):
+        Super(sharedLibraryHandle),
+        m_path(path)
     {
-        Func func;
-        String entryString;
-    };
+    }
 
-    ISlangUnknown* getInterface(const Guid& guid);
+    virtual ~TemporarySharedLibrary();
 
-    Dictionary<String, Entry> m_entryMap;
+        /// Any files specified in this set will be deleted on exit
+    RefPtr<TemporaryFileSet> m_temporaryFileSet;
+
+protected:
+    String m_path;
 };
 
 }

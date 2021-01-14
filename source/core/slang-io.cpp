@@ -1,7 +1,9 @@
 #include "slang-io.h"
-#include "exception.h"
+#include "slang-exception.h"
 
 #include "../../slang-com-helper.h"
+
+#include "slang-string-util.h"
 
 #ifndef __STDC__
 #   define __STDC__ 1
@@ -17,8 +19,13 @@
 #   include <Windows.h>
 #endif
 
-#if defined(__linux__) || defined(__CYGWIN__)
+#if defined(__linux__) || defined(__CYGWIN__) || SLANG_APPLE_FAMILY
 #   include <unistd.h>
+// For Path::find
+#   include <fnmatch.h>
+
+#   include <dirent.h>
+#   include <sys/stat.h>
 #endif
 
 #if SLANG_APPLE_FAMILY
@@ -31,56 +38,177 @@
 
 namespace Slang
 {
-	bool File::exists(const String& fileName)
-	{
-#ifdef _WIN32
-		struct _stat32 statVar;
-		return ::_wstat32(((String)fileName).toWString(), &statVar) != -1;
-#else
-		struct stat statVar;
-		return ::stat(fileName.getBuffer(), &statVar) == 0;
-#endif
-	}
 
-	String Path::truncateExt(const String& path)
-	{
-		UInt dotPos = path.lastIndexOf('.');
-		if (dotPos != -1)
-			return path.subString(0, dotPos);
-		else
-			return path;
-	}
-	String Path::replaceExt(const String& path, const char* newExt)
-	{
-		StringBuilder sb(path.getLength()+10);
-		UInt dotPos = path.lastIndexOf('.');
-		if (dotPos == -1)
-			dotPos = path.getLength();
-		sb.Append(path.getBuffer(), dotPos);
-		sb.Append('.');
-		sb.Append(newExt);
-		return sb.ProduceString();
-	}
-
-    static UInt findLastSeparator(String const& path)
+    /* static */SlangResult File::remove(const String& fileName)
     {
-		UInt slashPos = path.lastIndexOf('/');
-        UInt backslashPos = path.lastIndexOf('\\');
-
-        if (slashPos == -1) return backslashPos;
-        if (backslashPos == -1) return slashPos;
-
-        UInt pos = slashPos;
-        if (backslashPos > slashPos)
-            pos = backslashPos;
-
-        return pos;
+#ifdef _WIN32
+        // https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-deletefilea
+        if (DeleteFileA(fileName.getBuffer()))
+        {
+            return SLANG_OK;
+        }
+        return SLANG_FAIL;
+#else
+        // https://linux.die.net/man/3/remove
+        if (::remove(fileName.getBuffer()) == 0)
+        {
+            return SLANG_OK;
+        }
+        return SLANG_FAIL;
+#endif
     }
 
-	String Path::getFileName(const String& path)
-	{
-        UInt pos = findLastSeparator(path);
-        if (pos != -1)
+
+#ifdef _WIN32
+    /* static */SlangResult File::generateTemporary(const UnownedStringSlice& inPrefix, Slang::String& outFileName)
+    {
+        // https://docs.microsoft.com/en-us/windows/win32/fileio/creating-and-using-a-temporary-file
+
+        String tempPath;
+        {
+            int count = MAX_PATH + 1;
+            while (true)
+            {
+                char* chars = tempPath.prepareForAppend(count);
+                //  Gets the temp path env string (no guarantee it's a valid path).
+                // https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppatha
+                DWORD ret = ::GetTempPathA(count - 1, chars);
+                if (ret == 0)
+                {
+                    return SLANG_FAIL;
+                }
+                if (ret > DWORD(count - 1))
+                {
+                    count = ret + 1;
+                    continue;
+                }
+                tempPath.appendInPlace(chars, count);
+                break;
+            }
+        }
+
+        if (!File::exists(tempPath))
+        {
+            return SLANG_FAIL;
+        }
+
+        const String prefix(inPrefix);
+        String tempFileName;
+
+        {
+            int count = MAX_PATH + 1;
+            char* chars = tempFileName.prepareForAppend(count);
+
+            // https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettempfilenamea
+            //  Generates a temporary file name. 
+            DWORD ret = ::GetTempFileNameA(tempPath.getBuffer(), prefix.getBuffer(), 0, chars);
+
+            if (ret == 0)
+            {
+                return SLANG_FAIL;
+            }
+            tempFileName.appendInPlace(chars, ::strlen(chars));
+        }
+
+        outFileName = tempFileName;
+        return SLANG_OK;
+    }
+#else
+    /* static */SlangResult File::generateTemporary(const UnownedStringSlice& inPrefix, Slang::String& outFileName)
+    {
+        StringBuilder builder;
+        builder << "/tmp/" << inPrefix << "-XXXXXX";
+
+        List<char> buffer;
+        buffer.setCount(builder.getLength() + 1);
+        ::memcpy(buffer.getBuffer(), builder.getBuffer(), builder.getLength());
+        buffer[builder.getLength()] = 0;
+
+        int handle = mkstemp(buffer.getBuffer());
+        if (handle == -1)
+        {
+            return SLANG_FAIL;
+        }
+
+        // Close the handle..
+        close(handle);
+
+        outFileName = buffer.getBuffer();
+        return SLANG_OK;
+    }
+#endif
+
+    /* static */SlangResult File::makeExecutable(const String& fileName)
+    {
+#ifdef _WIN32
+        SLANG_UNUSED(fileName);
+        // As long as file extension is executable, it can be executed
+        return SLANG_OK;
+#else
+        const int ret = ::chmod(fileName.getBuffer(), S_IXUSR);
+        return (ret == 0) ? SLANG_OK : SLANG_FAIL;
+#endif
+    }
+
+
+    bool File::exists(const String& fileName)
+    {
+#ifdef _WIN32
+        struct _stat32 statVar;
+        return ::_wstat32(((String)fileName).toWString(), &statVar) != -1;
+#else
+        struct stat statVar;
+        return ::stat(fileName.getBuffer(), &statVar) == 0;
+#endif
+    }
+
+    String Path::replaceExt(const String& path, const char* newExt)
+    {
+        StringBuilder sb(path.getLength() + 10);
+        Index dotPos = findExtIndex(path);
+
+        if (dotPos < 0)
+            dotPos = path.getLength();
+        sb.Append(path.getBuffer(), dotPos);
+        sb.Append('.');
+        sb.Append(newExt);
+        return sb.ProduceString();
+    }
+
+    /* static */ Index Path::findLastSeparatorIndex(String const& path)
+    {
+        const char* chars = path.getBuffer();
+        for (Index i = path.getLength() - 1; i >= 0; --i)
+        {
+            const char c = chars[i];
+            if (c == '/' || c == '\\')
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /* static */Index Path::findExtIndex(String const& path)
+    {
+        const Index sepIndex = findLastSeparatorIndex(path);
+
+        const Index dotIndex = path.lastIndexOf('.');
+        if (sepIndex >= 0)
+        {
+            // Index has to be in the last part of the path
+            return (dotIndex > sepIndex) ? dotIndex : -1;
+        }
+        else
+        {
+            return dotIndex;
+        }
+    }
+
+    String Path::getFileName(const String& path)
+    {
+        Index pos = findLastSeparatorIndex(path);
+        if (pos >= 0)
         {
             pos = pos + 1;
             return path.subString(pos, path.getLength() - pos);
@@ -89,57 +217,96 @@ namespace Slang
         {
             return path;
         }
-	}
-	String Path::getFileNameWithoutExt(const String& path)
-	{
-        String fileName = getFileName(path);
-		UInt dotPos = fileName.lastIndexOf('.');
-		if (dotPos == -1)
-            return fileName;
-		return fileName.subString(0, dotPos);
-	}
-	String Path::getFileExt(const String& path)
-	{
-		UInt dotPos = path.lastIndexOf('.');
-		if (dotPos != -1)
-			return path.subString(dotPos+1, path.getLength()-dotPos-1);
-		else
-			return "";
-	}
-	String Path::getParentDirectory(const String& path)
-	{
-        UInt pos = findLastSeparator(path);
-		if (pos != -1)
-			return path.subString(0, pos);
-		else
-			return "";
-	}
-	String Path::combine(const String& path1, const String& path2)
-	{
-		if (path1.getLength() == 0) return path2;
-		StringBuilder sb(path1.getLength()+path2.getLength()+2);
-		sb.Append(path1);
-		if (!path1.endsWith('\\') && !path1.endsWith('/'))
-			sb.Append(kPathDelimiter);
-		sb.Append(path2);
-		return sb.ProduceString();
-	}
-	String Path::combine(const String& path1, const String& path2, const String& path3)
-	{
-		StringBuilder sb(path1.getLength()+path2.getLength()+path3.getLength()+3);
-		sb.Append(path1);
-		if (!path1.endsWith('\\') && !path1.endsWith('/'))
-			sb.Append(kPathDelimiter);
-		sb.Append(path2);
-		if (!path2.endsWith('\\') && !path2.endsWith('/'))
-			sb.Append(kPathDelimiter);
-		sb.Append(path3);
-		return sb.ProduceString();
-	}
+    }
+
+    /* static */String Path::getFileNameWithoutExt(const String& path)
+    {
+        Index sepIndex = findLastSeparatorIndex(path);
+        sepIndex = (sepIndex < 0) ? 0 : (sepIndex + 1);
+        Index dotIndex = findExtIndex(path);
+        dotIndex = (dotIndex < 0) ? path.getLength() : dotIndex;
+
+        return path.subString(sepIndex, dotIndex - sepIndex);
+    }
+
+    /* static*/ String Path::getPathWithoutExt(const String& path)
+    {
+        Index dotPos = findExtIndex(path);
+        if (dotPos >= 0)
+            return path.subString(0, dotPos);
+        else
+            return path;
+    }
+
+    String Path::getPathExt(const String& path)
+    {
+        const Index dotPos = findExtIndex(path);
+        if (dotPos >= 0)
+            return path.subString(dotPos + 1, path.getLength() - dotPos - 1);
+        else
+            return "";
+    }
+
+    String Path::getParentDirectory(const String& path)
+    {
+        Index pos = findLastSeparatorIndex(path);
+        if (pos >= 0)
+            return path.subString(0, pos);
+        else
+            return "";
+    }
+    
+    /* static */void Path::append(StringBuilder& ioBuilder, const UnownedStringSlice& path)
+    {
+        if (ioBuilder.getLength() == 0)
+        {
+            ioBuilder.append(path);
+            return;
+        }
+        if (path.getLength() > 0)
+        {
+            // If ioBuilder doesn't end in a delimiter, add one
+            if (!isDelimiter(ioBuilder[ioBuilder.getLength() - 1]))
+            {
+                ioBuilder.append(kPathDelimiter);
+            }
+            // Check that path doesn't start with a path delimiter 
+            SLANG_ASSERT(!isDelimiter(path[0]));
+            // Append the path
+            ioBuilder.append(path);
+        }
+    }
+
+    /* static */void Path::combineIntoBuilder(const UnownedStringSlice& path1, const UnownedStringSlice& path2, StringBuilder& outBuilder)
+    {
+        outBuilder.Clear();
+        outBuilder.Append(path1);
+        append(outBuilder, path2);
+    }
+
+    String Path::combine(const String& path1, const String& path2)
+    {
+        if (path1.getLength() == 0)
+        {
+            return path2;
+        }
+
+        StringBuilder sb;
+        combineIntoBuilder(path1.getUnownedSlice(), path2.getUnownedSlice(), sb);
+        return sb.ProduceString();
+    }
+    String Path::combine(const String& path1, const String& path2, const String& path3)
+    {
+        StringBuilder sb;
+        sb.append(path1);
+        append(sb, path2.getUnownedSlice());
+        append(sb, path3.getUnownedSlice());
+        return sb.ProduceString();
+    }
 
     /* static */ bool Path::isDriveSpecification(const UnownedStringSlice& element)
     {
-        switch (element.size())
+        switch (element.getLength())
         {
             case 0:     
             {
@@ -167,14 +334,14 @@ namespace Slang
 
     /* static */bool Path::isAbsolute(const UnownedStringSlice& path)
     {
-        if (path.size() > 0 && isDelimiter(path[0]))
+        if (path.getLength() > 0 && isDelimiter(path[0]))
         {
             return true;
         }
 
 #if SLANG_WINDOWS_FAMILY
         // Check for the \\ network drive style
-        if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\')
+        if (path.getLength() >= 2 && path[0] == '\\' && path[1] == '\\')
         {
             return true;
         }
@@ -209,7 +376,7 @@ namespace Slang
         }
 
         // Okay if the end is empty. And we aren't with a spec like // or c:/ , then drop the final slash 
-        if (splitOut.getCount() > 1 && splitOut.getLast().size() == 0)
+        if (splitOut.getCount() > 1 && splitOut.getLast().getLength() == 0)
         {
             if (splitOut.getCount() == 2 && isDriveSpecification(splitOut[0]))
             {
@@ -235,63 +402,67 @@ namespace Slang
         return false;
     }
 
-    /* static */String Path::simplify(const UnownedStringSlice& path)
+    /* static */void Path::simplify(List<UnownedStringSlice>& ioSplit)
     {
-        List<UnownedStringSlice> splitPath;
-        split(path, splitPath);
-
         // Strictly speaking we could do something about case on platforms like window, but here we won't worry about that
-        for (Index i = 0; i < splitPath.getCount(); i++)
+        for (Index i = 0; i < ioSplit.getCount(); i++)
         {
-            const UnownedStringSlice& cur = splitPath[i];
-            if (cur == "." && splitPath.getCount() > 1)
+            const UnownedStringSlice& cur = ioSplit[i];
+            if (cur == "." && ioSplit.getCount() > 1)
             {
                 // Just remove it 
-                splitPath.removeAt(i);
+                ioSplit.removeAt(i);
                 i--;
             }
             else if (cur == ".." && i > 0)
             {
                 // Can we remove this and the one before ?
-                UnownedStringSlice& before = splitPath[i - 1];
+                UnownedStringSlice& before = ioSplit[i - 1];
                 if (before == ".." || (i == 1 && isDriveSpecification(before)))
                 {
-                    // Can't do it
+                    // Can't do it, but we allow relative, so just leave for now
                     continue;
                 }
-                splitPath.removeRange(i - 1, 2);
+                ioSplit.removeRange(i - 1, 2);
                 i -= 2;
             }
         }
-
-        // If its empty it must be .
-        if (splitPath.getCount() == 0)
-        {
-            splitPath.add(UnownedStringSlice::fromLiteral("."));
-        }
-   
-        // Reconstruct the string
-        StringBuilder builder;
-        for (Index i = 0; i < splitPath.getCount(); i++)
-        {
-            if (i > 0)
-            {
-                builder.Append(kPathDelimiter);
-            }
-            builder.Append(splitPath[i]);
-        }
-
-        return builder;
     }
 
-	bool Path::createDirectory(const String& path)
-	{
+    /* static */void Path::join(const UnownedStringSlice* slices, Index count, StringBuilder& out)
+    {
+        out.Clear();
+
+        if (count == 0)
+        {
+            out << ".";
+            return;
+        }
+
+        StringUtil::join(slices, count, kPathDelimiter, out);
+    }
+
+
+    /* static */String Path::simplify(const UnownedStringSlice& path)
+    {
+        List<UnownedStringSlice> splitPath;
+        split(path, splitPath);
+        simplify(splitPath);
+
+        // Reconstruct the string
+        StringBuilder builder;
+        join(splitPath.getBuffer(), splitPath.getCount(), builder);
+        return builder.ToString();
+    }
+
+    bool Path::createDirectory(const String& path)
+    {
 #if defined(_WIN32)
-		return _wmkdir(path.toWString()) == 0;
+        return _wmkdir(path.toWString()) == 0;
 #else 
-		return mkdir(path.getBuffer(), 0777) == 0;
+        return mkdir(path.getBuffer(), 0777) == 0;
 #endif
-	}
+    }
 
     /* static */SlangResult Path::getPathType(const String& path, SlangPathType* pathTypeOut)
     {
@@ -391,6 +562,140 @@ namespace Slang
 #   endif
 #endif
     }
+
+    SlangResult Path::remove(const String& path)
+    {
+#ifdef _WIN32
+        // Need to determine if its a file or directory
+
+        SlangPathType pathType;
+        SLANG_RETURN_ON_FAIL(getPathType(path, &pathType));
+
+        
+        switch (pathType)
+        {
+            case SLANG_PATH_TYPE_FILE:
+            {
+                // https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-deletefilea
+                if (DeleteFileA(path.getBuffer()))
+                {
+                    return SLANG_OK;
+                }
+                break;
+            }
+            case SLANG_PATH_TYPE_DIRECTORY:
+            {
+                // https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-removedirectorya
+                if (RemoveDirectoryA(path.getBuffer()))
+                {
+                    return SLANG_OK;
+                }
+                break;
+            }
+            default: break;
+        }
+
+        return SLANG_FAIL;
+#else
+        // https://linux.die.net/man/3/remove
+        if (::remove(path.getBuffer()) == 0)
+        {
+            return SLANG_OK;
+        }
+        return SLANG_FAIL;
+#endif
+    }
+
+#if defined(_WIN32)
+    /* static */SlangResult Path::find(const String& directoryPath, const char* pattern, Visitor* visitor)
+    {
+        pattern = pattern ? pattern : "*";
+        String searchPath = Path::combine(directoryPath, pattern);
+
+        WIN32_FIND_DATAW fileData;
+
+        HANDLE findHandle = FindFirstFileW(searchPath.toWString(), &fileData);
+        if (!findHandle)
+        {
+            return SLANG_E_NOT_FOUND;
+        }
+
+        do
+        {
+            if (!((wcscmp(fileData.cFileName, L".") == 0) ||
+                  (wcscmp(fileData.cFileName, L"..") == 0)))
+            {
+                const Type type = (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? Type::Directory : Type::File;
+
+                String filename = String::fromWString(fileData.cFileName);
+                visitor->accept(type, filename.getUnownedSlice());
+            }
+        }
+        while (FindNextFileW(findHandle, &fileData) != 0);
+
+         ::FindClose(findHandle);
+         return SLANG_OK;
+    }
+#else
+    /* static */SlangResult Path::find(const String& directoryPath, const char* pattern, Visitor* visitor)
+    {
+        DIR* directory = opendir(directoryPath.getBuffer());
+        
+        if (!directory)
+        {
+            return SLANG_E_NOT_FOUND;
+        }
+
+        StringBuilder builder;
+        for (;;)
+        {
+            dirent* entry = readdir(directory);
+            if (entry == nullptr)
+            {
+                break;
+            }
+
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0)
+            {
+                continue;
+            }
+
+            // If there is a pattern, check if it matches, and if it doesn't ignore it
+            if (pattern && fnmatch(pattern, entry->d_name, 0) != 0)
+            {
+                continue;
+            }
+
+            const UnownedStringSlice filename(entry->d_name);
+
+            // Produce the full path, to do stat
+            Path::combineIntoBuilder(directoryPath.getUnownedSlice(), filename, builder);
+
+            //    fprintf(stderr, "stat(%s)\n", path.getBuffer());
+            struct stat fileInfo;
+            if (stat(builder.getBuffer(), &fileInfo) != 0)
+            {
+                continue;
+            }
+
+            Type type = Type::Unknown;
+            if (S_ISDIR(fileInfo.st_mode))
+            {
+                type = Type::Directory;
+            }
+            else if (S_ISREG(fileInfo.st_mode))
+            {
+                type = Type::File;
+            }
+
+            visitor->accept(type, filename);
+        }
+
+        closedir(directory);
+        return SLANG_OK;
+    }
+#endif
 
     /// Gets the path to the executable that was invoked that led to the current threads execution
     /// If run from a shared library/dll will be the path of the executable that loaded said library
@@ -503,37 +808,104 @@ namespace Slang
 
     /* static */String Path::getExecutablePath()
     {
-        static String executablePath = _getExecutablePath();
-        return executablePath;
+        // TODO(JS): It would be better if we lazily evaluated this, and then returned the same string on subsequent calls, because it has to do
+        // a fair amount of work depending on target.
+        // This was how previous code worked, with a static variable. Unfortunately this led to a memory leak being reported - because reporting
+        // is done before a global variable is released.
+        // It would be good to have a mechanism that allows 'core' library source free memory in some controlled manner.
+        return _getExecutablePath();
     }
 
-	Slang::String File::readAllText(const Slang::String& fileName)
-	{
-		StreamReader reader(new FileStream(fileName, FileMode::Open, FileAccess::Read, FileShare::ReadWrite));
-		return reader.ReadToEnd();
-	}
+    Slang::String File::readAllText(const Slang::String& fileName)
+    {
+        StreamReader reader(new FileStream(fileName, FileMode::Open, FileAccess::Read, FileShare::ReadWrite));
+        return reader.ReadToEnd();
+    }
 
-	Slang::List<unsigned char> File::readAllBytes(const Slang::String& fileName)
-	{
-		RefPtr<FileStream> fs = new FileStream(fileName, FileMode::Open, FileAccess::Read, FileShare::ReadWrite);
-		List<unsigned char> buffer;
-		while (!fs->IsEnd())
-		{
-			unsigned char ch;
-			int read = (int)fs->Read(&ch, 1);
-			if (read)
-				buffer.add(ch);
-			else
-				break;
-		}
-		return _Move(buffer);
-	}
+    Slang::List<unsigned char> File::readAllBytes(const Slang::String& fileName)
+    {
+        RefPtr<FileStream> fs = new FileStream(fileName, FileMode::Open, FileAccess::Read, FileShare::ReadWrite);
+        List<unsigned char> buffer;
+        while (!fs->isEnd())
+        {
+            unsigned char ch;
+            int read = (int)fs->read(&ch, 1);
+            if (read)
+                buffer.add(ch);
+            else
+                break;
+        }
+        return _Move(buffer);
+    }
 
-	void File::writeAllText(const Slang::String& fileName, const Slang::String& text)
-	{
-		StreamWriter writer(new FileStream(fileName, FileMode::Create));
-		writer.Write(text);
-	}
+    SlangResult File::readAllBytes(const String& path, ScopedAllocation& out)
+    {
+        try
+        {
+            FileStream stream(path, FileMode::Open, FileAccess::Read, FileShare::ReadWrite);
+
+            const Int64 start = stream.getPosition();
+            stream.seek(SeekOrigin::End, 0);
+            const Int64 end = stream.getPosition();
+            stream.seek(SeekOrigin::Start, start);
+
+            const Int64 positionSizeInBytes = end - start;
+
+            if (UInt64(positionSizeInBytes) > UInt64(~size_t(0)))
+            {
+                // It's too large to fit in memory.
+                return SLANG_FAIL;
+            }
+
+            const size_t sizeInBytes = size_t(positionSizeInBytes);
+            void* data = out.allocate(sizeInBytes);
+            if (!data)
+            {
+                return SLANG_E_OUT_OF_MEMORY;
+            }
+
+            const size_t readSizeInBytes = stream.read(data, sizeInBytes);
+
+            // If not all read just return an error
+            if (sizeInBytes != readSizeInBytes)
+            {
+                return SLANG_FAIL;
+            }
+        }
+        catch (const IOException&)
+        {
+            return SLANG_FAIL;
+        }
+        return SLANG_OK;
+    }
+
+    SlangResult File::writeAllBytes(const String& path, const void* data, size_t size)
+    {
+        try
+        {
+            FileStream stream(path, FileMode::Create, FileAccess::Write, FileShare::ReadWrite);
+
+            const size_t writeSizeInBytes = stream.write(data, size);
+
+            // If not all written just return an error
+            if (size != writeSizeInBytes)
+            {
+                return SLANG_FAIL;
+            }
+        }
+        catch (const IOException&)
+        {
+            return SLANG_FAIL;
+        }
+        return SLANG_OK;
+    }
+    
+    void File::writeAllText(const Slang::String& fileName, const Slang::String& text)
+    {
+        StreamWriter writer(new FileStream(fileName, FileMode::Create));
+        writer.Write(text);
+    }
+
 
 }
 

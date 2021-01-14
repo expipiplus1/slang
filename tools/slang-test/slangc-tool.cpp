@@ -1,11 +1,10 @@
 // test-context.cpp
 #include "slangc-tool.h"
 
-#include "../../source/core/exception.h"
+#include "../../source/core/slang-exception.h"
+#include "../../source/core/slang-test-tool-util.h"
 
 using namespace Slang;
-
-SLANG_API void spSetCommandLineCompilerMode(SlangCompileRequest* request);
 
 static void _diagnosticCallback(char const* message, void* /*userData*/)
 {
@@ -14,17 +13,35 @@ static void _diagnosticCallback(char const* message, void* /*userData*/)
     stdError.flush();
 }
 
-SlangResult SlangCTool::innerMain(StdWriters* stdWriters, SlangSession* session, int argc, const char*const* argv)
+SlangResult SlangCTool::innerMain(StdWriters* stdWriters, slang::IGlobalSession* sharedSession, int argc, const char*const* argv)
 {
-    SlangCompileRequest* compileRequest = spCreateCompileRequest(session);
-    spSetDiagnosticCallback(compileRequest, &_diagnosticCallback, nullptr);
+    StdWriters::setSingleton(stdWriters);
 
-    spSetCommandLineCompilerMode(compileRequest);
+    // Assume we will used the shared session
+    ComPtr<slang::IGlobalSession> session(sharedSession);
+
+    // The sharedSession always has a pre-loaded stdlib.
+    // This differed test checks if the command line has an option to setup the stdlib.
+    // If so we *don't* use the sharedSession, and create a new stdlib-less session just for this compilation. 
+    if (TestToolUtil::hasDeferredStdLib(Index(argc - 1), argv + 1))
+    {
+        SLANG_RETURN_ON_FAIL(slang_createGlobalSessionWithoutStdLib(SLANG_API_VERSION, session.writeRef()));
+    }
+
+    ComPtr<slang::ICompileRequest> compileRequest;
+    SLANG_RETURN_ON_FAIL(session->createCompileRequest(compileRequest.writeRef()));
+
     // Do any app specific configuration
-    stdWriters->setRequestWriters(compileRequest);
+    for (int i = 0; i < SLANG_WRITER_CHANNEL_COUNT_OF; ++i)
+    {
+        compileRequest->setWriter(SlangWriterChannel(i), stdWriters->getWriter(i));
+    }
+
+    compileRequest->setDiagnosticCallback(&_diagnosticCallback, nullptr);
+    compileRequest->setCommandLineCompilerMode();
 
     {
-        const SlangResult res = spProcessCommandLineArguments(compileRequest, &argv[1], argc - 1);
+        const SlangResult res = compileRequest->processCommandLineArguments(&argv[1], argc - 1);
         if (SLANG_FAILED(res))
         {
             // TODO: print usage message
@@ -32,28 +49,26 @@ SlangResult SlangCTool::innerMain(StdWriters* stdWriters, SlangSession* session,
         }
     }
 
-    SlangResult res = SLANG_OK;
+    SlangResult compileRes = SLANG_OK;
 
 #ifndef _DEBUG
     try
 #endif
     {
         // Run the compiler (this will produce any diagnostics through SLANG_WRITER_TARGET_TYPE_DIAGNOSTIC).
-        res = spCompile(compileRequest);
+        compileRes = compileRequest->compile();
+
         // If the compilation failed, then get out of here...
         // Turn into an internal Result -> such that return code can be used to vary result to match previous behavior
-        res = SLANG_FAILED(res) ? SLANG_E_INTERNAL_FAIL : res;
+        compileRes = SLANG_FAILED(compileRes) ? SLANG_E_INTERNAL_FAIL : compileRes;
     }
 #ifndef _DEBUG
-    catch (Exception & e)
+    catch (const Exception& e)
     {
         StdWriters::getOut().print("internal compiler error: %S\n", e.Message.toWString().begin());
-        res = SLANG_FAIL;
+        compileRes = SLANG_FAIL;
     }
 #endif
 
-    // Now that we are done, clean up after ourselves
-    spDestroyCompileRequest(compileRequest);
-    return res;
+    return compileRes;
 }
-

@@ -1,7 +1,7 @@
-#ifndef SLANG_BYTE_ENCODE_UTIL_H
-#define SLANG_BYTE_ENCODE_UTIL_H
+#ifndef SLANG_CORE_BYTE_ENCODE_UTIL_H
+#define SLANG_CORE_BYTE_ENCODE_UTIL_H
 
-#include "list.h"
+#include "slang-list.h"
 
 namespace Slang {
 
@@ -9,6 +9,7 @@ struct ByteEncodeUtil
 {
     enum
     {
+        kMaxLiteEncodeUInt16 = 3, /// One byte for prefix, the remaining 2 bytes hold the value
         kMaxLiteEncodeUInt32 = 5,                   /// One byte for prefix, the remaining 4 bytes hold the value
         // Cut values for 'Lite' encoding style
         kLiteCut1 = 185,

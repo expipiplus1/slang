@@ -3,8 +3,14 @@
 
 #include <stdint.h>
 
+#ifndef SLANG_HANDLE_RESULT_FAIL
+#define SLANG_HANDLE_RESULT_FAIL(x) assert(!"failure")
+#endif
+
 #include "../../slang-com-helper.h"
 #include "../../source/core/slang-writer.h"
+
+#include "../../source/core/slang-process-util.h"
 
 #include "render.h"
 
@@ -34,7 +40,8 @@ struct Options
     {
         Graphics,
         Compute,
-        GraphicsCompute
+        GraphicsCompute,
+        RayTracing,
     };
 
     char const* appName = "render-test";
@@ -47,6 +54,7 @@ struct Options
         /// The set render type
     RendererType rendererType = RendererType::Unknown;
     InputLanguageID inputLanguageID = InputLanguageID::Slang;
+    SlangSourceLanguage sourceLanguage = SLANG_SOURCE_LANGUAGE_UNKNOWN;
 
         /// Can be used for overriding the profile
     const char* profileName = nullptr;
@@ -54,16 +62,28 @@ struct Options
     char const* slangArgs[kMaxSlangArgs];
     int slangArgCount = 0;
 
+    bool outputUsingType = false;
+
     bool useDXIL = false;
     bool onlyStartup = false;
 
+    bool useShaderObjects = false;
+
+    bool performanceProfile = false;
+
+    bool dontAddDefaultEntryPoints = false;
+
     Slang::List<Slang::String> renderFeatures;          /// Required render features for this test to run
 
+    Slang::List<Slang::CommandLine::Arg> compileArgs;
+
     Slang::String adapter;                              ///< The adapter to use either name or index
+
+    uint32_t computeDispatchSize[3] = { 1, 1, 1 };
+
+    Slang::String nvapiExtnSlot;                               ///< The nvapiRegister to use.
+
+    static SlangResult parse(int argc, const char*const* argv, Slang::WriterHelper stdError, Options& outOptions);
 };
-
-extern Options gOptions;
-
-SlangResult parseOptions(int argc, const char*const* argv, Slang::WriterHelper stdError);
 
 } // renderer_test

@@ -1,36 +1,95 @@
-#ifndef CORE_LIB_IO_H
-#define CORE_LIB_IO_H
+#ifndef SLANG_CORE_IO_H
+#define SLANG_CORE_IO_H
 
 #include "slang-string.h"
-#include "stream.h"
-#include "text-io.h"
-#include "secure-crt.h"
+#include "slang-stream.h"
+#include "slang-text-io.h"
+#include "slang-secure-crt.h"
+#include "slang-blob.h"
 
 namespace Slang
 {
-	class File
-	{
-	public:
-		static bool exists(const Slang::String& fileName);
-		static Slang::String readAllText(const Slang::String& fileName);
-		static Slang::List<unsigned char> readAllBytes(const Slang::String& fileName);
-		static void writeAllText(const Slang::String& fileName, const Slang::String& text);
-	};
+    class File
+    {
+    public:
+        static bool exists(const String& fileName);
 
-	class Path
-	{
-	public:
-		static const char kPathDelimiter = '/';
+        static String readAllText(const String& fileName);
 
-		static String truncateExt(const String& path);
-		static String replaceExt(const String& path, const char* newExt);
-		static String getFileName(const String& path);
-		static String getFileNameWithoutExt(const String& path);
-		static String getFileExt(const String& path);
-		static String getParentDirectory(const String& path);
-		static String combine(const String& path1, const String& path2);
-		static String combine(const String& path1, const String& path2, const String& path3);
-		static bool createDirectory(const String& path);
+        static List<unsigned char> readAllBytes(const String& fileName);
+        static SlangResult readAllBytes(const String& fileName, ScopedAllocation& out);
+
+        static void writeAllText(const String& fileName, const String& text);
+
+        static SlangResult writeAllBytes(const String& fileName, const void* data, size_t size);
+        
+        static SlangResult remove(const String& fileName);
+
+        static SlangResult makeExecutable(const String& fileName);
+
+        static SlangResult generateTemporary(const UnownedStringSlice& prefix, String& outFileName);
+    };
+
+    class Path
+    {
+    public:
+
+        enum class Type
+        {
+            Unknown,
+            File,
+            Directory,
+        };
+
+        typedef uint32_t TypeFlags;
+        struct TypeFlag
+        {
+            enum Enum : TypeFlags
+            {
+                Unknown = TypeFlags(1) << int(Type::Unknown),
+                File = TypeFlags(1) << int(Type::File),
+                Directory = TypeFlags(1) << int(Type::Directory),
+            };
+        };
+
+        class Visitor
+        {
+        public:
+            virtual void accept(Type type, const UnownedStringSlice& filename) = 0;
+        };
+
+        static const char kPathDelimiter = '/';
+
+            /// Finds all all the items in the specified directory, that matches the pattern.
+            ///
+            /// @param directoryPath The directory to do the search in. If the directory is not found, SLANG_E_NOT_FOUND is returned
+            /// @param pattern. The pattern to match against. The pattern matching is targtet specific (ie window matching is different to linux/unix). Passing nullptr means no matching.
+            /// @return is SLANG_E_NOT_FOUND if the directoryPath is not found
+        static SlangResult find(const String& directoryPath, const char* pattern, Visitor* visitor);
+
+            /// Returns -1 if no separator is found
+        static Index findLastSeparatorIndex(String const& path);
+            /// Finds the index of the last dot in a path, else returns -1
+        static Index findExtIndex(String const& path);
+
+        static String replaceExt(const String& path, const char* newExt);
+        static String getFileName(const String& path);
+        static String getPathWithoutExt(const String& path);
+        static String getPathExt(const String& path);
+        static String getParentDirectory(const String& path);
+
+        static String getFileNameWithoutExt(const String& path);
+
+        static String combine(const String& path1, const String& path2);
+        static String combine(const String& path1, const String& path2, const String& path3);
+
+            /// Combine path sections and store the result in outBuilder
+        static void combineIntoBuilder(const UnownedStringSlice& path1, const UnownedStringSlice& path2, StringBuilder& outBuilder);
+
+            /// Append a path, taking into account path separators onto the end of ioBuilder 
+        static void append(StringBuilder& ioBuilder, const UnownedStringSlice& path);
+
+        static bool createDirectory(const String& path);
 
             /// Accept either style of delimiter
         SLANG_FORCE_INLINE static bool isDelimiter(char c) { return c == '/' || c == '\\'; }
@@ -44,6 +103,12 @@ namespace Slang
             /// Strips .. and . as much as it can 
         static String simplify(const UnownedStringSlice& path);
         static String simplify(const String& path) { return simplify(path.getUnownedSlice()); }
+
+            /// Simplifies the path split up
+        static void simplify(List<UnownedStringSlice>& ioSplit);
+
+            /// Join the parts of the path to produce an output path
+        static void join(const UnownedStringSlice* slices, Index count, StringBuilder& out);
 
             /// Returns true if the path is absolute
         static bool isAbsolute(const UnownedStringSlice& path);
@@ -75,7 +140,69 @@ namespace Slang
             /// @param path Path to extract first element from
             /// @return The first element of the path, or empty 
         static UnownedStringSlice getFirstElement(const UnownedStringSlice& path);
-	};
+
+            /// Remove a file or directory at specified path. The directory must be empty for it to be removed
+            /// @param path
+            /// @return SLANG_OK if file or directory is removed
+        static SlangResult remove(const String& path);
+    };
+
+    // Helper class to clean up temporary files on dtor
+    class TemporaryFileSet: public RefObject
+    {
+    public:
+        typedef RefObject Super;
+        typedef TemporaryFileSet ThisType;
+
+        void remove(const String& path)
+        {
+            if (const Index index = m_paths.indexOf(path) >= 0)
+            {
+                m_paths.removeAt(index);
+            }
+        }
+
+        void add(const String& path)
+        {
+            if (m_paths.indexOf(path) < 0)
+            {
+                m_paths.add(path);
+            }
+        }
+        void add(const List<String>& paths)
+        {
+            for (const auto& path : paths)
+            {
+                add(path);
+            }
+        }
+        void clear()
+        {
+            m_paths.clear();
+        }
+
+        void swapWith(ThisType& rhs)
+        {
+            m_paths.swapWith(rhs.m_paths);
+        }
+
+        ~TemporaryFileSet()
+        {
+            for (const auto& path : m_paths)
+            {
+                File::remove(path);
+            }
+        }
+            /// Default Ctor
+        TemporaryFileSet() {}
+
+        List<String> m_paths;
+    
+    private:
+        // Disable ctor/assignment
+        TemporaryFileSet(const ThisType& rhs) = delete;
+        void operator=(const ThisType& rhs) = delete;
+    };
 }
 
 #endif

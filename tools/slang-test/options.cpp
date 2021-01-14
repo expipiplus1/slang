@@ -1,8 +1,8 @@
 // test-context.cpp
 #include "options.h"
 
-#include "os.h"
 #include "../../source/core/slang-string-util.h"
+#include "../../source/core/slang-io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,6 +132,14 @@ static bool _isSubCommand(const char* arg)
         else if (strcmp(arg, "-v") == 0)
         {
             optionsOut->shouldBeVerbose = true;
+        }
+        else if (strcmp(arg, "-hide-ignored") == 0)
+        {
+            optionsOut->hideIgnored = true;
+        }
+        else if (strcmp(arg, "-api-only") == 0)
+        {
+            optionsOut->apiOnly = true;
         }
         else if (strcmp(arg, "-verbose-paths") == 0)
         {

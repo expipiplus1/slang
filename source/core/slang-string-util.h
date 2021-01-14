@@ -1,8 +1,8 @@
-#ifndef SLANG_STRING_UTIL_H
-#define SLANG_STRING_UTIL_H
+#ifndef SLANG_CORE_STRING_UTIL_H
+#define SLANG_CORE_STRING_UTIL_H
 
 #include "slang-string.h"
-#include "list.h"
+#include "slang-list.h"
 
 #include <stdarg.h>
 
@@ -11,35 +11,31 @@
 
 namespace Slang {
 
-/** A blob that uses a `String` for its storage.
-*/
-class StringBlob : public ISlangBlob, public RefObject
-{
-public:
-    // ISlangUnknown
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-
-        // ISlangBlob
-    SLANG_NO_THROW void const* SLANG_MCALL getBufferPointer() SLANG_OVERRIDE { return m_string.getBuffer(); }
-    SLANG_NO_THROW size_t SLANG_MCALL getBufferSize() SLANG_OVERRIDE { return m_string.getLength(); }
-
-        /// Get the contained string
-    SLANG_FORCE_INLINE const String& getString() const { return m_string; }
-
-    explicit StringBlob(String const& string)
-        : m_string(string)
-    {}
-
-protected:
-    ISlangUnknown* getInterface(const Guid& guid);
-    String m_string;
-};
-
 struct StringUtil
 {
+    typedef bool (*EqualFn)(const UnownedStringSlice& a, const UnownedStringSlice& b);
+
+        /// True if the splits of a and b (via splitChar) are all equal as compared with the equalFn function
+    static bool areAllEqualWithSplit(const UnownedStringSlice& a, const UnownedStringSlice& b, char splitChar, EqualFn equalFn);
+
+        /// True if all slices in match are all equal as compared with the equalFn function
+    static bool areAllEqual(const List<UnownedStringSlice>& a, const List<UnownedStringSlice>& b, EqualFn equalFn);
+
         /// Split in, by specified splitChar into slices out
         /// Slices contents will directly address into in, so contents will only stay valid as long as in does.
     static void split(const UnownedStringSlice& in, char splitChar, List<UnownedStringSlice>& slicesOut);
+
+        /// Splits in into outSlices, up to maxSlices. May not consume all of in (for example if it runs out of space).
+    static Index split(const UnownedStringSlice& in, char splitChar, Index maxSlices, UnownedStringSlice* outSlices);
+        /// Splits into outSlices up to maxSlices. Returns SLANG_OK if of 'in' consumed.
+    static SlangResult split(const UnownedStringSlice& in, char splitChar, Index maxSlices, UnownedStringSlice* outSlices, Index& outSlicesCount);
+
+        /// Append the joining of in items, separated by 'separator' onto out
+    static void join(const List<String>& in, char separator, StringBuilder& out);
+    static void join(const List<String>& in, const UnownedStringSlice& separator, StringBuilder& out);
+
+    static void join(const UnownedStringSlice* values, Index valueCount, char separator, StringBuilder& out);
+    static void join(const UnownedStringSlice* values, Index valueCount, const UnownedStringSlice& separator, StringBuilder& out);
 
         /// Equivalent to doing a split and then finding the index of 'find' on the array
         /// Returns -1 if not found
@@ -77,6 +73,64 @@ struct StringUtil
     
         /// Create a blob from a string
     static ComPtr<ISlangBlob> createStringBlob(const String& string);
+
+        /// Extracts a line and stores the remaining text in ioText, and the line in outLine. Returns true if has a line. 
+        /// 
+        /// As well as indicating end of text with the return value, at the end of all the text a 'special' null UnownedStringSlice with a null 'begin'
+        /// pointer is also returned as the outLine.
+        /// ioText will be modified to contain the remaining text, starting at the beginning of the next line.
+        /// As an empty final line is still a line, the special null UnownedStringSlice is the last value ioText after the last valid line is returned.
+        /// 
+        /// NOTE! That behavior is as if line terminators (like \n) act as separators. Thus input of "\n" will return *two* lines - an empty line
+        /// before and then after the \n. 
+    static bool extractLine(UnownedStringSlice& ioText, UnownedStringSlice& outLine);
+    
+        /// Given text, splits into lines stored in outLines. NOTE! That lines is only valid as long as textIn remains valid
+    static void calcLines(const UnownedStringSlice& textIn, List<UnownedStringSlice>& lines);
+
+        /// Equal if the lines are equal (in effect a way to ignore differences in line breaks)
+    static bool areLinesEqual(const UnownedStringSlice& a, const UnownedStringSlice& b);
+
+        /// Convert in to int. Returns SLANG_FAIL on error
+    static SlangResult parseInt(const UnownedStringSlice& in, Int& outValue);
+
+};
+
+/* A helper class that allows parsing of lines from text with iteration. Uses StringUtil::extractLine for the actual underlying implementation. */
+class LineParser
+{
+public:
+    struct Iterator
+    {
+        const UnownedStringSlice& operator*() const { return m_line; }
+        const UnownedStringSlice* operator->() const { return &m_line; }
+        Iterator& operator++()
+        {
+            StringUtil::extractLine(m_remaining, m_line);
+            return *this;
+        }
+        Iterator operator++(int) { Iterator rs = *this; operator++(); return rs; }
+
+            /// Equal if both are at the same m_line address exactly. Handles termination case correctly where line.begin() == nullptr.
+        bool operator==(const Iterator& rhs) const { return m_line.begin() == rhs.m_line.begin();  }
+        bool operator !=(const Iterator& rhs) const { return !(*this == rhs); }
+
+            /// Ctor
+        Iterator(const UnownedStringSlice& line, const UnownedStringSlice& remaining) : m_line(line), m_remaining(remaining) {}
+
+    protected:
+        UnownedStringSlice m_line;
+        UnownedStringSlice m_remaining;
+    };
+
+    Iterator begin() const { UnownedStringSlice remaining(m_text), line;  StringUtil::extractLine(remaining, line); return Iterator(line, remaining);  }
+    Iterator end() const { UnownedStringSlice term(nullptr, nullptr); return Iterator(term, term); }
+
+        /// Ctor
+    LineParser(const UnownedStringSlice& text) : m_text(text) {}
+
+protected:
+    UnownedStringSlice m_text;
 };
 
 } // namespace Slang

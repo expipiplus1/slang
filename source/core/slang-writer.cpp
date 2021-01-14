@@ -1,6 +1,8 @@
+#define  _CRT_SECURE_NO_WARNINGS
+
 #include "slang-writer.h"
 
-#include "platform.h"
+#include "slang-platform.h"
 #include "slang-string-util.h"
 
 // Includes to allow us to control console
@@ -53,6 +55,11 @@ SlangResult WriterHelper::print(const char* format, ...)
 SlangResult WriterHelper::put(const char* text)
 {
     return m_writer->write(text, ::strlen(text));
+}
+
+SlangResult WriterHelper::put(const UnownedStringSlice& text)
+{
+    return m_writer->write(text.begin(), text.getLength());
 }
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!! BaseWriter !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
@@ -165,6 +172,21 @@ SlangResult FileWriter::setMode(SlangWriterMode mode)
     }
     return SLANG_FAIL;
 }
+
+/* static */SlangResult FileWriter::create(const char* filePath, const char* writeOptions, WriterFlags flags, ComPtr<ISlangWriter>& outWriter)
+{
+    flags &= ~WriterFlag::IsUnowned;
+
+    FILE* file = fopen(filePath, writeOptions);
+    if (!file)
+    {
+        return SLANG_E_CANNOT_OPEN;
+    }
+
+    outWriter = new FileWriter(file, flags);
+    return SLANG_OK;
+}
+
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!! StringWriter !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 

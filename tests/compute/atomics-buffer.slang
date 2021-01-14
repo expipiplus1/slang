@@ -1,13 +1,16 @@
 // atomics-buffer.slang
 
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute
+//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12
+// Doesn't work on VK - GLSL output doesn't replace InterlockedAdd.  
+//DISABLE_TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -vk
+// Cannot work on CUDA, as outputBuffer becomes a CUsurfObject - which do not appear to have atomics available.
+// If the buffer was a StructuredBuffer this would work on CUDA.
+//DISABLE_TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -cuda
+// Atomics not available on CPU currently
+//DISABLE_TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -cpu
 
-// Note: not enabling D3D12 test yet because change
-// was developed on a machine that can run D3D12
-//
-//TEST_DISABLED(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12
-
-//TEST_INPUT:ubuffer(format=R_UInt32, data=[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]):dxbinding(0),glbinding(0),out
+//TEST_INPUT:ubuffer(format=R_UInt32, data=[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]):out,name outputBuffer
 
 RWBuffer<uint> outputBuffer;
 

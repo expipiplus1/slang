@@ -1,6 +1,8 @@
 result code = 0
 standard error = {
-[entryPoint]
+### LOWER-TO-IR:
+[entryPoint(6, "main")]
+[numThreads(1, 1, 1)]
 [export("_S3tu04mainp1puV")]
 [nameHint("main")]
 func %main	: Func(Void, UInt)
@@ -10,6 +12,8 @@ block %1(
 		param %tid	: UInt):
 	return_void
 }
+global_hashed_string_literals("Hello \t\n\0x083 World")
+###
 }
 standard output = {
 }

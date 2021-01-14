@@ -7,7 +7,7 @@ namespace renderer_test {
 using namespace Slang;
 using Slang::Result;
 
-void BindingStateImpl::apply(Renderer* renderer, PipelineType pipelineType)
+void BindingStateImpl::apply(IRenderer* renderer, PipelineType pipelineType)
 {
     renderer->setDescriptorSet(
         pipelineType,
@@ -16,14 +16,23 @@ void BindingStateImpl::apply(Renderer* renderer, PipelineType pipelineType)
         descriptorSet);
 }
 
-/* static */Result ShaderRendererUtil::generateTextureResource(const InputTextureDesc& inputDesc, int bindFlags, Renderer* renderer, RefPtr<TextureResource>& textureOut)
+/* static */ Result ShaderRendererUtil::generateTextureResource(
+    const InputTextureDesc& inputDesc,
+    int bindFlags,
+    IRenderer* renderer,
+    RefPtr<TextureResource>& textureOut)
 {
     TextureData texData;
     generateTextureData(texData, inputDesc);
     return createTextureResource(inputDesc, texData, bindFlags, renderer, textureOut);
 }
 
-/* static */Result ShaderRendererUtil::createTextureResource(const InputTextureDesc& inputDesc, const TextureData& texData, int bindFlags, Renderer* renderer, RefPtr<TextureResource>& textureOut)
+/* static */ Result ShaderRendererUtil::createTextureResource(
+    const InputTextureDesc& inputDesc,
+    const TextureData& texData,
+    int bindFlags,
+    IRenderer* renderer,
+    RefPtr<TextureResource>& textureOut)
 {
     TextureResource::Desc textureResourceDesc;
     textureResourceDesc.init(Resource::Type::Unknown);
@@ -99,7 +108,13 @@ void BindingStateImpl::apply(Renderer* renderer, PipelineType pipelineType)
     return textureOut ? SLANG_OK : SLANG_FAIL;
 }
 
-/* static */Result ShaderRendererUtil::createBufferResource(const InputBufferDesc& inputDesc, bool isOutput, size_t bufferSize, const void* initData, Renderer* renderer, Slang::RefPtr<BufferResource>& bufferOut)
+/* static */ Result ShaderRendererUtil::createBufferResource(
+    const InputBufferDesc& inputDesc,
+    bool isOutput,
+    size_t bufferSize,
+    const void* initData,
+    IRenderer* renderer,
+    Slang::RefPtr<BufferResource>& bufferOut)
 {
     Resource::Usage initialUsage = Resource::Usage::GenericRead;
 
@@ -149,61 +164,17 @@ static SamplerState::Desc _calcSamplerDesc(const InputSamplerDesc& srcDesc)
     return dstDesc;
 }
 
-static RefPtr<SamplerState> _createSamplerState(
-    Renderer*               renderer,
+RefPtr<SamplerState> _createSamplerState(IRenderer* renderer,
     const InputSamplerDesc& srcDesc)
 {
     return renderer->createSamplerState(_calcSamplerDesc(srcDesc));
 }
 
-/* static */BindingStateImpl::RegisterRange ShaderRendererUtil::calcRegisterRange(Renderer* renderer, const ShaderInputLayoutEntry& entry)
-{
-    typedef BindingStateImpl::RegisterRange RegisterRange;
-
-    BindingStyle bindingStyle = RendererUtil::getBindingStyle(renderer->getRendererType());
-
-    switch (bindingStyle)
-    {
-        case BindingStyle::DirectX:
-        {
-            return RegisterRange::makeSingle(entry.hlslBinding);
-        }
-        case BindingStyle::Vulkan:
-        {
-            // USe OpenGls for now
-            // fallthru
-        }
-        case BindingStyle::OpenGl:
-        {
-            const int count = int(entry.glslBinding.getCount());
-
-            if (count <= 0)
-            {
-                break;
-            }
-
-            int baseIndex = entry.glslBinding[0];
-            // Make sure they are contiguous
-            for (Index i = 1; i < int(entry.glslBinding.getCount()); ++i)
-            {
-                if (baseIndex + i != entry.glslBinding[i])
-                {
-                    assert(!"Bindings must be contiguous");
-                    break;
-                }
-            }
-            return RegisterRange::makeRange(baseIndex, count);
-        }
-        /* case BindingStyle::Vulkan:
-        {
-        } */
-        default: break;
-    }
-    // Return invalid
-    return RegisterRange::makeInvalid();
-}
-
-/* static */Result ShaderRendererUtil::createBindingState(const ShaderInputLayout& layout, Renderer* renderer, BufferResource* addedConstantBuffer, BindingStateImpl** outBindingState)
+/* static */ Result ShaderRendererUtil::createBindingState(
+    const ShaderInputLayout& layout,
+    IRenderer* renderer,
+    BufferResource* addedConstantBuffer,
+    BindingStateImpl** outBindingState)
 {
     auto srcEntries = layout.entries.getBuffer();
     auto numEntries = layout.entries.getCount();
@@ -223,13 +194,7 @@ static RefPtr<SamplerState> _createSamplerState(
     for (Index i = 0; i < numEntries; i++)
     {
         const ShaderInputLayoutEntry& srcEntry = srcEntries[i];
-
-        const BindingStateImpl::RegisterRange registerSet = calcRegisterRange(renderer, srcEntry);
-        if (!registerSet.isValid())
-        {
-            assert(!"Couldn't find a binding");
-            return SLANG_FAIL;
-        }
+        SLANG_ASSERT(srcEntry.onlyCPULikeBinding == false);
 
         DescriptorSetLayout::SlotRangeDesc slotRangeDesc;
 
@@ -247,6 +212,18 @@ static RefPtr<SamplerState> _createSamplerState(
 
                     case InputBufferType::StorageBuffer:
                         slotRangeDesc.type = DescriptorSlotType::StorageBuffer;
+                        break;
+
+                    case InputBufferType::RootConstantBuffer:
+                        {
+                            // A root constant buffer maps to a root constant range
+                            // where the `count` of slots is equal to the number
+                            // of bytes of data.
+                            //
+                            Slang::UInt size = srcEntry.bufferData.getCount() * sizeof(srcEntry.bufferData[0]);
+                            slotRangeDesc.type = DescriptorSlotType::RootConstant;
+                            slotRangeDesc.count = size;
+                        }
                         break;
                     }
                 }
@@ -321,6 +298,20 @@ static RefPtr<SamplerState> _createSamplerState(
                 {
                     const InputBufferDesc& srcBuffer = srcEntry.bufferDesc;
                     const size_t bufferSize = srcEntry.bufferData.getCount() * sizeof(uint32_t);
+
+                    if( srcBuffer.type == InputBufferType::RootConstantBuffer )
+                    {
+                        // A root constant buffer at the HLSL/Slang level actually
+                        // maps to root constant data stored directly in the descriptor
+                        // set, and thus does not need/want us to allocate a buffer
+                        // to hold the data.
+                        //
+                        // Instead, we set the data directly here and then bypass
+                        // the logic that handles the buffer-backed cases below.
+                        //
+                        descriptorSet->setRootConstants(rangeIndex, 0, bufferSize, srcEntry.bufferData.getBuffer());
+                        break;
+                    }
 
                     RefPtr<BufferResource> bufferResource;
                     SLANG_RETURN_ON_FAIL(createBufferResource(srcEntry.bufferDesc, srcEntry.isOutput, bufferSize, srcEntry.bufferData.getBuffer(), renderer, bufferResource));

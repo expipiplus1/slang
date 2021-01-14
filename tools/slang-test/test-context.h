@@ -4,31 +4,30 @@
 #define TEST_CONTEXT_H_INCLUDED
 
 #include "../../source/core/slang-string-util.h"
-#include "../../source/core/platform.h"
+#include "../../source/core/slang-platform.h"
 #include "../../source/core/slang-std-writers.h"
-#include "../../source/core/dictionary.h"
+#include "../../source/core/slang-dictionary.h"
 #include "../../source/core/slang-test-tool-util.h"
 #include "../../source/core/slang-render-api-util.h"
+#include "../../source/core/slang-downstream-compiler.h"
+
+#include "../../slang-com-ptr.h"
 
 #include "options.h"
 
-enum class BackendType
+typedef uint32_t PassThroughFlags;
+struct PassThroughFlag
 {
-    Unknown = -1,
-    Dxc,
-    Fxc,
-    Glslang,
-    CountOf,
-};
-
-typedef uint32_t BackendFlags;
-struct BackendFlag
-{
-    enum Enum : uint32_t
+    enum Enum : PassThroughFlags
     {
-        Dxc = 1 << int(BackendType::Dxc),
-        Fxc = 1 << int(BackendType::Fxc),
-        Glslang = 1 << int(BackendType::Glslang),
+        Dxc = 1 << int(SLANG_PASS_THROUGH_DXC),
+        Fxc = 1 << int(SLANG_PASS_THROUGH_FXC),
+        Glslang = 1 << int(SLANG_PASS_THROUGH_GLSLANG),
+        VisualStudio = 1 << int(SLANG_PASS_THROUGH_VISUAL_STUDIO),
+        GCC = 1 << int(SLANG_PASS_THROUGH_GCC),
+        Clang = 1 << int(SLANG_PASS_THROUGH_CLANG),
+        Generic_C_CPP = 1 << int(SLANG_PASS_THROUGH_GENERIC_C_CPP),
+        NVRTC = 1 << int(SLANG_PASS_THROUGH_NVRTC)
     };
 };
 
@@ -36,15 +35,8 @@ struct BackendFlag
 /// back-end availability 
 struct TestRequirements
 {
-    TestRequirements& addUsed(BackendType type)
-    {
-        if (type != BackendType::Unknown)
-        {
-            usedBackendFlags |= BackendFlags(1) << int(type);
-        }
-        return *this;
-    }
-    TestRequirements& addUsed(Slang::RenderApiType type)
+    
+    TestRequirements& addUsedRenderApi(Slang::RenderApiType type)
     {
         using namespace Slang;
         if (type != RenderApiType::Unknown)
@@ -53,7 +45,15 @@ struct TestRequirements
         }
         return *this;
     }
-    TestRequirements& addUsedBackends(BackendFlags flags)
+    TestRequirements& addUsedBackEnd(SlangPassThrough type)
+    {
+        if (type != SLANG_PASS_THROUGH_NONE)
+        {
+            usedBackendFlags |= PassThroughFlags(1) << int(type);
+        }
+        return *this;
+    }
+    TestRequirements& addUsedBackends(PassThroughFlags flags)
     {
         usedBackendFlags |= flags;
         return *this;
@@ -70,7 +70,7 @@ struct TestRequirements
     }
 
     Slang::RenderApiType explicitRenderApi = Slang::RenderApiType::Unknown;     ///< The render api explicitly specified 
-    BackendFlags usedBackendFlags = 0;                                          ///< Used backends
+    PassThroughFlags usedBackendFlags = 0;                                          ///< Used backends
     Slang::RenderApiFlags usedRenderApiFlags = 0;                               ///< Used render api flags (some might be implied)
 };
 
@@ -83,7 +83,7 @@ class TestContext
         /// Get the slang session
     SlangSession* getSession() const { return m_session;  }
 
-    SlangResult init();
+    SlangResult init(const char* exePath);
 
         /// Get the inner main function (from shared library)
     InnerMainFunc getInnerMainFunc(const Slang::String& dirPath, const Slang::String& name);
@@ -94,6 +94,19 @@ class TestContext
     bool isCollectingRequirements() const { return testRequirements != nullptr; }
         /// If set, then tests are executed
     bool isExecuting() const { return testRequirements == nullptr; }
+
+        /// True if a render API filter is enabled
+    bool isRenderApiFilterEnabled() const { return options.enabledApis != Slang::RenderApiFlag::AllOf && options.enabledApis != 0; }
+
+        /// True if a test with the requiredFlags can in principal run (it may not be possible if the API is not available though)
+    bool canRunTestWithRenderApiFlags(Slang::RenderApiFlags requiredFlags);
+
+        /// True if can run unit tests
+    bool canRunUnitTests() const { return options.apiOnly == false; }
+
+        /// Get compiler set
+    Slang::DownstreamCompilerSet* getCompilerSet();
+    Slang::DownstreamCompiler* getDefaultCompiler(SlangSourceLanguage sourceLanguage);
 
         /// Ctor
     TestContext();
@@ -107,14 +120,18 @@ class TestContext
         /// If set then tests are not run, but their requirements are set 
     TestRequirements* testRequirements = nullptr;
 
-    BackendFlags availableBackendFlags = 0;
+    PassThroughFlags availableBackendFlags = 0;
     Slang::RenderApiFlags availableRenderApiFlags = 0;
     bool isAvailableRenderApiFlagsValid = false;
 
+    Slang::RefPtr<Slang::DownstreamCompilerSet> compilerSet;
+
+    Slang::String exeDirectoryPath;
+    
 protected:
     struct SharedLibraryTool
     {
-        Slang::SharedLibrary::Handle m_sharedLibrary;
+        Slang::ComPtr<ISlangSharedLibrary> m_sharedLibrary;
         InnerMainFunc m_func;
     };
 

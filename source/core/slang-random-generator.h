@@ -1,12 +1,12 @@
-#ifndef SLANG_RANDOM_GENERATOR_H
-#define SLANG_RANDOM_GENERATOR_H
+#ifndef SLANG_CORE_RANDOM_GENERATOR_H
+#define SLANG_CORE_RANDOM_GENERATOR_H
 
 #include "../../slang.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-#include "smart-pointer.h"
+#include "slang-smart-pointer.h"
 
 namespace Slang { 
 
@@ -30,6 +30,12 @@ class RandomGenerator: public RefObject
         /// Get the next bool
     virtual bool nextBool();
 
+        /// Get multiple int32s 
+    virtual void nextInt32s(int32_t* dst, size_t count) = 0;
+
+        /// Next uint32_t
+    uint32_t nextUInt32() { return uint32_t(nextInt32()); }
+
         /// Next Int32 which can only be positive
     int32_t nextPositiveInt32() { return nextInt32() & 0x7fffffff; }
         /// Next Int64 which can only be positive
@@ -38,14 +44,21 @@ class RandomGenerator: public RefObject
         /// Returns value up to BUT NOT INCLUDING maxValue. 
     int32_t nextInt32UpTo(int32_t maxValue) { assert(maxValue > 0); return (maxValue <= 1) ? 0 : (nextPositiveInt32() % maxValue); }
 
-        /// Returns value from min up to BUT NOT INCLUDING max
+        /// Returns value from min up to BUT NOT INCLUDING max. 
     int32_t nextInt32InRange(int32_t min, int32_t max);
+
+    /// Returns value from min up to BUT NOT INCLUDING max
+    uint32_t nextUInt32InRange(uint32_t min, uint32_t max);
 
         /// Returns value up to BUT NOT INCLUDING maxValue
     int64_t nextInt64UpTo(int64_t maxValue) { assert(maxValue > 0); return (maxValue <= 1) ? 0 : (nextPositiveInt64() % maxValue); }
 
         /// Returns value from min up to BUT NOT INCLUDING max
     int64_t nextInt64InRange(int64_t min, int64_t max);
+
+        /// Fill with random data.
+        /// NOTE! Output is only identical bytes if generator in same state *and* size_t(dst) & 3 is the same on calls. 
+    void nextData(void* dst, size_t size);
 
         /// Create a RandomGenerator with specified seed using default generator type
     static RandomGenerator* create(int32_t seed);
@@ -67,7 +80,8 @@ class Mt19937RandomGenerator: public RandomGenerator
     Mt19937RandomGenerator* clone() SLANG_OVERRIDE { return new ThisType(*this); }
     void reset(int32_t seed) SLANG_OVERRIDE;
     int32_t nextInt32() SLANG_OVERRIDE;
-    
+    void nextInt32s(int32_t* dst, size_t count) SLANG_OVERRIDE;
+
         /// Ctor
     Mt19937RandomGenerator();
     Mt19937RandomGenerator(const ThisType& rhs);

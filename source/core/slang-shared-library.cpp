@@ -1,8 +1,9 @@
 #include "slang-shared-library.h"
 
 #include "../../slang-com-ptr.h"
-#include "../core/slang-io.h"
-#include "../core/slang-string-util.h"
+
+#include "slang-io.h"
+#include "slang-string-util.h"
 
 namespace Slang
 {
@@ -14,43 +15,56 @@ static const Guid IID_ISlangSharedLibraryLoader = SLANG_UUID_ISlangSharedLibrary
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!!! DefaultSharedLibraryLoader !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 
-/* static */const char* DefaultSharedLibraryLoader::s_libraryNames[int(SharedLibraryType::CountOf)] =
-{
-    nullptr,                    // SharedLibraryType::Unknown 
-    "dxcompiler",               // SharedLibraryType::Dxc 
-    "d3dcompiler_47",           // SharedLibraryType::Fxc
-    "slang-glslang",            // SharedLibraryType::Glslang  
-    "dxil",                     // SharedLibraryType::Dxil
-};
-
 /* static */DefaultSharedLibraryLoader DefaultSharedLibraryLoader::s_singleton;
-
-/* static */SharedLibraryType DefaultSharedLibraryLoader::getSharedLibraryTypeFromName(const UnownedStringSlice& name)
-{
-    // Start from 1 to skip Unknown
-    for (int i = 1; i < SLANG_COUNT_OF(s_libraryNames); ++i)
-    {
-        if (name == s_libraryNames[i])
-        {
-            return SharedLibraryType(i);
-        }
-    }
-    return SharedLibraryType::Unknown;
-}
 
 ISlangUnknown* DefaultSharedLibraryLoader::getInterface(const Guid& guid)
 {
     return (guid == IID_ISlangUnknown || guid == IID_ISlangSharedLibraryLoader) ? static_cast<ISlangSharedLibraryLoader*>(this) : nullptr;
 }
 
-SlangResult DefaultSharedLibraryLoader::loadSharedLibrary(const char* path, ISlangSharedLibrary** sharedLibraryOut)
+SlangResult DefaultSharedLibraryLoader::loadSharedLibrary(const char* path, ISlangSharedLibrary** outSharedLibrary)
 {
-    *sharedLibraryOut = nullptr;
+    *outSharedLibrary = nullptr;
     // Try loading
     SharedLibrary::Handle handle;
     SLANG_RETURN_ON_FAIL(SharedLibrary::load(path, handle));
-    *sharedLibraryOut = ComPtr<ISlangSharedLibrary>(new DefaultSharedLibrary(handle)).detach();
+    *outSharedLibrary = ComPtr<ISlangSharedLibrary>(new DefaultSharedLibrary(handle)).detach();
     return SLANG_OK;
+}
+
+SlangResult DefaultSharedLibraryLoader::loadPlatformSharedLibrary(const char* path, ISlangSharedLibrary** outSharedLibrary)
+{
+    *outSharedLibrary = nullptr;
+    // Try loading
+    SharedLibrary::Handle handle;
+    SLANG_RETURN_ON_FAIL(SharedLibrary::loadWithPlatformPath(path, handle));
+    *outSharedLibrary = ComPtr<ISlangSharedLibrary>(new DefaultSharedLibrary(handle)).detach();
+    return SLANG_OK;
+}
+
+/* static */SlangResult DefaultSharedLibraryLoader::load(ISlangSharedLibraryLoader* loader, const String& path, const String& name, ISlangSharedLibrary** outLibrary)
+{
+    if (path.getLength())
+    {
+        String combinedPath = Path::combine(path, name);
+        return loader->loadSharedLibrary(combinedPath.getBuffer(), outLibrary);
+    }
+    else
+    {
+        return loader->loadSharedLibrary(name.getBuffer(), outLibrary);
+    }
+}
+
+/* !!!!!!!!!!!!!!!!!!!!!!!!!! DefaultSharedLibrary !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
+
+TemporarySharedLibrary::~TemporarySharedLibrary()
+{
+    if (m_sharedLibraryHandle)
+    {
+        // We have to unload if we want to be able to remove
+        SharedLibrary::unload(m_sharedLibraryHandle);
+        m_sharedLibraryHandle = nullptr;
+    }
 }
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!!! DefaultSharedLibrary !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
@@ -62,54 +76,15 @@ ISlangUnknown* DefaultSharedLibrary::getInterface(const Guid& guid)
 
 DefaultSharedLibrary::~DefaultSharedLibrary()
 {
-    SharedLibrary::unload(m_sharedLibraryHandle);
-}
-
-SlangFuncPtr DefaultSharedLibrary::findFuncByName(char const* name)
-{
-    return SharedLibrary::findFuncByName(m_sharedLibraryHandle, name); 
-}
-
-/* !!!!!!!!!!!!!!!!!!!!!!!!!! ConfigurableSharedLibraryLoader !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
-
-ISlangUnknown* ConfigurableSharedLibraryLoader::getInterface(const Guid& guid)
-{
-    return (guid == IID_ISlangUnknown || guid == IID_ISlangSharedLibraryLoader) ? static_cast<ISlangSharedLibraryLoader*>(this) : nullptr;
-}
-
-SlangResult ConfigurableSharedLibraryLoader::loadSharedLibrary(const char* path, ISlangSharedLibrary** sharedLibraryOut)
-{
-    Entry* entry = m_entryMap.TryGetValue(String(path));
-    if (entry)
+    if (m_sharedLibraryHandle)
     {
-        SharedLibrary::Handle handle;
-        SLANG_RETURN_ON_FAIL(entry->func(path, entry->entryString, handle));
-        SLANG_ASSERT(handle);
-
-        ComPtr<ISlangSharedLibrary> sharedLib(new DefaultSharedLibrary(handle));
-        *sharedLibraryOut = sharedLib.detach();
-        return SLANG_OK;
+        SharedLibrary::unload(m_sharedLibraryHandle);
     }
-
-    return DefaultSharedLibraryLoader::getSingleton()->loadSharedLibrary(path, sharedLibraryOut);
 }
 
-/* static */Result ConfigurableSharedLibraryLoader::replace(const char* pathIn, const String& entryString, SharedLibrary::Handle& handleOut)
+void* DefaultSharedLibrary::findSymbolAddressByName(char const* name)
 {
-    SLANG_UNUSED(pathIn);
-    // The replacement is the *whole* string
-    return SharedLibrary::loadWithPlatformFilename(entryString.begin(), handleOut);
+    return SharedLibrary::findSymbolAddressByName(m_sharedLibraryHandle, name);
 }
-
-/* static */Result ConfigurableSharedLibraryLoader::changePath(const char* pathIn, const String& entryString, SharedLibrary::Handle& handleOut )
-{
-    // Okay we need to reconstruct the name and insert the path
-    StringBuilder builder;
-    SharedLibrary::appendPlatformFileName(UnownedStringSlice(pathIn), builder);
-    String path = Path::combine(entryString, builder);
-
-    return SharedLibrary::loadWithPlatformFilename(path.begin(), handleOut);
-}
-
 
 } 

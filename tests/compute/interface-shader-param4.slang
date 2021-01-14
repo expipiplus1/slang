@@ -6,7 +6,8 @@
 //
 
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute
-//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12
+
+//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12 -profile sm_6_0 -use-dxil
 //TEST(compute, vulkan):COMPARE_COMPUTE_EX:-vk -compute
 
 // A lot of the setup is the same as for `interface-shader-param`,
@@ -43,16 +44,36 @@ int test(
 }
 
 
-//TEST_INPUT:ubuffer(data=[0 0 0 0], stride=4):dxbinding(0),glbinding(0),out
+//TEST_INPUT:ubuffer(data=[0 0 0 0], stride=4):out,name=gOutputBuffer
 RWStructuredBuffer<int> gOutputBuffer;
 
+// Note: a constant buffer register/binding is always claimed
+// for `gStrategy` during initial compilation (before specialization)
+// because the layout logic has no way of knowing if the type
+// that gets plugged in will involve uniform/ordinary data
+// or not.
+//
+//TEST_INPUT:cbuffer(data=[0]):name=gStrategy
+//
 ConstantBuffer<IRandomNumberGenerationStrategy> gStrategy;
+
+// The concrete types we plug in for `gStrategy` and `modifier`
+// have buffer resources in them, so we need to assign them
+// data. The registers/bindings for these parameters will
+// always come after all other shader parameters in the same
+// scope (global or entry-point).
+//
+// Here's the data for `gStrategy`:
+//
+//TEST_INPUT: globalExistentialType MyStrategy
+//TEST_INPUT:ubuffer(data=[1 2 4 8], stride=4):
+
 
 [numthreads(4, 1, 1)]
 void computeMain(
 
 // Similarly to the previous test, we are declaring two `uniform`
-// paameters on the entry point, where one will be plugged in
+// parameters on the entry point, where one will be plugged in
 // with a concrete type, and thus get laid out second.
 //
     uniform IModifier   modifier,
@@ -63,7 +84,11 @@ void computeMain(
 // the previous test, the concrete type plugged in for `modifier`
 // has no uniform/ordinary data, so we don't need to fill it in.
 //
-//TEST_INPUT:cbuffer(data=[256]):dxbinding(0),glbinding(2)
+// We *do* need to reserve space in the constant buffer for the
+// existential value (RTTI, witness table, any-value) and that
+// needs to come *before* the value for `extra`.
+//
+//TEST_INPUT:root_constants(data=[0 0 0 0 0 0 0 0 256]):
 
             uint3       dispatchThreadID : SV_DispatchThreadID)
 {
@@ -112,21 +137,7 @@ struct MyModifier : IModifier
     }
 }
 
-//TEST_INPUT: globalExistentialType MyStrategy
-//TEST_INPUT: entryPointExistentialType MyModifier
-
-// The concrete types we plug in for `gStrategy` and `modifier`
-// have buffer resources in them, so we need to assign them
-// data. The registers/bindings for these parameters will
-// always come after all other shader parameters, and their
-// relative order will match the relative order of their
-// declarations in the global order that Slang uses for
-// assigning bindings (all globals before all entry point parameters).
-//
-// Here's the data for `gStrategy`:
-//
-//TEST_INPUT:ubuffer(data=[1 2 4 8], stride=4):dxbinding(1),glbinding(1)
-//
 // Here's the data for `modifier`:
 //
-//TEST_INPUT:ubuffer(data=[16 32 64 128], stride=4):dxbinding(2),glbinding(3)
+//TEST_INPUT: entryPointExistentialType MyModifier
+//TEST_INPUT:ubuffer(data=[16 32 64 128], stride=4):

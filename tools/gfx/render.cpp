@@ -3,6 +3,12 @@
 
 #include "../../source/core/slang-math.h"
 
+#include "d3d11/render-d3d11.h"
+#include "d3d12/render-d3d12.h"
+#include "open-gl/render-gl.h"
+#include "vulkan/render-vk.h"
+#include "cuda/render-cuda.h"
+
 namespace gfx {
 using namespace Slang;
 
@@ -69,6 +75,8 @@ const Resource::DescBase& Resource::getDescBase() const
     BindingStyle::DirectX,      // DirectX12,
     BindingStyle::OpenGl,       // OpenGl,
     BindingStyle::Vulkan,       // Vulkan
+    BindingStyle::CPU,          // CPU
+    BindingStyle::CUDA,         // CUDA
 };
 
 /* static */void RendererUtil::compileTimeAsserts()
@@ -398,8 +406,42 @@ ProjectionStyle RendererUtil::getProjectionStyle(RendererType type)
         case RendererType::OpenGl:          return UnownedStringSlice::fromLiteral("OpenGL");
         case RendererType::Vulkan:          return UnownedStringSlice::fromLiteral("Vulkan");
         case RendererType::Unknown:         return UnownedStringSlice::fromLiteral("Unknown");
+        case RendererType::CPU:             return UnownedStringSlice::fromLiteral("CPU");
+        case RendererType::CUDA:            return UnownedStringSlice::fromLiteral("CUDA");
         default:                            return UnownedStringSlice::fromLiteral("?!?");
     }
 }
+
+/* static */ RendererUtil::CreateFunc RendererUtil::getCreateFunc(RendererType type)
+{
+    switch (type)
+    {
+#if SLANG_WINDOWS_FAMILY
+        case RendererType::DirectX11:
+        {
+            return &createD3D11Renderer;
+        }
+        case RendererType::DirectX12:
+        {
+            return &createD3D12Renderer;
+        }
+        case RendererType::OpenGl:
+        {
+            return &createGLRenderer;
+        }
+        case RendererType::Vulkan:
+        {
+            return &createVKRenderer;
+        }
+        case RendererType::CUDA:
+        {
+            return &createCUDARenderer;
+        }
+#endif
+
+        default: return nullptr;
+    }
+}
+
 
 } // renderer_test

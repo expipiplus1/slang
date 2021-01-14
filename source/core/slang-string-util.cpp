@@ -1,19 +1,36 @@
 #include "slang-string-util.h"
 
+#include "slang-blob.h"
+
 namespace Slang {
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! StringBlob !!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! StringUtil !!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-// Allocate static const storage for the various interface IDs that the Slang API needs to expose
-static const Guid IID_ISlangUnknown = SLANG_UUID_ISlangUnknown;
-static const Guid IID_ISlangBlob = SLANG_UUID_ISlangBlob;
-
-/* static */ISlangUnknown* StringBlob::getInterface(const Guid& guid)
+/* static */bool StringUtil::areAllEqual(const List<UnownedStringSlice>& a, const List<UnownedStringSlice>& b, EqualFn equalFn)
 {
-    return (guid == IID_ISlangUnknown || guid == IID_ISlangBlob) ? static_cast<ISlangBlob*>(this) : nullptr;
+    if (a.getCount() != b.getCount())
+    {
+        return false;
+    }
+
+    const Index count = a.getCount();
+    for (Index i = 0; i < count; ++i)
+    {
+        if (!equalFn(a[i], b[i]))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! StringUtil !!!!!!!!!!!!!!!!!!!!!!!!!!!
+/* static */bool StringUtil::areAllEqualWithSplit(const UnownedStringSlice& a, const UnownedStringSlice& b, char splitChar, EqualFn equalFn)
+{
+    List<UnownedStringSlice> slicesA, slicesB;
+    StringUtil::split(a, splitChar, slicesA);
+    StringUtil::split(b, splitChar, slicesB);
+    return areAllEqual(slicesA, slicesB, equalFn);
+}
 
 /* static */void StringUtil::split(const UnownedStringSlice& in, char splitChar, List<UnownedStringSlice>& slicesOut)
 {
@@ -36,6 +53,86 @@ static const Guid IID_ISlangBlob = SLANG_UUID_ISlangBlob;
 
         // Skip the split character, if at end we are okay anyway
         start = cur + 1;
+    }
+}
+
+/* static */Index StringUtil::split(const UnownedStringSlice& in, char splitChar, Index maxSlices, UnownedStringSlice* outSlices)
+{
+    Index index = 0;
+
+    const char* start = in.begin();
+    const char* end = in.end();
+
+    while (start < end && index < maxSlices)
+    {
+        // Move cur so it's either at the end or at next split character
+        const char* cur = start;
+        while (cur < end && *cur != splitChar)
+        {
+            cur++;
+        }
+
+        // Add to output
+        outSlices[index++] = UnownedStringSlice(start, cur);
+
+        // Skip the split character, if at end we are okay anyway
+        start = cur + 1;
+    }
+
+    return index;
+}
+
+/* static */SlangResult StringUtil::split(const UnownedStringSlice& in, char splitChar, Index maxSlices, UnownedStringSlice* outSlices, Index& outSlicesCount)
+{
+    const Index sliceCount = split(in, splitChar, maxSlices, outSlices);
+    if (sliceCount == maxSlices && sliceCount > 0)
+    {
+        // To succeed must have parsed all of the input
+        if (in.end() != outSlices[sliceCount - 1].end())
+        {
+            return SLANG_FAIL;
+        }
+    }
+    outSlicesCount = sliceCount;
+    return SLANG_OK;
+}
+
+/* static */void StringUtil::join(const List<String>& values, char separator, StringBuilder& out)
+{
+    join(values, UnownedStringSlice(&separator, 1), out);
+}
+
+/* static */void StringUtil::join(const List<String>& values, const UnownedStringSlice& separator, StringBuilder& out)
+{
+    const Index count = values.getCount();
+    if (count <= 0)
+    {
+        return;
+    }
+    out.append(values[0]);
+    for (Index i = 1; i < count; i++)
+    {
+        out.append(separator);
+        out.append(values[i]);
+    }
+}
+
+/* static */void StringUtil::join(const UnownedStringSlice* values, Index valueCount, char separator, StringBuilder& out)
+{
+    join(values, valueCount, UnownedStringSlice(&separator, 1), out);
+}
+
+/* static */void StringUtil::join(const UnownedStringSlice* values, Index valueCount, const UnownedStringSlice& separator, StringBuilder& out)
+{
+    if (valueCount <= 0)
+    {
+        return;
+    }
+    out.append(values[0]);
+    for (Index i = 1; i < valueCount; i++)
+    {
+        out.append(separator);
+        out.append(values[i]);
     }
 }
 
@@ -178,7 +275,7 @@ ComPtr<ISlangBlob> StringUtil::createStringBlob(const String& string)
         return slice;
     }
 
-    const Index numChars = slice.size();
+    const Index numChars = slice.getLength();
     const char* srcChars = slice.begin();
 
     StringBuilder builder;
@@ -199,6 +296,131 @@ ComPtr<ISlangBlob> StringUtil::createStringBlob(const String& string)
     return (fromChar == toChar || string.indexOf(fromChar) == Index(-1)) ? string : calcCharReplaced(string.getUnownedSlice(), fromChar, toChar);
 }
 
+/* static */bool StringUtil::extractLine(UnownedStringSlice& ioText, UnownedStringSlice& outLine)
+{
+    char const*const begin = ioText.begin();
+    char const*const end = ioText.end();
 
+    // If we have hit the end then return the 'special' terminator
+    if (begin == nullptr)
+    {
+        outLine = UnownedStringSlice(nullptr, nullptr);
+        return false;
+    }
+
+    char const* cursor = begin;
+    while (cursor < end)
+    {
+        int c = *cursor++;
+        switch (c)
+        {
+            case '\r': case '\n':
+            {
+                // Remember the end of the line
+                const char*const lineEnd = cursor - 1;
+
+                // When we see a line-break character we need
+                // to record the line break, but we also need
+                // to deal with the annoying issue of encodings,
+                // where a multi-byte sequence might encode
+                // the line break.
+                if (cursor < end)
+                {
+                    int d = *cursor;
+                    if ((c ^ d) == ('\r' ^ '\n'))
+                        cursor++;
+                }
+
+                ioText = UnownedStringSlice(cursor, end);
+                outLine = UnownedStringSlice(begin, lineEnd);
+                return true;
+            }
+            default:
+                break;
+        }
+    }
+
+    // There is nothing remaining
+    ioText = UnownedStringSlice(nullptr, nullptr);
+
+    // Could be empty, or the remaining line (without line end terminators of)
+    SLANG_ASSERT(begin <= cursor);
+
+    outLine = UnownedStringSlice(begin, cursor);
+    return true;
+}
+
+/* static */void StringUtil::calcLines(const UnownedStringSlice& textIn, List<UnownedStringSlice>& outLines)
+{
+    outLines.clear();
+    UnownedStringSlice text(textIn), line;
+    while (extractLine(text, line))
+    {
+        outLines.add(line);
+    }
+}
+
+/* static */bool StringUtil::areLinesEqual(const UnownedStringSlice& inA, const UnownedStringSlice& inB)
+{
+    UnownedStringSlice a(inA), b(inB), lineA, lineB;
+    
+    while (true)
+    {
+        const auto hasLineA = extractLine(a, lineA);
+        const auto hasLineB = extractLine(b, lineB);
+
+        if (!(hasLineA && hasLineB))
+        {
+            return hasLineA == hasLineB;
+        }
+
+        // The lines must be equal
+        if (lineA != lineB)
+        {
+            return false;
+        }
+    }
+}
+
+SLANG_FORCE_INLINE static bool _isDigit(char c)
+{
+    return (c >= '0' && c <= '9');
+}
+
+/* static */SlangResult StringUtil::parseInt(const UnownedStringSlice& in, Int& outValue)
+{
+    const char* cur = in.begin();
+    const char* end = in.end();
+
+    bool negate = false;
+    if (cur < end && *cur == '-')
+    {
+        negate = true;
+        cur++;
+    }
+
+    // We need at least one digit
+    if (cur >= end || !_isDigit(*cur))
+    {
+        return SLANG_FAIL;
+    }
+    
+    Int value = *cur++ - '0';
+    // Do the remaining digits
+    for (; cur < end; ++cur)
+    {
+        const char c = *cur;
+        if (!_isDigit(c))
+        {
+            return SLANG_FAIL;
+        }
+        value = value * 10 + (c - '0');
+    }
+
+    value = negate ? -value : value;
+
+    outValue = value;
+    return SLANG_OK;
+}
 
 } // namespace Slang

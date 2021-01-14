@@ -1,5 +1,5 @@
-#ifndef SLANG_MEMORY_ARENA_H
-#define SLANG_MEMORY_ARENA_H
+#ifndef SLANG_CORE_MEMORY_ARENA_H
+#define SLANG_CORE_MEMORY_ARENA_H
 
 #include "../../slang.h"
 
@@ -84,6 +84,11 @@ public:
         @return The allocation (or nullptr if unable to allocate).  */
     void* allocateUnaligned(size_t sizeInBytes);
 
+        /** Allocate some aligned memory of at least size bytes, without alignment, and only from current block.
+        @param sizeInBytes Size of allocation wanted. 
+        @return The allocation (or nullptr if unable to allocate in current block).  */
+    void* allocateCurrentUnaligned(size_t sizeInBytes);
+
         /** Allocates a null terminated string.
 
         NOTE, it is not possible to rewind to a zero length string allocation (because such a strings memory is not held on the arena)
@@ -127,6 +132,9 @@ public:
         /// Gets the block alignment that is passed at initialization otherwise 0 an invalid block alignment.
     size_t getBlockAlignment() const { return m_blockAlignment; }
 
+        /// Get the default block payload size
+    size_t getBlockPayloadSize() const { return m_blockPayloadSize; }
+
         /// Estimate of total amount of memory used in bytes. The number can never be smaller than actual used memory but may be larger
     size_t calcTotalMemoryUsed() const;
         /// Total memory allocated in bytes
@@ -137,6 +145,9 @@ public:
     void* getCursor() const { return m_current; }
         /// Rewind (and effectively deallocate) all allocations *after* the cursor
     void rewindToCursor(const void* cursor);
+
+        /// Add a block such that it will be freed when everything else is freed.
+    void addExternalBlock(void* data, size_t size);
 
         /// Default Ctor
     MemoryArena();
@@ -234,6 +245,23 @@ SLANG_FORCE_INLINE void* MemoryArena::allocateUnaligned(size_t sizeInBytes)
     else
     {
         return _allocateAlignedFromNewBlock(sizeInBytes, kMinAlignment);
+    }
+}
+
+// --------------------------------------------------------------------------
+SLANG_FORCE_INLINE void* MemoryArena::allocateCurrentUnaligned(size_t sizeInBytes)
+{
+    // Align with the minimum alignment
+    uint8_t* mem = m_current;
+    uint8_t* end = mem + sizeInBytes;
+    if (end <= m_end)
+    {
+        m_current = end;
+        return mem;
+    }
+    else
+    {
+        return nullptr;
     }
 }
 

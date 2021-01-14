@@ -3,7 +3,19 @@
 
 layout(row_major) uniform;
 
+#if USE_NV_RT
 #extension GL_NV_ray_tracing : require
+#define accelerationStructureEXT accelerationStructureNV
+#define callableDataInEXT callableDataInNV
+#define gl_LaunchIDEXT gl_LaunchIDNV
+#define hitAttributeEXT hitAttributeNV
+#define ignoreIntersectionEXT ignoreIntersectionNV
+#define rayPayloadInEXT rayPayloadInNV
+#define terminateRayEXT terminateRayNV
+#define traceRayEXT traceNV
+#else
+#extension GL_EXT_ray_tracing : require
+#endif
 
 #define TRACING_EPSILON 1e-6
 
@@ -27,18 +39,17 @@ layout(row_major) uniform;
 #define tmp_trace_E         _S18
 #define tmp_trace_ray       _S19
 #define tmp_trace_payload   _S20
-#define tmp_cmp             _S21
-#define tmp_color           _S22
-#define tmp_dot             _S23
-#define tmp_sat             _S24
-#define tmp_trace2_A        _S25
-#define tmp_trace2_B        _S26
-#define tmp_trace2_C        _S27
-#define tmp_trace2_D        _S28
-#define tmp_trace2_E        _S29
-#define tmp_trace2_ray      _S30
-#define tmp_trace2_payload  _S31
-#define tmp_storeIdx        _S32
+#define tmp_color           _S21
+#define tmp_dot             _S22
+#define tmp_sat             _S23
+#define tmp_trace2_A        _S24
+#define tmp_trace2_B        _S25
+#define tmp_trace2_C        _S26
+#define tmp_trace2_D        _S27
+#define tmp_trace2_E        _S28
+#define tmp_trace2_ray      _S39
+#define tmp_trace2_payload  _S30
+#define tmp_storeIdx        _S31
 
 
 layout(binding = 0) uniform texture2D samplerPosition_0;
@@ -67,19 +78,19 @@ layout(std140) uniform tmp_ubo
     Uniforms_0 _data;
 } ubo_0;
 
-layout(binding = 5) uniform accelerationStructureNV as_0;
+layout(binding = 5) uniform accelerationStructureEXT as_0;
 
 struct ShadowRay_0
 {
     float hitDistance_0;
 };
-layout(location = 0) rayPayloadNV ShadowRay_0 p_0;
+layout(location = 0) rayPayloadEXT ShadowRay_0 p_0;
 
 struct ReflectionRay_0
 {
     float color_1;
 };
-layout(location = 1) rayPayloadNV ReflectionRay_0 p_1;
+layout(location = 1) rayPayloadEXT ReflectionRay_0 p_1;
 
 layout(rgba32f) layout(binding = 4) uniform image2D outputImage_0;
 
@@ -92,7 +103,7 @@ struct RayDesc_0
 };
 
 void TraceRay_0(
-    accelerationStructureNV AccelerationStructure_0,
+    accelerationStructureEXT AccelerationStructure_0,
     uint RayFlags_0,
     uint InstanceInclusionMask_0,
     uint RayContributionToHitGroupIndex_0,
@@ -102,7 +113,7 @@ void TraceRay_0(
     inout ShadowRay_0 Payload_0)
 {
     p_0 = Payload_0;
-    traceNV(
+    traceRayEXT(
         AccelerationStructure_0,
         RayFlags_0,
         InstanceInclusionMask_0,
@@ -119,7 +130,7 @@ void TraceRay_0(
 }
 
 void TraceRay_1(
-    accelerationStructureNV AccelerationStructure_1,
+    accelerationStructureEXT AccelerationStructure_1,
     uint RayFlags_1,
     uint InstanceInclusionMask_1,
     uint RayContributionToHitGroupIndex_1,
@@ -129,7 +140,7 @@ void TraceRay_1(
     inout ReflectionRay_0 Payload_1)
 {
     p_1 = Payload_1;
-    traceNV(
+    traceRayEXT(
         AccelerationStructure_1,
         RayFlags_1,
         InstanceInclusionMask_1,
@@ -155,14 +166,14 @@ void main()
 {
     float atten_0;
 
-    uvec3 tmp_launchID_x = gl_LaunchIDNV;
+    uvec3 tmp_launchID_x = gl_LaunchIDEXT;
     float tmp_add_x = float(tmp_launchID_x.x) + 0.5;
-    uvec3 tmp_launchSize_x = gl_LaunchSizeNV;
+    uvec3 tmp_launchSize_x = gl_LaunchSizeEXT;
     float tmp_div_x = tmp_add_x / float(tmp_launchSize_x.x);
 
-    uvec3 tmp_launchID_y = gl_LaunchIDNV;
+    uvec3 tmp_launchID_y = gl_LaunchIDEXT;
     float tmp_add_y = float(tmp_launchID_y.y) + 0.5;
-    uvec3 tmp_launchSize_y = gl_LaunchSizeNV;
+    uvec3 tmp_launchSize_y = gl_LaunchSizeEXT;
     float tmp_div_y = tmp_add_y / float(tmp_launchSize_y.y);
     vec2 inUV_0 = vec2(tmp_div_x, tmp_div_y);
     
@@ -198,9 +209,8 @@ void main()
     TraceRay_0(as_0, tmp_trace_A, tmp_trace_B, tmp_trace_C, tmp_trace_D, tmp_trace_E, tmp_trace_ray, tmp_trace_payload);
     shadowRay_0 = tmp_trace_payload;
 
-    bool tmp_cmp = shadowRay_0.hitDistance_0 < lightDist_0;
     ReflectionRay_0 reflectionRay_0;
-    if(tmp_cmp)
+    if(shadowRay_0.hitDistance_0 < lightDist_0)
     {
         atten_0 = (0.00000000000000000000);
     }
@@ -226,7 +236,7 @@ void main()
 
     vec3 color_3 = color_2 + tmp_trace2_payload.color_1;
 
-    uvec3 tmp_storeIdx = gl_LaunchIDNV;
+    uvec3 tmp_storeIdx = gl_LaunchIDEXT;
     imageStore(outputImage_0, ivec2(uvec2(ivec2(tmp_storeIdx.xy))), vec4(color_3, 1.0));
     return;
 }

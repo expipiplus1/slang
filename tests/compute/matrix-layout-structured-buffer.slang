@@ -1,24 +1,14 @@
 // matrix-layout-structured-buffer.slang
 
-// This test is set up to confirm that `StructuredBuffer` types are
-// always laid out column-major by fxc/dxc, even when row-major layout has been
-// requested globally.
-//
-// This behavior should be considered a bug in Slang because either:
-//
-//	1. we should report reflection layout information that acknowledges this behavior, or
-// 	2. we should alter our HLSL output passed to fxc/dxc to provide consistent
-//     behavior that matches our reflection data.
-//
-// For now this test exists to document the situation. It's output can/should
-// be updated if we decide to fix the underlying problem by taking option (2).
-//
+// This test confirms that we apply the matrix layout
+// mode requested by the user, even in the case of structured
+// buffers of matrices, where fxc/dxc do *not* respect
+// the matrix layout mode by default.
 
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -xslang -matrix-layout-row-major
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -xslang -matrix-layout-column-major
 
-
-//TEST_INPUT:ubuffer(data=[0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23], stride=48):dxbinding(0),glbinding(0)
+//TEST_INPUT:ubuffer(data=[0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23], stride=48):name=gMatrices
 RWStructuredBuffer<int3x4> gMatrices;
 
 int test(int val)
@@ -36,7 +26,7 @@ int test(int val)
     return tmp;
 }
 
-//TEST_INPUT:ubuffer(data=[0 0 0 0 0 0 0 0 0 0 0 0], stride=4):dxbinding(0),glbinding(1),out
+//TEST_INPUT:ubuffer(data=[0 0 0 0 0 0 0 0 0 0 0 0], stride=4):out,name=buffer
 RWStructuredBuffer<int> buffer;
 
 [numthreads(12, 1, 1)]

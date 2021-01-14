@@ -4,12 +4,18 @@
 #define TEST_REPORTER_H_INCLUDED
 
 #include "../../source/core/slang-string-util.h"
-#include "../../source/core/platform.h"
+#include "../../source/core/slang-platform.h"
 #include "../../source/core/slang-std-writers.h"
-#include "../../source/core/dictionary.h"
+#include "../../source/core/slang-dictionary.h"
 
 
-#define SLANG_CHECK(x) TestReporter::get()->addResultWithLocation((x), #x, __FILE__, __LINE__); 
+#define SLANG_CHECK(x) TestReporter::get()->addResultWithLocation((x), #x, __FILE__, __LINE__);
+#define SLANG_CHECK_ABORT(x)                                                                     \
+    {                                                                                            \
+        bool _slang_check_result = (x);                                                          \
+        TestReporter::get()->addResultWithLocation(_slang_check_result, #x, __FILE__, __LINE__); \
+        if (!_slang_check_result) return;                                                        \
+    }
 
 struct TestRegister
 {
@@ -66,7 +72,8 @@ class TestReporter
     {
         TestResult testResult = TestResult::Ignored;
         Slang::String name;
-        Slang::String message;                 ///< Message that is specific for the testResult
+        Slang::String message;                  ///< Message that is specific for the testResult
+        double executionTime = 0.0;             ///< <= 0.0 if not defined. Time is in seconds. 
     };
     
     class TestScope
@@ -110,7 +117,7 @@ class TestReporter
     void addResult(TestResult result);
     void addResultWithLocation(TestResult result, const char* testText, const char* file, int line);
     void addResultWithLocation(bool testSucceeded, const char* testText, const char* file, int line);
-
+    void addExecutionTime(double time);
     void endTest();
     
         /// Runs start/endTest and outputs the result
@@ -159,6 +166,7 @@ class TestReporter
     TestOutputMode m_outputMode = TestOutputMode::Default;
     bool m_dumpOutputOnFailure;
     bool m_isVerbose = false;
+    bool m_hideIgnored = false;
 
 protected:
     

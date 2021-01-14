@@ -1,5 +1,5 @@
-#ifndef SLANG_STD_WRITERS_H
-#define SLANG_STD_WRITERS_H
+#ifndef SLANG_CORE_STD_WRITERS_H
+#define SLANG_CORE_STD_WRITERS_H
 
 #include "slang-writer.h"
 #include "../../slang-com-ptr.h"
@@ -12,11 +12,8 @@ class StdWriters: public RefObject
 {
 public:
 
-    ISlangWriter * getWriter(SlangWriterChannel chan) const { return m_writers[chan]; }
+    ISlangWriter* getWriter(SlangWriterChannel chan) const { return m_writers[chan]; }
     void setWriter(SlangWriterChannel chan, ISlangWriter* writer) { m_writers[chan] = writer; }
-
-        /// Set the writers on the SlangCompileRequest
-    void setRequestWriters(SlangCompileRequest* request);
 
         /// Ctor
     StdWriters() {}
