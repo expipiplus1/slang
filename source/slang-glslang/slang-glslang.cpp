@@ -19,18 +19,20 @@
 #include "spirv-tools/optimizer.hpp"
 #include "spirv-tools/libspirv.h"
 
-#if 0
-#include <cstring>
-#include <cstdlib>
-#include <cctype>
-#include <cmath>
-#include <array>
-#include <memory>
-#include <thread>
-#endif
-
 #ifdef _WIN32
-#include <Windows.h>
+#   include <Windows.h>
+#else
+#   include <pthread.h>
+#   include <semaphore.h>
+#   include <assert.h>
+#   include <errno.h>
+#   include <stdint.h>
+#   include <cstdio>
+#   include <sys/time.h>
+
+#   if !defined(__Fuchsia__)
+#       include <sys/resource.h>
+#   endif
 #endif
 
 #include <memory>
@@ -607,5 +609,192 @@ void ReleaseGlobalLock()
 {
     g_globalMutex.unlock();
 }
+
+/* Thread Local Storage (TLS) API needed for glslang.
+Implementations here are currently for linux/windows. */
+
+#if _WIN32
+
+inline OS_TLSIndex ToGenericTLSIndex(DWORD handle)
+{
+    return (OS_TLSIndex)((uintptr_t)handle + 1);
+}
+
+inline DWORD ToNativeTLSIndex(OS_TLSIndex nIndex)
+{
+    return (DWORD)((uintptr_t)nIndex - 1);
+}
+
+//
+// Thread Local Storage Operations
+//
+OS_TLSIndex OS_AllocTLSIndex()
+{
+    DWORD dwIndex = TlsAlloc();
+    if (dwIndex == TLS_OUT_OF_INDEXES)
+    {
+        assert(0 && "OS_AllocTLSIndex(): Unable to allocate Thread Local Storage");
+        return OS_INVALID_TLS_INDEX;
+    }
+
+    return ToGenericTLSIndex(dwIndex);
+}
+
+bool OS_SetTLSValue(OS_TLSIndex nIndex, void *lpvValue)
+{
+    if (nIndex == OS_INVALID_TLS_INDEX)
+    {
+        assert(0 && "OS_SetTLSValue(): Invalid TLS Index");
+        return false;
+    }
+
+    if (TlsSetValue(ToNativeTLSIndex(nIndex), lpvValue))
+        return true;
+    else
+        return false;
+}
+
+void* OS_GetTLSValue(OS_TLSIndex nIndex)
+{
+    assert(nIndex != OS_INVALID_TLS_INDEX);
+    return TlsGetValue(ToNativeTLSIndex(nIndex));
+}
+
+bool OS_FreeTLSIndex(OS_TLSIndex nIndex)
+{
+    if (nIndex == OS_INVALID_TLS_INDEX)
+    {
+        assert(0 && "OS_SetTLSValue(): Invalid TLS Index");
+        return false;
+    }
+
+    if (TlsFree(ToNativeTLSIndex(nIndex)))
+        return true;
+    else
+        return false;
+}
+
+#else
+
+//
+// Thread cleanup
+//
+
+//
+// Wrapper for Linux call to DetachThread.  This is required as pthread_cleanup_push() expects
+// the cleanup routine to return void.
+//
+static void DetachThreadLinux(void *)
+{
+    DetachThread();
+}
+
+//
+// Registers cleanup handler, sets cancel type and state, and executes the thread specific
+// cleanup handler.  This function will be called in the Standalone.cpp for regression
+// testing.  When OpenGL applications are run with the driver code, Linux OS does the
+// thread cleanup.
+//
+void OS_CleanupThreadData(void)
+{
+#if defined(__ANDROID__) || defined(__Fuchsia__)
+    DetachThreadLinux(NULL);
+#else
+    int old_cancel_state, old_cancel_type;
+    void *cleanupArg = NULL;
+
+    //
+    // Set thread cancel state and push cleanup handler.
+    //
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_cancel_state);
+    pthread_cleanup_push(DetachThreadLinux, (void *)cleanupArg);
+
+    //
+    // Put the thread in deferred cancellation mode.
+    //
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, &old_cancel_type);
+
+    //
+    // Pop cleanup handler and execute it prior to unregistering the cleanup handler.
+    //
+    pthread_cleanup_pop(1);
+
+    //
+    // Restore the thread's previous cancellation mode.
+    //
+    pthread_setcanceltype(old_cancel_state, NULL);
+#endif
+}
+
+//
+// Thread Local Storage Operations
+//
+inline OS_TLSIndex PthreadKeyToTLSIndex(pthread_key_t key)
+{
+    return (OS_TLSIndex)((uintptr_t)key + 1);
+}
+
+inline pthread_key_t TLSIndexToPthreadKey(OS_TLSIndex nIndex)
+{
+    return (pthread_key_t)((uintptr_t)nIndex - 1);
+}
+
+OS_TLSIndex OS_AllocTLSIndex()
+{
+    pthread_key_t pPoolIndex;
+
+    //
+    // Create global pool key.
+    //
+    if ((pthread_key_create(&pPoolIndex, NULL)) != 0)
+    {
+        assert(0 && "OS_AllocTLSIndex(): Unable to allocate Thread Local Storage");
+        return OS_INVALID_TLS_INDEX;
+    }
+    else
+        return PthreadKeyToTLSIndex(pPoolIndex);
+}
+
+bool OS_SetTLSValue(OS_TLSIndex nIndex, void *lpvValue)
+{
+    if (nIndex == OS_INVALID_TLS_INDEX)
+    {
+        assert(0 && "OS_SetTLSValue(): Invalid TLS Index");
+        return false;
+    }
+
+    if (pthread_setspecific(TLSIndexToPthreadKey(nIndex), lpvValue) == 0)
+        return true;
+    else
+        return false;
+}
+
+void* OS_GetTLSValue(OS_TLSIndex nIndex)
+{
+    //
+    // This function should return 0 if nIndex is invalid.
+    //
+    assert(nIndex != OS_INVALID_TLS_INDEX);
+    return pthread_getspecific(TLSIndexToPthreadKey(nIndex));
+}
+
+bool OS_FreeTLSIndex(OS_TLSIndex nIndex)
+{
+    if (nIndex == OS_INVALID_TLS_INDEX)
+    {
+        assert(0 && "OS_SetTLSValue(): Invalid TLS Index");
+        return false;
+    }
+
+    //
+    // Delete the global pool key.
+    //
+    if (pthread_key_delete(TLSIndexToPthreadKey(nIndex)) == 0)
+        return true;
+    else
+        return false;
+}
+
+#endif
 
 } // namespace glslang
