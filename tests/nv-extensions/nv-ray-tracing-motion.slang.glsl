@@ -4,7 +4,7 @@
 layout(row_major) uniform;
 
 #extension GL_EXT_ray_tracing : require
-#extension GLSL_NV_ray_tracing_motion : require
+#extension GL_NV_ray_tracing_motion : require
 
 #define TRACING_EPSILON 1e-6
 
