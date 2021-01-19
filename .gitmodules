@@ -22,3 +22,6 @@
 [submodule "external/lz4"]
 	path = external/lz4
 	url = https://github.com/lz4/lz4
+[submodule "external/glslang"]
+	path = external/glslang
+	url = ssh://git@gitlab-master.nvidia.com:12051/slang/glslang.git
