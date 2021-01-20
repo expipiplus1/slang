@@ -4351,13 +4351,13 @@ bool ReportHit(float tHit, uint hitKind, A attributes)
 // 10.3.4
 __target_intrinsic(hlsl)
 __target_intrinsic(GL_NV_ray_tracing, ignoreIntersectionNV)
-__target_intrinsic(GL_EXT_ray_tracing, ignoreIntersectionEXT)
+__target_intrinsic(GL_EXT_ray_tracing, "ignoreIntersectionEXT;")
 void IgnoreHit();
 
 // 10.3.5
 __target_intrinsic(hlsl)
 __target_intrinsic(GL_NV_ray_tracing, terminateRayNV)
-__target_intrinsic(GL_EXT_ray_tracing, terminateRayEXT)
+__target_intrinsic(GL_EXT_ray_tracing, "terminateRayEXT;")
 void AcceptHitAndEndSearch();
 
 // 10.4 - System Values and Special Semantics
@@ -4467,7 +4467,8 @@ float3x4 ObjectToWorld() { return ObjectToWorld3x4(); }
 float3x4 WorldToObject() { return WorldToObject3x4(); }
 
 // 10.4.4 - Hit Specific System values
-__target_intrinsic(GL_EXT_ray_tracing, "(gl_CurrentRayTimeNV)")
+__target_intrinsic(GL_NV_ray_tracing, "(gl_HitKindNV)")
+__target_intrinsic(GL_EXT_ray_tracing, "(gl_HitKindEXT)")
 uint HitKind();
 
 // Pre-defined hit kinds (not documented explicitly)
