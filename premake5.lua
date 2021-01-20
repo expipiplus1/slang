@@ -18,7 +18,7 @@
 -- how it uses/abuses Lua syntax. A few important things to note:
 --
 -- * Everything that *looks* like a declarative (e.g., `kind "SharedLib"`)
--- is actually a Lua function call (e.g., `kind("SharedLib")`) that
+-- is actually a Lua function call (e.g., `kind("SharedLib")`b) that
 -- modifies the behind-the-scenes state that describes the build.
 --
 -- * Many of these function calls are "sticky" and affect subsequent
@@ -79,7 +79,8 @@ newoption {
    trigger     = "build-glslang",
    description = "(Optional) If true glslang and spirv-opt will be built",
    value       = "bool",
-   default     = "false",
+   -- TODO(JS): Default to true for now as slang-binaries glslang will not work
+   default     = "true",
    allowed     = { { "true", "True"}, { "false", "False" } }
 }
 
