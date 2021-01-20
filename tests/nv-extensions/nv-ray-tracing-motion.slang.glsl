@@ -51,10 +51,10 @@ struct RayDesc_0
     float TMax_0;
 };
 
-void TraceMotionRay_0(accelerationStructureEXT AccelerationStructure_0, uint RayFlags_0, uint InstanceInclusionMask_0, uint RayContributionToHitGroupIndex_0, uint MultiplierForGeometryContributionToHitGroupIndex_0, uint MissShaderIndex_0, RayDesc_0 Ray_0, float Time_0, inout ShadowRay_0 Payload_0)
+void TraceMotionRay_0(accelerationStructureEXT AccelerationStructure_0, uint RayFlags_0, uint InstanceInclusionMask_0, uint RayContributionToHitGroupIndex_0, uint MultiplierForGeometryContributionToHitGroupIndex_0, uint MissShaderIndex_0, RayDesc_0 Ray_0, float CurrentTime_0, inout ShadowRay_0 Payload_0)
 {
     p_0 = Payload_0;
-    traceMotionNV(AccelerationStructure_0, RayFlags_0, InstanceInclusionMask_0, RayContributionToHitGroupIndex_0, MultiplierForGeometryContributionToHitGroupIndex_0, MissShaderIndex_0, Ray_0.Origin_0, Ray_0.TMin_0, Ray_0.Direction_0, Ray_0.TMax_0, Time_0, (0));
+    traceMotionNV(AccelerationStructure_0, RayFlags_0, InstanceInclusionMask_0, RayContributionToHitGroupIndex_0, MultiplierForGeometryContributionToHitGroupIndex_0, MissShaderIndex_0, Ray_0.Origin_0, Ray_0.TMin_0, Ray_0.Direction_0, Ray_0.TMax_0, CurrentTime_0, (0));
     Payload_0 = p_0;
     return;
 }
@@ -125,7 +125,7 @@ void main()
     ShadowRay_0 shadowRay_0;
     shadowRay_0.hitDistance_0 = float(0);
 
-    const float time_0 = float(1);
+    const float currentTime_0 = float(1);
 
     const uint _S10 = uint(1);
 
@@ -143,7 +143,7 @@ void main()
 
     _S16 = shadowRay_0;
 
-    TraceMotionRay_0(as_0, _S10, _S11, _S12, _S13, _S14, _S15, time_0, _S16);
+    TraceMotionRay_0(as_0, _S10, _S11, _S12, _S13, _S14, _S15, currentTime_0, _S16);
 
     shadowRay_0 = _S16;
 

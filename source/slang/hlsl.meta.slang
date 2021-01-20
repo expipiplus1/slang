@@ -4264,8 +4264,6 @@ void TraceRay(
 // NOTE!
 // The name of the following functions may change when DXR supports
 // a feature similar to the `GL_NV_ray_tracing_motion` extension
-//
-// NOTE! Not 100% what the `Time` parameter is, as don't have spec
 
 void TraceMotionRay<payload_t>(
     RaytracingAccelerationStructure AccelerationStructure,
@@ -4275,7 +4273,7 @@ void TraceMotionRay<payload_t>(
     uint                            MultiplierForGeometryContributionToHitGroupIndex,
     uint                            MissShaderIndex,
     RayDesc                         Ray,
-    float                           Time,
+    float                           CurrentTime,
     inout payload_t                 Payload);
 
 __target_intrinsic(glsl, "traceMotionNV")
@@ -4293,7 +4291,7 @@ void __traceMotionRay(
     float                           TMin,
     float3                          Direction,
     float                           TMax,
-    float                           Time,               
+    float                           CurrentTime,               
     int                             PayloadLocation);
 
 __generic<payload_t>
@@ -4306,7 +4304,7 @@ void TraceMotionRay(
     uint                            MultiplierForGeometryContributionToHitGroupIndex,
     uint                            MissShaderIndex,
     RayDesc                         Ray,
-    float                           Time,
+    float                           CurrentTime,
     inout payload_t                 Payload)
 {
     [__vulkanRayPayload]
@@ -4324,7 +4322,7 @@ void TraceMotionRay(
         Ray.TMin,
         Ray.Direction,
         Ray.TMax,
-        Time,
+        CurrentTime,
         __rayPayloadLocation(p));
     Payload = p;
 }

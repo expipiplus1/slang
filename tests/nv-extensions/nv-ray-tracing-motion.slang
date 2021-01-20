@@ -64,9 +64,7 @@ void main()
         ShadowRay shadowRay;
         shadowRay.hitDistance = 0;
 
-        // TODO(JS):
-        // Not sure what this parameter is, so assuming it's 'time'
-        float time = 1;
+        float currentTime = 1;
 
         TraceMotionRay(as,
                 // ray flags
@@ -81,8 +79,8 @@ void main()
                 2,
                 // ray
                 ray,
-                // time
-                time,
+                // currentTime
+                currentTime,
                 // payload
                 shadowRay);
         
