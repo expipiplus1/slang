@@ -5,7 +5,6 @@
 #include "StandAlone/ResourceLimits.h"
 #include "StandAlone/Worklist.h"
 #include "glslang/Include/ShHandle.h"
-#include "glslang/Include/revision.h"
 #include "glslang/Public/ShaderLang.h"
 #include "SPIRV/GlslangToSpv.h"
 #include "SPIRV/GLSL.std.450.h"
@@ -591,6 +590,7 @@ int glslang_compile(glslang_CompileRequest_1_0* inRequest)
     return glslang_compile_1_1(&request);
 }
 
+#if 0
 static std::mutex g_globalMutex;
 
 namespace glslang {
@@ -798,3 +798,4 @@ bool OS_FreeTLSIndex(OS_TLSIndex nIndex)
 #endif
 
 } // namespace glslang
+#endif
