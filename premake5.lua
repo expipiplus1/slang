@@ -18,7 +18,7 @@
 -- how it uses/abuses Lua syntax. A few important things to note:
 --
 -- * Everything that *looks* like a declarative (e.g., `kind "SharedLib"`)
--- is actually a Lua function call (e.g., `kind("SharedLib")`b) that
+-- is actually a Lua function call (e.g., `kind("SharedLib")`) that
 -- modifies the behind-the-scenes state that describes the build.
 --
 -- * Many of these function calls are "sticky" and affect subsequent
