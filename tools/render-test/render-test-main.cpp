@@ -4,7 +4,7 @@
 
 #include "options.h"
 #include "render.h"
-#include "shader-cursor.h"
+#include "tools/gfx-util/shader-cursor.h"
 #include "slang-support.h"
 #include "surface.h"
 #include "png-serialize-util.h"
@@ -74,7 +74,7 @@ struct ShaderOutputPlan
     struct Item
     {
         Index               inputLayoutEntryIndex;
-        RefPtr<Resource>    resource;
+        ComPtr<IResource>   resource;
     };
 
     List<Item> items;
@@ -111,6 +111,8 @@ protected:
         Options::ShaderProgramType shaderType,
         const ShaderCompilerUtil::Input& input);
 
+    virtual void finalizeImpl();
+
     uint64_t m_startTicks;
 
     // variables for state to be used for rendering...
@@ -118,10 +120,10 @@ protected:
 
     ComPtr<IRenderer> m_renderer;
 
-    RefPtr<InputLayout> m_inputLayout;
-    RefPtr<BufferResource> m_vertexBuffer;
-    RefPtr<ShaderProgram> m_shaderProgram;
-    RefPtr<PipelineState> m_pipelineState;
+    ComPtr<IInputLayout> m_inputLayout;
+    ComPtr<IBufferResource> m_vertexBuffer;
+    ComPtr<IShaderProgram> m_shaderProgram;
+    ComPtr<IPipelineState> m_pipelineState;
 
     ShaderCompilerUtil::OutputAndLayout m_compilationOutput;
 
@@ -147,7 +149,7 @@ public:
 
 protected:
 	uintptr_t m_constantBufferSize;
-	RefPtr<BufferResource>	m_constantBuffer;
+	ComPtr<IBufferResource>	m_constantBuffer;
 	RefPtr<BindingStateImpl>    m_bindingState;
     int m_numAddedConstantBuffers;                      ///< Constant buffers can be added to the binding directly. Will be added at the end.
 };
@@ -165,20 +167,22 @@ public:
     virtual Result writeBindingOutput(BindRoot* bindRoot, const char* fileName) override;
 
 protected:
-    RefPtr<ShaderObject> m_programVars;
+    virtual void finalizeImpl() SLANG_OVERRIDE;
+
+    ComPtr<IShaderObject> m_programVars;
     ShaderOutputPlan m_outputPlan;
 };
 
 SlangResult _assignVarsFromLayout(
     IRenderer*                   renderer,
-    ShaderObject*               shaderObject,
+    IShaderObject*               shaderObject,
     ShaderInputLayout const&    layout,
     ShaderOutputPlan&           ioOutputPlan,
     slang::ProgramLayout*       slangReflection)
 {
     ShaderCursor rootCursor = ShaderCursor(shaderObject);
 
-    const int textureBindFlags = Resource::BindFlag::NonPixelShaderResource | Resource::BindFlag::PixelShaderResource;
+    const int textureBindFlags = IResource::BindFlag::NonPixelShaderResource | IResource::BindFlag::PixelShaderResource;
 
     Index entryCount = layout.entries.getCount();
     for(Index entryIndex = 0; entryIndex < entryCount; ++entryIndex)
@@ -190,13 +194,13 @@ SlangResult _assignVarsFromLayout(
             return SLANG_E_INVALID_ARG;
         }
 
-        auto entryCursor = rootCursor.getPath(entry.name);
+        auto entryCursor = rootCursor.getPath(entry.name.getBuffer());
 
         if(!entryCursor.isValid())
         {
-            for(Index i = 0; i < shaderObject->getEntryPointCount(); i++)
+            for(gfx::UInt i = 0; i < shaderObject->getEntryPointCount(); i++)
             {
-                entryCursor = ShaderCursor(shaderObject->getEntryPoint(i)).getPath(entry.name);
+                entryCursor = ShaderCursor(shaderObject->getEntryPoint(i)).getPath(entry.name.getBuffer());
                 if(entryCursor.isValid())
                     break;
             }
@@ -209,7 +213,7 @@ SlangResult _assignVarsFromLayout(
             return SLANG_E_INVALID_ARG;
         }
 
-        RefPtr<Resource> resource;
+        ComPtr<IResource> resource;
         switch(entry.type)
         {
         case ShaderInputType::Uniform:
@@ -267,12 +271,12 @@ SlangResult _assignVarsFromLayout(
                 default:
                     {
 
-                        RefPtr<BufferResource> bufferResource;
+                        ComPtr<IBufferResource> bufferResource;
                         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::createBufferResource(entry.bufferDesc, entry.isOutput, bufferSize, entry.bufferData.getBuffer(), renderer, bufferResource));
                         resource = bufferResource;
 
-                        ResourceView::Desc viewDesc;
-                        viewDesc.type = ResourceView::Type::UnorderedAccess;
+                        IResourceView::Desc viewDesc;
+                        viewDesc.type = IResourceView::Type::UnorderedAccess;
                         viewDesc.format = srcBuffer.format;
                         auto bufferView = renderer->createBufferView(
                             bufferResource,
@@ -315,14 +319,14 @@ SlangResult _assignVarsFromLayout(
 
         case ShaderInputType::CombinedTextureSampler:
             {
-                RefPtr<TextureResource> texture;
+                ComPtr<ITextureResource> texture;
                 SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(entry.textureDesc, textureBindFlags, renderer, texture));
                 resource = texture;
 
                 auto sampler = _createSamplerState(renderer, entry.samplerDesc);
 
-                ResourceView::Desc viewDesc;
-                viewDesc.type = ResourceView::Type::ShaderResource;
+                IResourceView::Desc viewDesc;
+                viewDesc.type = IResourceView::Type::ShaderResource;
                 auto textureView = renderer->createTextureView(
                     texture,
                     viewDesc);
@@ -345,14 +349,14 @@ SlangResult _assignVarsFromLayout(
 
         case ShaderInputType::Texture:
             {
-                RefPtr<TextureResource> texture;
+                ComPtr<ITextureResource> texture;
                 SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(entry.textureDesc, textureBindFlags, renderer, texture));
                 resource = texture;
 
                 // TODO: support UAV textures...
 
-                ResourceView::Desc viewDesc;
-                viewDesc.type = ResourceView::Type::ShaderResource;
+                IResourceView::Desc viewDesc;
+                viewDesc.type = IResourceView::Type::ShaderResource;
                 auto textureView = renderer->createTextureView(
                     texture,
                     viewDesc);
@@ -392,11 +396,42 @@ SlangResult _assignVarsFromLayout(
         case ShaderInputType::Object:
             {
                 auto typeName = entry.objectDesc.typeName;
-                auto slangType = slangReflection->findTypeByName(typeName.getBuffer());
-                auto slangTypeLayout = slangReflection->getTypeLayout(slangType);
+                slang::TypeLayoutReflection* slangTypeLayout = nullptr;
+                if(typeName.getLength() != 0)
+                {
+                    // If the input line specified the name of the type
+                    // to allocate, then we use it directly.
+                    //
+                    auto slangType = slangReflection->findTypeByName(typeName.getBuffer());
+                    slangTypeLayout = slangReflection->getTypeLayout(slangType);
+                }
+                else
+                {
+                    // if the user did not specify what type to allocate,
+                    // then we will infer the type from the type of the
+                    // value pointed to by `entryCursor`.
+                    //
+                    slangTypeLayout = entryCursor.getTypeLayout();
+                    switch(slangTypeLayout->getKind())
+                    {
+                    default:
+                        break;
 
-                RefPtr<ShaderObjectLayout> shaderObjectLayout = renderer->createShaderObjectLayout(slangTypeLayout);
-                RefPtr<ShaderObject> shaderObject = renderer->createShaderObject(shaderObjectLayout);
+                    case slang::TypeReflection::Kind::ConstantBuffer:
+                    case slang::TypeReflection::Kind::ParameterBlock:
+                        // If the cursor is pointing at a constant buffer
+                        // or parameter block, then we assume the user
+                        // actually means to allocate an object based on
+                        // the element type of the block.
+                        //
+                        slangTypeLayout = slangTypeLayout->getElementTypeLayout();
+                        break;
+                    }
+                }
+
+                ComPtr<IShaderObjectLayout> shaderObjectLayout = renderer->createShaderObjectLayout(slangTypeLayout);
+                ComPtr<IShaderObject> shaderObject =
+                    renderer->createShaderObject(shaderObjectLayout);
 
                 entryCursor.setObject(shaderObject);
             }
@@ -445,12 +480,12 @@ SlangResult LegacyRenderTestApp::initialize(
     // TODO(tfoley): use each API's reflection interface to query the constant-buffer size needed
     m_constantBufferSize = 16 * sizeof(float);
 
-    BufferResource::Desc constantBufferDesc;
+    IBufferResource::Desc constantBufferDesc;
     constantBufferDesc.init(m_constantBufferSize);
-    constantBufferDesc.cpuAccessFlags = Resource::AccessFlag::Write;
+    constantBufferDesc.cpuAccessFlags = IResource::AccessFlag::Write;
 
     m_constantBuffer =
-        renderer->createBufferResource(Resource::Usage::ConstantBuffer, constantBufferDesc);
+        renderer->createBufferResource(IResource::Usage::ConstantBuffer, constantBufferDesc);
     if (!m_constantBuffer)
         return SLANG_FAIL;
 
@@ -458,7 +493,7 @@ SlangResult LegacyRenderTestApp::initialize(
     //
     // TODO: Should probably be more sophisticated than this - with 'dynamic' constant buffer/s
     // binding always being specified in the test file
-    RefPtr<BufferResource> addedConstantBuffer;
+    ComPtr<IBufferResource> addedConstantBuffer;
     switch (m_options.shaderType)
     {
     default:
@@ -490,11 +525,11 @@ SlangResult LegacyRenderTestApp::initialize(
     if (!m_inputLayout)
         return SLANG_FAIL;
 
-    BufferResource::Desc vertexBufferDesc;
+    IBufferResource::Desc vertexBufferDesc;
     vertexBufferDesc.init(kVertexCount * sizeof(Vertex));
 
     m_vertexBuffer = renderer->createBufferResource(
-        Resource::Usage::VertexBuffer, vertexBufferDesc, kVertexData);
+        IResource::Usage::VertexBuffer, vertexBufferDesc, kVertexData);
     if (!m_vertexBuffer)
         return SLANG_FAIL;
 
@@ -555,12 +590,11 @@ SlangResult ShaderObjectRenderTestApp::initialize(
     // Slang's reflection API to tell us what the parameters of the program are.
     //
     auto slangReflection = (slang::ProgramLayout*) spGetReflection(m_compilationOutput.output.getRequestForReflection());
-    RefPtr<ShaderObjectLayout> programLayout = renderer->createRootShaderObjectLayout(slangReflection);
 
     // Once we have determined the layout of all the parameters we need to bind,
     // we will create a shader object to use for storing and binding those parameters.
     //
-    m_programVars = renderer->createRootShaderObject(programLayout);
+    m_programVars = renderer->createRootShaderObject(m_shaderProgram);
 
     // Now we need to assign from the input parameter data that was parsed into
     // the program vars we allocated.
@@ -569,9 +603,6 @@ SlangResult ShaderObjectRenderTestApp::initialize(
         renderer, m_programVars, m_compilationOutput.layout, m_outputPlan, slangReflection));
 
 	m_renderer = renderer;
-
-    // TODO(tfoley): use each API's reflection interface to query the constant-buffer size needed
-//    m_constantBufferSize = 16 * sizeof(float);
 
     {
         switch(m_options.shaderType)
@@ -583,7 +614,6 @@ SlangResult ShaderObjectRenderTestApp::initialize(
         case Options::ShaderProgramType::Compute:
             {
                 ComputePipelineStateDesc desc;
-                desc.rootShaderObjectLayout = programLayout.Ptr();
                 desc.program = m_shaderProgram;
 
                 m_pipelineState = renderer->createComputePipelineState(desc);
@@ -608,16 +638,15 @@ SlangResult ShaderObjectRenderTestApp::initialize(
                     { "A", 2, Format::RG_Float32,  offsetof(Vertex, uv) },
                 };
 
-                RefPtr<InputLayout> inputLayout;
+                ComPtr<IInputLayout> inputLayout;
                 SLANG_RETURN_ON_FAIL(renderer->createInputLayout(inputElements, SLANG_COUNT_OF(inputElements), inputLayout.writeRef()));
 
-                BufferResource::Desc vertexBufferDesc;
+                IBufferResource::Desc vertexBufferDesc;
                 vertexBufferDesc.init(kVertexCount * sizeof(Vertex));
 
-                SLANG_RETURN_ON_FAIL(renderer->createBufferResource(Resource::Usage::VertexBuffer, vertexBufferDesc, kVertexData, m_vertexBuffer.writeRef()));
+                SLANG_RETURN_ON_FAIL(renderer->createBufferResource(IResource::Usage::VertexBuffer, vertexBufferDesc, kVertexData, m_vertexBuffer.writeRef()));
 
                 GraphicsPipelineStateDesc desc;
-                desc.rootShaderObjectLayout = programLayout.Ptr();
                 desc.program = m_shaderProgram;
                 desc.inputLayout = inputLayout;
 
@@ -629,6 +658,12 @@ SlangResult ShaderObjectRenderTestApp::initialize(
 
     // If success must have a pipeline state
     return m_pipelineState ? SLANG_OK : SLANG_FAIL;
+}
+
+void ShaderObjectRenderTestApp::finalizeImpl()
+{
+    m_programVars = nullptr;
+    RenderTestApp::finalizeImpl();
 }
 
 Result RenderTestApp::_initializeShaders(
@@ -650,8 +685,8 @@ void LegacyRenderTestApp::setProjectionMatrix()
     if (mappedData)
     {
         const ProjectionStyle projectionStyle =
-            RendererUtil::getProjectionStyle(m_renderer->getRendererType());
-        RendererUtil::getIdentityProjection(projectionStyle, (float*)mappedData);
+            gfxGetProjectionStyle(m_renderer->getRendererType());
+        gfxGetIdentityProjection(projectionStyle, (float*)mappedData);
 
         m_renderer->unmap(m_constantBuffer);
     }
@@ -660,10 +695,10 @@ void LegacyRenderTestApp::setProjectionMatrix()
 void ShaderObjectRenderTestApp::setProjectionMatrix()
 {
     const ProjectionStyle projectionStyle =
-        RendererUtil::getProjectionStyle(m_renderer->getRendererType());
+        gfxGetProjectionStyle(m_renderer->getRendererType());
 
     float projectionMatrix[16];
-    RendererUtil::getIdentityProjection(projectionStyle, projectionMatrix);
+    gfxGetIdentityProjection(projectionStyle, projectionMatrix);
     ShaderCursor(m_programVars)
         .getField("Uniforms")
         .getDereferenced()
@@ -699,6 +734,18 @@ void RenderTestApp::runCompute()
 
 void RenderTestApp::finalize()
 {
+    finalizeImpl();
+
+    m_inputLayout = nullptr;
+    m_vertexBuffer = nullptr;
+    m_shaderProgram = nullptr;
+    m_pipelineState = nullptr;
+
+    m_renderer = nullptr;
+}
+
+void RenderTestApp::finalizeImpl()
+{
 }
 
 Result LegacyRenderTestApp::writeBindingOutput(BindRoot* bindRoot, const char* fileName)
@@ -722,10 +769,10 @@ Result LegacyRenderTestApp::writeBindingOutput(BindRoot* bindRoot, const char* f
 
         assert(layoutBinding.isOutput);
         
-        if (binding.resource && binding.resource->isBuffer())
+        if (binding.resource && binding.resource->getType() == IResource::Type::Buffer)
         {
-            BufferResource* bufferResource = static_cast<BufferResource*>(binding.resource.Ptr());
-            const size_t bufferSize = bufferResource->getDesc().sizeInBytes;
+            IBufferResource* bufferResource = static_cast<IBufferResource*>(binding.resource.get());
+            const size_t bufferSize = bufferResource->getDesc()->sizeInBytes;
 
             unsigned int* ptr = (unsigned int*)m_renderer->map(bufferResource, MapFlavor::HostRead);
             if (!ptr)
@@ -768,10 +815,10 @@ Result ShaderObjectRenderTestApp::writeBindingOutput(BindRoot* bindRoot, const c
         assert(inputEntry.isOutput);
 
         auto resource = outputItem.resource;
-        if (resource && resource->isBuffer())
+        if (resource && resource->getType() == IResource::Type::Buffer)
         {
-            BufferResource* bufferResource = static_cast<BufferResource*>(resource.Ptr());
-            const size_t bufferSize = bufferResource->getDesc().sizeInBytes;
+            IBufferResource* bufferResource = static_cast<IBufferResource*>(resource.get());
+            const size_t bufferSize = bufferResource->getDesc()->sizeInBytes;
 
             unsigned int* ptr = (unsigned int*)m_renderer->map(bufferResource, MapFlavor::HostRead);
             if (!ptr)
@@ -796,8 +843,23 @@ Result ShaderObjectRenderTestApp::writeBindingOutput(BindRoot* bindRoot, const c
 
 Result RenderTestApp::writeScreen(const char* filename)
 {
+    size_t rowPitch, bufferSize, pixelSize;
+    List<uint8_t> buffer;
+
+    SLANG_RETURN_ON_FAIL(m_renderer->captureScreenSurface(nullptr, &bufferSize, &rowPitch, &pixelSize));
+    buffer.setCount(bufferSize);
+    SLANG_RETURN_ON_FAIL(
+        m_renderer->captureScreenSurface(buffer.getBuffer(), &bufferSize, &rowPitch, &pixelSize));
+
     Surface surface;
-    SLANG_RETURN_ON_FAIL(m_renderer->captureScreenSurface(surface));
+    size_t width = rowPitch / pixelSize;
+    size_t height = bufferSize / rowPitch;
+    surface.setUnowned(
+        (int)width,
+        (int)height,
+        gfx::Format::RGBA_Unorm_UInt8,
+        (int)rowPitch,
+        buffer.getBuffer());
     return PngSerializeUtil::write(filename, surface);
 }
 
@@ -1054,7 +1116,7 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
     input.profile = options.profileName ? options.profileName : input.profile;
 
     StringBuilder rendererName;
-    rendererName << "[" << RendererUtil::toText(options.rendererType) << "] ";
+    rendererName << "[" << gfxGetRendererName(options.rendererType) << "] ";
     if (options.adapter.getLength())
     {
         rendererName << "'" << options.adapter << "'";
@@ -1217,7 +1279,7 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
 
     Slang::ComPtr<IRenderer> renderer;
     {
-        RendererUtil::CreateFunc createFunc = RendererUtil::getCreateFunc(options.rendererType);
+        SGRendererCreateFunc createFunc = gfxGetCreateFunc(options.rendererType);
         if (createFunc)
         {
             createFunc(renderer.writeRef());
@@ -1235,8 +1297,12 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         IRenderer::Desc desc;
         desc.width = gWindowWidth;
         desc.height = gWindowHeight;
-        desc.adapter = options.adapter;
-        desc.requiredFeatures = options.renderFeatures;
+        desc.adapter = options.adapter.getBuffer();
+        List<const char*> requiredFeatureList;
+        for (auto & name : options.renderFeatures)
+            requiredFeatureList.add(name.getBuffer());
+        desc.requiredFeatures = requiredFeatureList.getBuffer();
+        desc.requiredFeatureCount = (int)requiredFeatureList.getCount();
         desc.nvapiExtnSlot = int(nvapiExtnSlot);
 
         window = renderer_test::Window::create();
@@ -1254,10 +1320,10 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
             return res;
         }
 
-        for (const auto& feature : options.renderFeatures)
+        for (const auto& feature : requiredFeatureList)
         {
             // If doesn't have required feature... we have to give up
-            if (!renderer->hasFeature(feature.getUnownedSlice()))
+            if (!renderer->hasFeature(feature))
             {
                 return SLANG_E_NOT_AVAILABLE;
             }
@@ -1278,7 +1344,9 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
             app = new LegacyRenderTestApp();
 		SLANG_RETURN_ON_FAIL(app->initialize(session, renderer, options, input));
         window->show();
-        return window->runLoop(app);
+        SLANG_RETURN_ON_FAIL(window->runLoop(app));
+        app->finalize();
+        return SLANG_OK;
 	}
 }
 
