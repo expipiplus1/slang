@@ -4261,6 +4261,72 @@ void TraceRay(
     Payload = p;
 }
 
+// NOTE!
+// The name of the following functions may change when DXR supports
+// a feature similar to the `GL_NV_ray_tracing_motion` extension
+
+void TraceMotionRay<payload_t>(
+    RaytracingAccelerationStructure AccelerationStructure,
+    uint                            RayFlags,
+    uint                            InstanceInclusionMask,
+    uint                            RayContributionToHitGroupIndex,
+    uint                            MultiplierForGeometryContributionToHitGroupIndex,
+    uint                            MissShaderIndex,
+    RayDesc                         Ray,
+    float                           CurrentTime,
+    inout payload_t                 Payload);
+
+__target_intrinsic(glsl, "traceMotionNV")
+__glsl_version(460)
+__glsl_extension(GL_NV_ray_tracing_motion)
+__glsl_extension(GL_EXT_ray_tracing)
+void __traceMotionRay(
+    RaytracingAccelerationStructure AccelerationStructure,
+    uint                            RayFlags,
+    uint                            InstanceInclusionMask,
+    uint                            RayContributionToHitGroupIndex,
+    uint                            MultiplierForGeometryContributionToHitGroupIndex,
+    uint                            MissShaderIndex,
+    float3                          Origin,
+    float                           TMin,
+    float3                          Direction,
+    float                           TMax,
+    float                           CurrentTime,               
+    int                             PayloadLocation);
+
+__generic<payload_t>
+__specialized_for_target(glsl)
+void TraceMotionRay(
+    RaytracingAccelerationStructure AccelerationStructure,
+    uint                            RayFlags,
+    uint                            InstanceInclusionMask,
+    uint                            RayContributionToHitGroupIndex,
+    uint                            MultiplierForGeometryContributionToHitGroupIndex,
+    uint                            MissShaderIndex,
+    RayDesc                         Ray,
+    float                           CurrentTime,
+    inout payload_t                 Payload)
+{
+    [__vulkanRayPayload]
+    static payload_t p;
+
+    p = Payload;
+    __traceMotionRay(
+        AccelerationStructure,
+        RayFlags,
+        InstanceInclusionMask,
+        RayContributionToHitGroupIndex,
+        MultiplierForGeometryContributionToHitGroupIndex,
+        MissShaderIndex,
+        Ray.Origin,
+        Ray.TMin,
+        Ray.Direction,
+        Ray.TMax,
+        CurrentTime,
+        __rayPayloadLocation(p));
+    Payload = p;
+}
+
 // 10.3.3
 __target_intrinsic(hlsl)
 bool ReportHit<A>(float tHit, uint hitKind, A attributes);
@@ -4375,6 +4441,16 @@ float4x3 ObjectToWorld4x3();
 __target_intrinsic(GL_NV_ray_tracing, "(gl_WorldToObjectNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_WorldToObject3x4EXT)")
 float4x3 WorldToObject4x3();
+
+// NOTE!
+// The name of the following functions may change when DXR supports
+// a feature similar to the `GL_NV_ray_tracing_motion` extension
+
+__target_intrinsic(glsl, "(gl_CurrentRayTimeNV)")
+__glsl_version(460)
+__glsl_extension(GL_NV_ray_tracing_motion)
+__glsl_extension(GL_EXT_ray_tracing)
+float RayCurrentTime();
 
 // Note: The provisional DXR spec included these unadorned
 // `ObjectToWorld()` and `WorldToObject()` functions, so
