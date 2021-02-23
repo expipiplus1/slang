@@ -578,6 +578,9 @@ if isTargetWindows then
     example "shader-toy"
 end
 
+example "shader-object"
+    kind "ConsoleApp"
+
 example "cpu-hello-world"
     kind "ConsoleApp"
 
@@ -746,6 +749,8 @@ tool "gfx"
     defines { "SLANG_GFX_DYNAMIC", "SLANG_GFX_DYNAMIC_EXPORT" }
 
     includedirs { ".", "external", "source" }
+
+    files {"slang-gfx.h"}
 
     -- Will compile across targets
     addSourceDir "tools/gfx/nvapi"

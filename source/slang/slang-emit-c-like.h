@@ -100,6 +100,9 @@ public:
         /// Get the source manager
     SourceManager* getSourceManager() { return m_compileRequest->getSourceManager(); }
 
+        /// Get the source writer used
+    SourceWriter* getSourceWriter() const { return m_writer; }
+
         /// Get the diagnostic sink
     DiagnosticSink* getSink() { return m_compileRequest->getSink();}
     LineDirectiveMode getLineDirectiveMode() { return m_compileRequest->getLineDirectiveMode(); }
@@ -250,6 +253,9 @@ public:
 
     void emitStruct(IRStructType* structType);
 
+        /// Emit type attributes that should appear after, e.g., a `struct` keyword
+    void emitPostKeywordTypeAttributes(IRInst* inst) { emitPostKeywordTypeAttributesImpl(inst); }
+
     void emitInterpolationModifiers(IRInst* varInst, IRType* valueType, IRVarLayout* layout);
 
     UInt getRayPayloadLocation(IRInst* inst);
@@ -299,6 +305,8 @@ public:
 
     void emitVectorTypeName(IRType* elementType, IRIntegerValue elementCount) { emitVectorTypeNameImpl(elementType, elementCount); }
 
+    void emitTextureOrTextureSamplerType(IRTextureTypeBase* type, char const* baseName) { emitTextureOrTextureSamplerTypeImpl(type, baseName); }
+
     virtual RefObject* getExtensionTracker() { return nullptr; }
 
         /// Gets a source language for a target for a target. Returns Unknown if not a known target
@@ -312,6 +320,8 @@ public:
     static IRNumThreadsDecoration* getComputeThreadGroupSize(IRFunc* func, Int outNumThreads[kThreadGroupAxisCount]);
 
     protected:
+
+
 
     virtual bool doesTargetSupportPtrTypes() { return false; }
     virtual void emitLayoutSemanticsImpl(IRInst* inst, char const* uniformSemanticSpelling = "register") { SLANG_UNUSED(inst); SLANG_UNUSED(uniformSemanticSpelling); }
@@ -361,6 +371,9 @@ public:
     void handleRequiredCapabilities(IRInst* inst);
     virtual void handleRequiredCapabilitiesImpl(IRInst* inst) { SLANG_UNUSED(inst); }
 
+    virtual void emitPostKeywordTypeAttributesImpl(IRInst* inst) { SLANG_UNUSED(inst); }
+
+
     void _emitArrayType(IRArrayType* arrayType, EDeclarator* declarator);
     void _emitUnsizedArrayType(IRUnsizedArrayType* arrayType, EDeclarator* declarator);
     void _emitType(IRType* type, EDeclarator* declarator);
@@ -368,7 +381,6 @@ public:
 
         // Emit the argument list (including paranthesis) in a `CallInst`
     void _emitCallArgList(IRCall* call);
-
 
     String _generateUniqueName(const UnownedStringSlice& slice);
 

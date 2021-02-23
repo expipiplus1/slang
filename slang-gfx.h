@@ -282,7 +282,8 @@ public:
         case Usage::DepthWrite:
             return BindFlag::DepthStencil;
         case Usage::UnorderedAccess:
-            return BindFlag::UnorderedAccess;
+            return BindFlag::Enum(BindFlag::UnorderedAccess | BindFlag::PixelShaderResource |
+                BindFlag::NonPixelShaderResource);
         case Usage::PixelShaderResource:
             return BindFlag::PixelShaderResource;
         case Usage::NonPixelShaderResource:
@@ -839,14 +840,6 @@ struct ShaderOffset
     SlangInt bindingArrayIndex = 0;
 };
 
-class IShaderObjectLayout : public ISlangUnknown
-{};
-#define SLANG_UUID_IShaderObjectLayout                                                 \
-    {                                                                                 \
-        0x27f3f67e, 0xa49d, 0x4aae, { 0xa6, 0xd, 0xfa, 0xc2, 0x6b, 0x1c, 0x10, 0x7c } \
-    }
-
-
 class IShaderObject : public ISlangUnknown
 {
 public:
@@ -1038,8 +1031,6 @@ struct GraphicsPipelineStateDesc
     IPipelineLayout* pipelineLayout = nullptr;
 
     IInputLayout*        inputLayout;
-    UInt                framebufferWidth;
-    UInt                framebufferHeight;
     UInt                renderTargetCount = 0; // Only used if `pipelineLayout` is non-null
     DepthStencilDesc    depthStencil;
     RasterizerDesc      rasterizer;
@@ -1085,24 +1076,49 @@ struct Viewport
 class IRenderer: public ISlangUnknown
 {
 public:
+    struct SlangDesc
+    {
+        slang::IGlobalSession* slangGlobalSession = nullptr; // (optional) A slang global session object. If null will create automatically.
+
+        SlangMatrixLayoutMode defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_ROW_MAJOR;
+
+        char const* const* searchPaths = nullptr;
+        SlangInt            searchPathCount = 0;
+
+        slang::PreprocessorMacroDesc const* preprocessorMacros = nullptr;
+        SlangInt                        preprocessorMacroCount = 0;
+
+        const char* targetProfile = nullptr; // (optional) Target shader profile. If null this will be set to platform dependent default.
+        SlangFloatingPointMode floatingPointMode = SLANG_FLOATING_POINT_MODE_DEFAULT;
+        SlangOptimizationLevel optimizationLevel = SLANG_OPTIMIZATION_LEVEL_DEFAULT;
+    };
 
     struct Desc
     {
-        int width = 0;                                  ///< Width in pixels
-        int height = 0;                                 ///< height in pixels
-        const char* adapter = nullptr;                  ///< Name to identify the adapter to use
-        int requiredFeatureCount = 0;                   ///< Number of required features.
-        const char** requiredFeatures = nullptr;        ///< Array of required feature names, whose size is `requiredFeatureCount`.
-        int nvapiExtnSlot = -1;                         ///< The slot (typically UAV) used to identify NVAPI intrinsics. If >=0 NVAPI is required.
+        RendererType rendererType; // The underlying API/Platform of the renderer.
+        int width = 0;                                  // Width in pixels
+        int height = 0;                                 // height in pixels
+        const char* adapter = nullptr;                  // Name to identify the adapter to use
+        int requiredFeatureCount = 0;                   // Number of required features.
+        const char** requiredFeatures = nullptr;        // Array of required feature names, whose size is `requiredFeatureCount`.
+        int nvapiExtnSlot = -1;                         // The slot (typically UAV) used to identify NVAPI intrinsics. If >=0 NVAPI is required.
+        ISlangFileSystem* shaderCacheFileSystem = nullptr; // The file system for loading cached shader kernels.
+        SlangDesc slang = {};                           // Configurations for Slang.
     };
-
-        // Will return with SLANG_E_NOT_AVAILABLE if NVAPI can't be initialized and nvapiExtnSlot >= 0
-    virtual SLANG_NO_THROW Result SLANG_MCALL initialize(const Desc& desc, void* inWindowHandle) = 0;
 
     virtual SLANG_NO_THROW bool SLANG_MCALL hasFeature(const char* feature) = 0;
 
         /// Returns a list of features supported by the renderer.
     virtual SLANG_NO_THROW Result SLANG_MCALL getFeatures(const char** outFeatures, UInt bufferSize, UInt* outFeatureCount) = 0;
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL getSlangSession(slang::ISession** outSlangSession) = 0;
+
+    inline ComPtr<slang::ISession> getSlangSession()
+    {
+        ComPtr<slang::ISession> result;
+        getSlangSession(result.writeRef());
+        return result;
+    }
 
     virtual SLANG_NO_THROW void SLANG_MCALL setClearColor(const float color[4]) = 0;
     virtual SLANG_NO_THROW void SLANG_MCALL clearFrame() = 0;
@@ -1196,22 +1212,12 @@ public:
         return layout;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObjectLayout(
-        slang::TypeLayoutReflection* typeLayout, IShaderObjectLayout** outLayout) = 0;
+    virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObject(slang::TypeReflection* type, IShaderObject** outObject) = 0;
 
-    inline ComPtr<IShaderObjectLayout> createShaderObjectLayout(slang::TypeLayoutReflection* typeLayout)
-    {
-        ComPtr<IShaderObjectLayout> layout;
-        SLANG_RETURN_NULL_ON_FAIL(createShaderObjectLayout(typeLayout, layout.writeRef()));
-        return layout;
-    }
-
-    virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObject(IShaderObjectLayout* layout, IShaderObject** outObject) = 0;
-
-    inline ComPtr<IShaderObject> createShaderObject(IShaderObjectLayout* layout)
+    inline ComPtr<IShaderObject> createShaderObject(slang::TypeReflection* type)
     {
         ComPtr<IShaderObject> object;
-        SLANG_RETURN_NULL_ON_FAIL(createShaderObject(layout, object.writeRef()));
+        SLANG_RETURN_NULL_ON_FAIL(createShaderObject(type, object.writeRef()));
         return object;
     }
 
@@ -1316,7 +1322,7 @@ public:
         setScissorRects(1, &rect);
     }
 
-    virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(PipelineType pipelineType, IPipelineState* state) = 0;
+    virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) = 0;
 
     virtual SLANG_NO_THROW void SLANG_MCALL draw(UInt vertexCount, UInt startVertex = 0) = 0;
     virtual SLANG_NO_THROW void SLANG_MCALL drawIndexed(UInt indexCount, UInt startIndex = 0, UInt baseVertex = 0) = 0;
@@ -1348,8 +1354,6 @@ inline void IRenderer::setVertexBuffer(UInt slot, IBufferResource* buffer, UInt 
 
 extern "C"
 {
-    typedef SlangResult(SLANG_MCALL * SGRendererCreateFunc)(IRenderer** outRenderer);
-
     /// Gets the size in bytes of a Format type. Returns 0 if a size is not defined/invalid
     SLANG_GFX_API size_t SLANG_MCALL gfxGetFormatSize(Format format);
 
@@ -1368,7 +1372,7 @@ extern "C"
     SLANG_GFX_API const char* SLANG_MCALL gfxGetRendererName(RendererType type);
 
     /// Given a type returns a function that can construct it, or nullptr if there isn't one
-    SLANG_GFX_API SGRendererCreateFunc SLANG_MCALL gfxGetCreateFunc(RendererType type);
+    SLANG_GFX_API SlangResult SLANG_MCALL gfxCreateRenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer);
 }
 
 }// renderer_test

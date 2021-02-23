@@ -112,7 +112,7 @@ bool allUsesLeadToLoads(IRInst* inst)
     for (auto u = inst->firstUse; u; u = u->nextUse)
     {
         auto user = u->getUser();
-        switch (user->op)
+        switch (user->getOp())
         {
         default:
             return false;
@@ -178,7 +178,7 @@ bool isPromotableVar(
     for (auto u = var->firstUse; u; u = u->nextUse)
     {
         auto user = u->getUser();
-        switch (user->op)
+        switch (user->getOp())
         {
         default:
             // If the variable gets used by any operation
@@ -240,7 +240,7 @@ void identifyPromotableVars(
     {
         for (auto ii = bb->getFirstInst(); ii; ii = ii->getNextInst())
         {
-            if (ii->op != kIROp_Var)
+            if (ii->getOp() != kIROp_Var)
                 continue;
 
             IRVar* var = (IRVar*)ii;
@@ -258,7 +258,7 @@ IRVar* asPromotableVar(
     ConstructSSAContext*    context,
     IRInst*                value)
 {
-    if (value->op != kIROp_Var)
+    if (value->getOp() != kIROp_Var)
         return nullptr;
 
     IRVar* var = (IRVar*)value;
@@ -274,7 +274,7 @@ IRVar* asPromotableVarAccessChain(
     ConstructSSAContext*    context,
     IRInst*                 value)
 {
-    switch (value->op)
+    switch (value->getOp())
     {
     case kIROp_Var:
         return asPromotableVar(context, value);
@@ -301,7 +301,7 @@ IRInst* applyAccessChain(
     IRInst*                 accessChain,
     IRInst*                 leafVarValue)
 {
-    switch (accessChain->op)
+    switch (accessChain->getOp())
     {
     default:
         SLANG_UNEXPECTED("unexpected op along access chain");
@@ -363,7 +363,7 @@ static void cloneRelevantDecorations(
     //
     for( auto decoration : var->getDecorations() )
     {
-        switch(decoration->op)
+        switch(decoration->getOp())
         {
         default:
             // Ignore most decorations.
@@ -376,7 +376,7 @@ static void cloneRelevantDecorations(
             // Copy these decorations if the target doesn't already have them,
             // but don't make duplicate decorations on the target.
             //
-            if( !val->findDecorationImpl(decoration->op) )
+            if( !val->findDecorationImpl(decoration->getOp()) )
             {
                 cloneDecoration(decoration, val, var->getModule());
             }
@@ -476,7 +476,7 @@ IRInst* tryRemoveTrivialPhi(
         if(!user) continue;
         if(user == phi) continue;
 
-        if( user->op == kIROp_Param )
+        if( user->getOp() == kIROp_Param )
         {
             auto maybeOtherPhi = (IRParam*) user;
             if( auto otherPhiInfo = context->getPhiInfo(maybeOtherPhi) )
@@ -622,7 +622,7 @@ IRInst* maybeGetPhiReplacement(
 {
     IRInst* val = inVal;
 
-    while( val->op == kIROp_Param )
+    while( val->getOp() == kIROp_Param )
     {
         // The value is a parameter, but is it a phi?
         IRParam* maybePhi = (IRParam*) val;
@@ -816,7 +816,7 @@ void processBlock(
         // instruction we are working with.
         blockInfo->builder.setInsertBefore(ii);
 
-        switch (ii->op)
+        switch (ii->getOp())
         {
         default:
             // Ordinary instruction -> leave as-is
@@ -1109,7 +1109,7 @@ void constructSSA(ConstructSSAContext* context)
         }
     }
 
-    // Some blocks may now need to pass along arguments to their sucessor,
+    // Some blocks may now need to pass along arguments to their successor,
     // which have been stored into the `SSABlockInfo::successorArgs` field.
     for(auto bb : globalVal->getBlocks())
     {
@@ -1148,13 +1148,16 @@ void constructSSA(ConstructSSAContext* context)
 
         IRTerminatorInst* newTerminator = (IRTerminatorInst*)blockInfo->builder.emitIntrinsicInst(
             oldTerminator->getFullType(),
-            oldTerminator->op,
+            oldTerminator->getOp(),
             newArgCount,
             newArgs.getBuffer());
 
         // Transfer decorations (a terminator should have no children) over to the new instruction.
         //
         oldTerminator->transferDecorationsTo(newTerminator);
+
+        // Copy the source location of the old terminator to the new terminator
+        newTerminator->sourceLoc = oldTerminator->sourceLoc;
 
         // A terminator better not have uses, so we shouldn't have
         // to replace them.
@@ -1204,7 +1207,7 @@ void constructSSA(IRModule* module, IRGlobalValueWithCode* globalVal)
 
 void constructSSA(IRModule* module, IRInst* globalVal)
 {
-    switch (globalVal->op)
+    switch (globalVal->getOp())
     {
     case kIROp_Func:
     case kIROp_GlobalVar:

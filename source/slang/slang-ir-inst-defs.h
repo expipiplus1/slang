@@ -51,6 +51,8 @@ INST(Nop, nop, 0, 0)
 
     INST(TaggedUnionType, TaggedUnion, 0, 0)
 
+    INST(ConjunctionType, Conjunction, 0, 0)
+
     /* BindExistentialsTypeBase */
 
         // A `BindExistentials<B, T0,w0, T1,w1, ...>` represents
@@ -602,6 +604,13 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
 
         /// Applie to an IR function and signals that inlining should not be performed unless unavoidable.
     INST(NoInlineDecoration, noInline, 0, 0)
+
+    INST(PayloadDecoration, payload, 0, 0)
+
+    /* StageAccessDecoration */
+        INST(StageReadAccessDecoration, stageReadAccess, 0, 0)
+        INST(StageWriteAccessDecoration, stageWriteAccess, 0, 0)
+    INST_RANGE(StageAccessDecoration, StageReadAccessDecoration, StageWriteAccessDecoration)
 
     INST(SemanticDecoration, semantic, 2, 0)
 

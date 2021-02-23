@@ -108,6 +108,9 @@
     <ClInclude Include="..\..\..\source\slang\slang-include-system.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\source\slang\slang-intrinsic-expand.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-any-value-marshalling.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -147,6 +150,9 @@
     <ClInclude Include="..\..\..\source\slang\slang-ir-explicit-global-init.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\source\slang\slang-ir-extract-value-from-type.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-generics-lowering-context.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -172,6 +178,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-link.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\source\slang\slang-ir-lower-bit-cast.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-lower-existential.h">
@@ -482,6 +491,9 @@
     <ClCompile Include="..\..\..\source\slang\slang-include-system.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\source\slang\slang-intrinsic-expand.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-any-value-marshalling.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -524,6 +536,9 @@
     <ClCompile Include="..\..\..\source\slang\slang-ir-explicit-global-init.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\source\slang\slang-ir-extract-value-from-type.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-generics-lowering-context.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -546,6 +561,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-link.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\source\slang\slang-ir-lower-bit-cast.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-lower-existential.cpp">

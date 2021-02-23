@@ -6,63 +6,8 @@ using namespace Slang;
 namespace gfx
 {
 
-const Slang::Guid GfxGUID::IID_ISlangUnknown = SLANG_UUID_ISlangUnknown;
-const Slang::Guid GfxGUID::IID_IDescriptorSetLayout = SLANG_UUID_IDescriptorSetLayout;
-const Slang::Guid GfxGUID::IID_IDescriptorSet = SLANG_UUID_IDescriptorSet;
-const Slang::Guid GfxGUID::IID_IShaderProgram = SLANG_UUID_IShaderProgram;
-const Slang::Guid GfxGUID::IID_IPipelineLayout = SLANG_UUID_IPipelineLayout;
-const Slang::Guid GfxGUID::IID_IInputLayout = SLANG_UUID_IInputLayout;
-const Slang::Guid GfxGUID::IID_IPipelineState = SLANG_UUID_IPipelineState;
-const Slang::Guid GfxGUID::IID_IResourceView = SLANG_UUID_IResourceView;
-const Slang::Guid GfxGUID::IID_ISamplerState = SLANG_UUID_ISamplerState;
-const Slang::Guid GfxGUID::IID_IResource = SLANG_UUID_IResource;
-const Slang::Guid GfxGUID::IID_IBufferResource = SLANG_UUID_IBufferResource;
-const Slang::Guid GfxGUID::IID_ITextureResource = SLANG_UUID_ITextureResource;
-const Slang::Guid GfxGUID::IID_IRenderer = SLANG_UUID_IRenderer;
-const Slang::Guid GfxGUID::IID_IShaderObjectLayout = SLANG_UUID_IShaderObjectLayout;
-const Slang::Guid GfxGUID::IID_IShaderObject = SLANG_UUID_IShaderObject;
-
-gfx::StageType translateStage(SlangStage slangStage)
+class GraphicsCommonShaderObjectLayout : public ShaderObjectLayoutBase
 {
-    switch (slangStage)
-    {
-    default:
-        SLANG_ASSERT(!"unhandled case");
-        return gfx::StageType::Unknown;
-
-#define CASE(FROM, TO)       \
-    case SLANG_STAGE_##FROM: \
-        return gfx::StageType::TO
-
-        CASE(VERTEX, Vertex);
-        CASE(HULL, Hull);
-        CASE(DOMAIN, Domain);
-        CASE(GEOMETRY, Geometry);
-        CASE(FRAGMENT, Fragment);
-
-        CASE(COMPUTE, Compute);
-
-        CASE(RAY_GENERATION, RayGeneration);
-        CASE(INTERSECTION, Intersection);
-        CASE(ANY_HIT, AnyHit);
-        CASE(CLOSEST_HIT, ClosestHit);
-        CASE(MISS, Miss);
-        CASE(CALLABLE, Callable);
-
-#undef CASE
-    }
-}
-
-class GraphicsCommonShaderObjectLayout : public IShaderObjectLayout, public RefObject
-{
-public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IShaderObjectLayout* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IShaderObjectLayout)
-            return static_cast<IShaderObjectLayout*>(this);
-        return nullptr;
-    }
 public:
     struct BindingRangeInfo
     {
@@ -71,12 +16,17 @@ public:
         Index baseIndex;
         Index descriptorSetIndex;
         Index rangeIndexInDescriptorSet;
-        //        Index   subObjectRangeIndex = -1;
+
+        // Returns true if this binding range consumes a specialization argument slot.
+        bool isSpecializationArg() const
+        {
+            return bindingType == slang::BindingType::ExistentialValue;
+        }
     };
 
     struct SubObjectRangeInfo
     {
-        ComPtr<GraphicsCommonShaderObjectLayout> layout;
+        RefPtr<GraphicsCommonShaderObjectLayout> layout;
         //        Index                       baseIndex;
         //        Index                       count;
         Index bindingRangeIndex;
@@ -91,9 +41,12 @@ public:
     struct Builder
     {
     public:
-        Builder(IRenderer* renderer)
+        Builder(RendererBase* renderer)
             : m_renderer(renderer)
         {}
+
+        RendererBase* m_renderer;
+        slang::TypeLayoutReflection* m_elementTypeLayout;
 
         List<BindingRangeInfo> m_bindingRanges;
         List<SubObjectRangeInfo> m_subObjectRanges;
@@ -196,6 +149,16 @@ public:
                 for (SlangInt r = 0; r < descriptorRangeCount; ++r)
                 {
                     auto slangBindingType = typeLayout->getDescriptorSetDescriptorRangeType(s, r);
+
+                    switch (slangBindingType)
+                    {
+                    case slang::BindingType::ExistentialValue:
+                    case slang::BindingType::InlineUniformData:
+                        continue;
+                    default:
+                        break;
+                    }
+
                     auto gfxDescriptorType = _mapDescriptorType(slangBindingType);
 
                     IDescriptorSetLayout::SlotRangeDesc descriptorRangeDesc;
@@ -210,7 +173,6 @@ public:
                         auto category = typeLayout->getDescriptorSetDescriptorRangeCategory(s, r);
                         descriptorRangeDesc.binding += varLayout->getOffset(category);
                     }
-
                     descriptorSetInfo->slotRangeDescs.add(descriptorRangeDesc);
                 }
             }
@@ -284,9 +246,6 @@ public:
                 BindingRangeInfo bindingRangeInfo;
                 bindingRangeInfo.bindingType = slangBindingType;
                 bindingRangeInfo.count = count;
-                //                bindingRangeInfo.descriptorSetIndex = descriptorSetIndex;
-                //                bindingRangeInfo.rangeIndexInDescriptorSet = slotRangeIndex;
-                //                bindingRangeInfo.subObjectRangeIndex = subObjectRangeIndex;
                 bindingRangeInfo.baseIndex = baseIndex;
                 bindingRangeInfo.descriptorSetIndex = descriptorSetIndex;
                 bindingRangeInfo.rangeIndexInDescriptorSet = rangeIndexInDescriptorSet;
@@ -358,19 +317,16 @@ public:
         SlangResult build(GraphicsCommonShaderObjectLayout** outLayout)
         {
             auto layout =
-                ComPtr<GraphicsCommonShaderObjectLayout>(new GraphicsCommonShaderObjectLayout());
+                RefPtr<GraphicsCommonShaderObjectLayout>(new GraphicsCommonShaderObjectLayout());
             SLANG_RETURN_ON_FAIL(layout->_init(this));
 
             *outLayout = layout.detach();
             return SLANG_OK;
         }
-
-        IRenderer* m_renderer = nullptr;
-        slang::TypeLayoutReflection* m_elementTypeLayout = nullptr;
     };
 
     static Result createForElementType(
-        IRenderer* renderer,
+        RendererBase* renderer,
         slang::TypeLayoutReflection* elementType,
         GraphicsCommonShaderObjectLayout** outLayout)
     {
@@ -397,15 +353,19 @@ public:
     SubObjectRangeInfo const& getSubObjectRange(Index index) { return m_subObjectRanges[index]; }
     List<SubObjectRangeInfo> const& getSubObjectRanges() { return m_subObjectRanges; }
 
-    IRenderer* getRenderer() { return m_renderer; }
+    RendererBase* getRenderer() { return m_renderer; }
 
+    slang::TypeReflection* getType()
+    {
+        return m_elementTypeLayout->getType();
+    }
 protected:
     Result _init(Builder const* builder)
     {
         auto renderer = builder->m_renderer;
-        m_renderer = renderer;
 
-        m_elementTypeLayout = builder->m_elementTypeLayout;
+        initBase(renderer, builder->m_elementTypeLayout);
+
         m_bindingRanges = builder->m_bindingRanges;
 
         for (auto descriptorSetBuildInfo : builder->m_descriptorSetBuildInfos)
@@ -430,16 +390,12 @@ protected:
         m_samplerCount = builder->m_samplerCount;
         m_combinedTextureSamplerCount = builder->m_combinedTextureSamplerCount;
         m_subObjectCount = builder->m_subObjectCount;
-
         m_subObjectRanges = builder->m_subObjectRanges;
-
         return SLANG_OK;
     }
 
-    IRenderer* m_renderer;
     List<RefPtr<DescriptorSetInfo>> m_descriptorSets;
     List<BindingRangeInfo> m_bindingRanges;
-    slang::TypeLayoutReflection* m_elementTypeLayout;
     Index m_resourceViewCount = 0;
     Index m_samplerCount = 0;
     Index m_combinedTextureSamplerCount = 0;
@@ -461,7 +417,7 @@ public:
     struct Builder : Super::Builder
     {
         Builder(IRenderer* renderer)
-            : Super::Builder(renderer)
+            : Super::Builder(static_cast<RendererBase*>(renderer))
         {}
 
         Result build(EntryPointLayout** outLayout)
@@ -566,7 +522,7 @@ public:
     struct Builder : Super::Builder
     {
         Builder(IRenderer* renderer)
-            : Super::Builder(renderer)
+            : Super::Builder(static_cast<RendererBase*>(renderer))
         {}
 
         Result build(GraphicsCommonProgramLayout** outLayout)
@@ -709,17 +665,8 @@ protected:
     ComPtr<IPipelineLayout> m_pipelineLayout;
 };
 
-class GraphicsCommonShaderObject : public IShaderObject, public RefObject
+class GraphicsCommonShaderObject : public ShaderObjectBase
 {
-public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IShaderObject* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IShaderObject)
-            return static_cast<IShaderObject*>(this);
-        return nullptr;
-    }
-
 public:
     static Result create(
         IRenderer* renderer,
@@ -733,7 +680,7 @@ public:
         return SLANG_OK;
     }
 
-    IRenderer* getRenderer() { return m_layout->getRenderer(); }
+    RendererBase* getRenderer() { return m_layout->getRenderer(); }
 
     SLANG_NO_THROW UInt SLANG_MCALL getEntryPointCount() SLANG_OVERRIDE { return 0; }
 
@@ -746,7 +693,7 @@ public:
 
     GraphicsCommonShaderObjectLayout* getLayout()
     {
-        return m_layout;
+        return static_cast<GraphicsCommonShaderObjectLayout*>(m_layout.Ptr());
     }
 
     SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL getElementTypeLayout() SLANG_OVERRIDE
@@ -755,13 +702,29 @@ public:
     }
 
     SLANG_NO_THROW Result SLANG_MCALL
-        setData(ShaderOffset const& offset, void const* data, size_t size) SLANG_OVERRIDE
+        setData(ShaderOffset const& inOffset, void const* data, size_t inSize) SLANG_OVERRIDE
     {
-        IRenderer* renderer = getRenderer();
+        Index offset = inOffset.uniformOffset;
+        Index size = inSize;
 
-        char* dest = (char*)renderer->map(m_buffer, MapFlavor::HostWrite);
-        memcpy(dest + offset.uniformOffset, data, size);
-        renderer->unmap(m_buffer);
+        char* dest = m_ordinaryData.getBuffer();
+        Index availableSize = m_ordinaryData.getCount();
+
+        // TODO: We really should bounds-check access rather than silently ignoring sets
+        // that are too large, but we have several test cases that set more data than
+        // an object actually stores on several targets...
+        //
+        if(offset < 0)
+        {
+            size += offset;
+            offset = 0;
+        }
+        if((offset + size) >= availableSize)
+        {
+            size = availableSize - offset;
+        }
+
+        memcpy(dest + offset, data, size);
 
         return SLANG_OK;
     }
@@ -772,29 +735,18 @@ public:
     {
         if (offset.bindingRangeIndex < 0)
             return SLANG_E_INVALID_ARG;
-        if (offset.bindingRangeIndex >= m_layout->getBindingRangeCount())
+        auto layout = getLayout();
+        if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
             return SLANG_E_INVALID_ARG;
-        auto& bindingRange = m_layout->getBindingRange(offset.bindingRangeIndex);
+
+        auto subObject = static_cast<GraphicsCommonShaderObject*>(object);
+
+        auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
 
         // TODO: Is this reasonable to store the base index directly in the binding range?
-        m_objects[bindingRange.baseIndex + offset.bindingArrayIndex] =
-            reinterpret_cast<GraphicsCommonShaderObject*>(object);
+        m_objects[bindingRange.baseIndex + offset.bindingArrayIndex] = subObject;
 
-        //        auto& subObjectRange =
-        //        m_layout->getSubObjectRange(bindingRange.subObjectRangeIndex);
-        //        m_objects[subObjectRange.baseIndex + offset.bindingArrayIndex] = object;
-
-#if 0
-
-        SLANG_ASSERT(bindingRange.descriptorSetIndex >= 0);
-        SLANG_ASSERT(bindingRange.descriptorSetIndex < m_descriptorSets.getCount());
-        auto& descriptorSet = m_descriptorSets[bindingRange.descriptorSetIndex];
-
-        descriptorSet->setConstantBuffer(bindingRange.rangeIndexInDescriptorSet, offset.bindingArrayIndex, buffer);
-        return SLANG_OK;
-#else
         return SLANG_E_NOT_IMPLEMENTED;
-#endif
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL
@@ -804,9 +756,10 @@ public:
         SLANG_ASSERT(outObject);
         if (offset.bindingRangeIndex < 0)
             return SLANG_E_INVALID_ARG;
-        if (offset.bindingRangeIndex >= m_layout->getBindingRangeCount())
+        auto layout = getLayout();
+        if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
             return SLANG_E_INVALID_ARG;
-        auto& bindingRange = m_layout->getBindingRange(offset.bindingRangeIndex);
+        auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
 
         auto object = m_objects[bindingRange.baseIndex + offset.bindingArrayIndex].Ptr();
         object->addRef();
@@ -833,9 +786,10 @@ public:
     {
         if (offset.bindingRangeIndex < 0)
             return SLANG_E_INVALID_ARG;
-        if (offset.bindingRangeIndex >= m_layout->getBindingRangeCount())
+        auto layout = getLayout();
+        if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
             return SLANG_E_INVALID_ARG;
-        auto& bindingRange = m_layout->getBindingRange(offset.bindingRangeIndex);
+        auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
 
         m_resourceViews[bindingRange.baseIndex + offset.bindingArrayIndex] = resourceView;
         return SLANG_OK;
@@ -846,9 +800,10 @@ public:
     {
         if (offset.bindingRangeIndex < 0)
             return SLANG_E_INVALID_ARG;
-        if (offset.bindingRangeIndex >= m_layout->getBindingRangeCount())
+        auto layout = getLayout();
+        if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
             return SLANG_E_INVALID_ARG;
-        auto& bindingRange = m_layout->getBindingRange(offset.bindingRangeIndex);
+        auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
 
         m_samplers[bindingRange.baseIndex + offset.bindingArrayIndex] = sampler;
         return SLANG_OK;
@@ -859,15 +814,63 @@ public:
     {
         if (offset.bindingRangeIndex < 0)
             return SLANG_E_INVALID_ARG;
-        if (offset.bindingRangeIndex >= m_layout->getBindingRangeCount())
+        auto layout = getLayout();
+        if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
             return SLANG_E_INVALID_ARG;
-        auto& bindingRange = m_layout->getBindingRange(offset.bindingRangeIndex);
+        auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
 
         auto& slot = m_combinedTextureSamplers[bindingRange.baseIndex + offset.bindingArrayIndex];
         slot.textureView = textureView;
         slot.sampler = sampler;
         return SLANG_OK;
     }
+
+public:
+    // Appends all types that are used to specialize the element type of this shader object in `args` list.
+    virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
+    {
+        auto& subObjectRanges = getLayout()->getSubObjectRanges();
+        // The following logic is built on the assumption that all fields that involve existential types (and
+        // therefore require specialization) will results in a sub-object range in the type layout.
+        // This allows us to simply scan the sub-object ranges to find out all specialization arguments.
+        for (Index subObjIndex = 0; subObjIndex < subObjectRanges.getCount(); subObjIndex++)
+        {
+            // Retrieve the corresponding binding range of the sub object.
+            auto bindingRange = getLayout()->getBindingRange(subObjectRanges[subObjIndex].bindingRangeIndex);
+            switch (bindingRange.bindingType)
+            {
+            case slang::BindingType::ExistentialValue:
+            {
+                // A binding type of `ExistentialValue` means the sub-object represents a interface-typed field.
+                // In this case the specialization argument for this field is the actual specialized type of the bound
+                // shader object. If the shader object's type is an ordinary type without existential fields, then the
+                // type argument will simply be the ordinary type. But if the sub object's type is itself a specialized
+                // type, we need to make sure to use that type as the specialization argument.
+
+                // TODO: need to implement the case where the field is an array of existential values.
+                SLANG_ASSERT(bindingRange.count == 1);
+                ExtendedShaderObjectType specializedSubObjType;
+                SLANG_RETURN_ON_FAIL(m_objects[subObjIndex]->getSpecializedShaderObjectType(&specializedSubObjType));
+                args.add(specializedSubObjType);
+                break;
+            }
+            case slang::BindingType::ParameterBlock:
+            case slang::BindingType::ConstantBuffer:
+                // Currently we only handle the case where the field's type is
+                // `ParameterBlock<SomeStruct>` or `ConstantBuffer<SomeStruct>`, where `SomeStruct` is a struct type
+                // (not directly an interface type). In this case, we just recursively collect the specialization arguments
+                // from the bound sub object.
+                SLANG_RETURN_ON_FAIL(m_objects[subObjIndex]->collectSpecializationArgs(args));
+                // TODO: we need to handle the case where the field is of the form `ParameterBlock<IFoo>`. We should treat
+                // this case the same way as the `ExistentialValue` case here, but currently we lack a mechanism to distinguish
+                // the two scenarios.
+                break;
+            }
+            // TODO: need to handle another case where specialization happens on resources fields e.g. `StructuredBuffer<IFoo>`.
+        }
+        return SLANG_OK;
+    }
+
 
 protected:
     friend class ProgramVars;
@@ -877,22 +880,19 @@ protected:
         m_layout = layout;
 
         // If the layout tells us that there is any uniform data,
-        // then we need to allocate a constant buffer to hold that data.
+        // then we will allocate a CPU memory buffer to hold that data
+        // while it is being set from the host.
         //
-        // TODO: Do we need to allocate a shadow copy for use from
-        // the CPU?
-        //
-        // TODO: When/where do we bind this constant buffer into
-        // a descriptor set for later use?
+        // Once the user is done setting the parameters/fields of this
+        // shader object, we will produce a GPU-memory version of the
+        // uniform data (which includes values from this object and
+        // any existential-type sub-objects).
         //
         size_t uniformSize = layout->getElementTypeLayout()->getSize();
         if (uniformSize)
         {
-            IBufferResource::Desc bufferDesc;
-            bufferDesc.init(uniformSize);
-            bufferDesc.cpuAccessFlags |= IResource::AccessFlag::Write;
-            SLANG_RETURN_ON_FAIL(renderer->createBufferResource(
-                IResource::Usage::ConstantBuffer, bufferDesc, nullptr, m_buffer.writeRef()));
+            m_ordinaryData.setCount(uniformSize);
+            memset(m_ordinaryData.getBuffer(), 0, uniformSize);
         }
 
 #if 0
@@ -923,7 +923,7 @@ protected:
 
             // In the case where the sub-object range represents an
             // existential-type leaf field (e.g., an `IBar`), we
-            // cannot pre-allocate the objet(s) to go into that
+            // cannot pre-allocate the object(s) to go into that
             // range, since we can't possibly know what to allocate
             // at this point.
             //
@@ -953,7 +953,7 @@ protected:
         IPipelineLayout* pipelineLayout,
         Index& ioRootIndex)
     {
-        GraphicsCommonShaderObjectLayout* layout = m_layout;
+        GraphicsCommonShaderObjectLayout* layout = getLayout();
 
         // Create the descritpor sets required by the layout...
         //
@@ -976,16 +976,113 @@ protected:
         return SLANG_OK;
     }
 
+        /// Write the uniform/ordinary data of this object into the given `dest` buffer at the given `offset`
+    Result _writeOrdinaryData(char* dest, size_t destSize)
+    {
+        auto src = m_ordinaryData.getBuffer();
+        auto srcSize = size_t(m_ordinaryData.getCount());
+
+        SLANG_ASSERT(srcSize <= destSize);
+
+        memcpy(dest, src, srcSize);
+
+        // TODO: In the case where this object has any sub-objects of
+        // existential/interface type, we need to recurse on those objects
+        // so that they write their state into either the "any-value"
+        // region or the appropriate "pending" allocation.
+        //
+        // Note: it is possible that writes into the "any-value" region
+        // could be handled directly as part of `setObject` calls instead,
+        // to avoid handling them here.
+
+        return SLANG_OK;
+    }
+
+        /// Ensure that the `m_ordinaryDataBuffer` has been created, if it is needed
+    Result _ensureOrdinaryDataBufferCreatedIfNeeded()
+    {
+        // If we have already created a buffer to hold ordinary data, then we should
+        // simply re-use that buffer rather than re-create it.
+        //
+        // TODO: Simply re-using the buffer without any kind of validation checks
+        // means that we are assuming that users cannot or will not perform any `set`
+        // operations on a shader object once an operation has requested this buffer
+        // be created. We need to enforce that rule if we want to rely on it.
+        //
+        if( m_ordinaryDataBuffer )
+            return SLANG_OK;
+
+        // Computing the size of the ordinary data buffer is *not* just as simple
+        // as using the size of the `m_ordinayData` array that we store. The reason
+        // for the added complexity is that interface-type fields may lead to the
+        // storage being specialized such that it needs extra appended data to
+        // store the concrete values that logically belong in those interface-type
+        // fields but wouldn't fit in the fixed-size allocation we gave them.
+        //
+        // TODO: We need to actually implement that logic by using reflection
+        // data computed for the specialized type of this shader object.
+        // For now we just make the simple assumption described above despite
+        // knowing that it is false.
+        //
+        auto specializedOrdinaryDataSize = m_ordinaryData.getCount();
+        if(specializedOrdinaryDataSize == 0)
+            return SLANG_OK;
+
+        // Once we have computed how large the buffer should be, we can allocate
+        // it using the existing public `IRenderer` API.
+        //
+        IRenderer* renderer = getRenderer();
+        IBufferResource::Desc bufferDesc;
+        bufferDesc.init(specializedOrdinaryDataSize);
+        bufferDesc.cpuAccessFlags |= IResource::AccessFlag::Write;
+        SLANG_RETURN_ON_FAIL(renderer->createBufferResource(
+            IResource::Usage::ConstantBuffer, bufferDesc, nullptr, m_ordinaryDataBuffer.writeRef()));
+
+        // Once the buffer is allocated, we can use `_writeOrdinaryData` to fill it in.
+        //
+        // Note that `_writeOrdinaryData` is potentially recursive in the case
+        // where this object contains interface/existential-type fields, so we
+        // don't need or want to inline it into this call site.
+        //
+        char* dest = (char*)renderer->map(m_ordinaryDataBuffer, MapFlavor::HostWrite);
+        SLANG_RETURN_ON_FAIL(_writeOrdinaryData(dest, specializedOrdinaryDataSize));
+        renderer->unmap(m_ordinaryDataBuffer);
+
+        return SLANG_OK;
+    }
+
+        /// Bind the buffer for ordinary/uniform data, if needed
+    Result _bindOrdinaryDataBufferIfNeeded(IDescriptorSet* descriptorSet, Index* ioBaseRangeIndex, Index subObjectRangeArrayIndex)
+    {
+        // We are going to need to tweak the base binding range index
+        // used for descriptor-set writes if and only if we actually
+        // bind a buffer for ordinary data.
+        //
+        auto& baseRangeIndex = *ioBaseRangeIndex;
+
+        // We start by ensuring that the buffer is created, if it is needed.
+        //
+        SLANG_RETURN_ON_FAIL(_ensureOrdinaryDataBufferCreatedIfNeeded());
+
+        // If we did indeed need/create a buffer, then we must bind it into
+        // the given `descriptorSet` and update the base range index for
+        // subsequent binding operations to account for it.
+        //
+        if (m_ordinaryDataBuffer)
+        {
+            descriptorSet->setConstantBuffer(baseRangeIndex, subObjectRangeArrayIndex, m_ordinaryDataBuffer);
+            baseRangeIndex++;
+        }
+
+        return SLANG_OK;
+    }
+
     Result _bindIntoDescriptorSet(
         IDescriptorSet* descriptorSet, Index baseRangeIndex, Index subObjectRangeArrayIndex)
     {
-        GraphicsCommonShaderObjectLayout* layout = m_layout;
+        GraphicsCommonShaderObjectLayout* layout = getLayout();
 
-        if (m_buffer)
-        {
-            descriptorSet->setConstantBuffer(baseRangeIndex, subObjectRangeArrayIndex, m_buffer);
-            baseRangeIndex++;
-        }
+        _bindOrdinaryDataBufferIfNeeded(descriptorSet, &baseRangeIndex, subObjectRangeArrayIndex);
 
         for (auto bindingRangeInfo : layout->getBindingRanges())
         {
@@ -1063,13 +1160,10 @@ protected:
 public:
     virtual Result _bindIntoDescriptorSets(ComPtr<IDescriptorSet>* descriptorSets)
     {
-        GraphicsCommonShaderObjectLayout* layout = m_layout;
+        GraphicsCommonShaderObjectLayout* layout = getLayout();
 
-        if (m_buffer)
-        {
-            // TODO: look up binding infor for default constant buffer...
-            descriptorSets[0]->setConstantBuffer(0, 0, m_buffer);
-        }
+        Index baseRangeIndex = 0;
+        _bindOrdinaryDataBufferIfNeeded(descriptorSets[0], &baseRangeIndex, 0);
 
         // Fill in the descriptor sets based on binding ranges
         //
@@ -1134,8 +1228,8 @@ public:
         return SLANG_OK;
     }
 
-    RefPtr<GraphicsCommonShaderObjectLayout> m_layout = nullptr;
-    ComPtr<IBufferResource> m_buffer;
+        /// Any "ordinary" / uniform data for this object
+    List<char> m_ordinaryData;
 
     List<ComPtr<IResourceView>> m_resourceViews;
 
@@ -1148,8 +1242,13 @@ public:
     };
     List<CombinedTextureSamplerSlot> m_combinedTextureSamplers;
 
-    //    List<RefPtr<DescriptorSet>> m_descriptorSets;
     List<RefPtr<GraphicsCommonShaderObject>> m_objects;
+
+        /// A constant buffer used to stored ordinary data for this object
+        /// and existential-type sub-objects.
+        ///
+        /// Created on demand with `_createOrdinaryDataBufferIfNeeded()`
+    ComPtr<IBufferResource> m_ordinaryDataBuffer;
 };
 
 class EntryPointVars : public GraphicsCommonShaderObject
@@ -1228,6 +1327,15 @@ public:
         return SLANG_OK;
     }
 
+    virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
+    {
+        SLANG_RETURN_ON_FAIL(GraphicsCommonShaderObject::collectSpecializationArgs(args));
+        for (auto& entryPoint : m_entryPoints)
+        {
+            SLANG_RETURN_ON_FAIL(entryPoint->collectSpecializationArgs(args));
+        }
+        return SLANG_OK;
+    }
 
 protected:
     virtual Result _bindIntoDescriptorSets(ComPtr<IDescriptorSet>* descriptorSets) override
@@ -1266,8 +1374,9 @@ protected:
 };
 
 
-Result SLANG_MCALL GraphicsAPIRenderer::createShaderObjectLayout(
-    slang::TypeLayoutReflection* typeLayout, IShaderObjectLayout** outLayout)
+Result GraphicsAPIRenderer::createShaderObjectLayout(
+    slang::TypeLayoutReflection* typeLayout,
+    ShaderObjectLayoutBase** outLayout)
 {
     RefPtr<GraphicsCommonShaderObjectLayout> layout;
     SLANG_RETURN_ON_FAIL(GraphicsCommonShaderObjectLayout::createForElementType(
@@ -1276,8 +1385,9 @@ Result SLANG_MCALL GraphicsAPIRenderer::createShaderObjectLayout(
     return SLANG_OK;
 }
 
-Result SLANG_MCALL
-    GraphicsAPIRenderer::createShaderObject(IShaderObjectLayout* layout, IShaderObject** outObject)
+Result GraphicsAPIRenderer::createShaderObject(
+    ShaderObjectLayoutBase* layout,
+    IShaderObject** outObject)
 {
     RefPtr<GraphicsCommonShaderObject> shaderObject;
     SLANG_RETURN_ON_FAIL(GraphicsCommonShaderObject::create(this,
@@ -1333,8 +1443,7 @@ Result GraphicsAPIRenderer::initProgramCommon(
 
         SLANG_RETURN_ON_FAIL(builder.build(programLayout.writeRef()));
     }
-
-    program->m_slangProgram = slangProgram;
+    program->slangProgram = slangProgram;
     program->m_layout = programLayout;
 
     return SLANG_OK;
@@ -1347,61 +1456,16 @@ Result SLANG_MCALL
     if (!programVars)
         return SLANG_E_INVALID_HANDLE;
 
+    SLANG_RETURN_ON_FAIL(maybeSpecializePipeline(programVars));
+
+    // Apply shader parameter bindings.
     programVars->apply(this, pipelineType);
     return SLANG_OK;
 }
 
-SLANG_NO_THROW Result SLANG_MCALL
-    gfx::GraphicsAPIRenderer::getFeatures(
-        const char** outFeatures, UInt bufferSize, UInt* outFeatureCount)
+GraphicsCommonProgramLayout* gfx::GraphicsCommonShaderProgram::getLayout() const
 {
-    if (bufferSize >= (UInt)m_features.getCount())
-    {
-        for (Index i = 0; i < m_features.getCount(); i++)
-        {
-            outFeatures[i] = m_features[i].getUnownedSlice().begin();
-        }
-    }
-    if (outFeatureCount)
-        *outFeatureCount = (UInt)m_features.getCount();
-    return SLANG_OK;
-}
-
-SLANG_NO_THROW bool SLANG_MCALL gfx::GraphicsAPIRenderer::hasFeature(const char* featureName)
-{
-    return m_features.findFirstIndex([&](Slang::String x) { return x == featureName; }) != -1;
-}
-
-GraphicsCommonShaderProgram::~GraphicsCommonShaderProgram()
-{
-    // Note: It might not seem like this destructor is needed at all, since
-    // it is empty.
-    //
-    // In pratice, though, it seems to be required because the `m_layout`
-    // field is declared in the coresponding header before the `GraphicsCommonProgramLayout`
-    // is declared (we only have a forward declaration).
-    //
-    // `m_layout` is a `RefPtr`, and it seems that the compiler (or at least
-    // the Visual Studio compiler) either cannot synthesize a destructor for
-    // the type that properly destructs the field, or it simply synthesizes
-    // an incorect destructor.
-    //
-    // I suspect that part of the problem stems from the way that `GraphicsCommonProgramLayout`
-    // inherits from `RefObject` via multiple inheritance.
-    //
-    // No matter what, defining the destructor here in a file where
-    // the declaration of `GraphicsCommonProgramLayout` is visible
-    // seems to result in a correct destructor being emitted.
-    //
-    // TODO: Ther simpler and more robust fix would be to move the declaration
-    // of `GraphicsCommonProgramLayout` and related types to the header.
-}
-
-IShaderProgram* GraphicsCommonShaderProgram::getInterface(const Guid& guid)
-{
-    if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IShaderProgram)
-        return static_cast<IShaderProgram*>(this);
-    return nullptr;
+    return static_cast<GraphicsCommonProgramLayout*>(m_layout.Ptr());
 }
 
 void GraphicsAPIRenderer::preparePipelineDesc(GraphicsPipelineStateDesc& desc)
@@ -1423,13 +1487,6 @@ void GraphicsAPIRenderer::preparePipelineDesc(ComputePipelineStateDesc& desc)
         auto rootLayout = program->getLayout();
         desc.pipelineLayout = rootLayout->getPipelineLayout();
     }
-}
-
-IRenderer* gfx::GraphicsAPIRenderer::getInterface(const Guid& guid)
-{
-    return (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IRenderer)
-               ? static_cast<IRenderer*>(this)
-               : nullptr;
 }
 
 }
