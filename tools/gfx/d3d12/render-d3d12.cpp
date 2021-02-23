@@ -140,8 +140,7 @@ public:
         setViewports(UInt count, Viewport const* viewports) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
         setScissorRects(UInt count, ScissorRect const* rects) override;
-    virtual SLANG_NO_THROW void SLANG_MCALL
-        setPipelineState(PipelineType pipelineType, IPipelineState* state) override;
+    virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override;
     virtual SLANG_NO_THROW void SLANG_MCALL draw(UInt vertexCount, UInt startVertex) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
         drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex) override;
@@ -152,7 +151,10 @@ public:
     {
         return RendererType::DirectX12;
     }
-
+    virtual PipelineStateBase* getCurrentPipeline() override
+    {
+        return m_currentPipelineState;
+    }
     ~D3D12Renderer();
 
 protected:
@@ -540,20 +542,25 @@ protected:
     D3D12DescriptorHeap m_cpuViewHeap;          ///< Cbv, Srv, Uav
     D3D12DescriptorHeap m_cpuSamplerHeap;       ///< Heap for samplers
 
-    class PipelineStateImpl : public IPipelineState, public RefObject
+    class PipelineStateImpl : public PipelineStateBase
     {
     public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        IPipelineState* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IPipelineState)
-                return static_cast<IPipelineState*>(this);
-            return nullptr;
-        }
-    public:
-        PipelineType                m_pipelineType;
         RefPtr<PipelineLayoutImpl>  m_pipelineLayout;
         ComPtr<ID3D12PipelineState> m_pipelineState;
+        void init(const GraphicsPipelineStateDesc& inDesc)
+        {
+            PipelineStateDesc pipelineDesc;
+            pipelineDesc.type = PipelineType::Graphics;
+            pipelineDesc.graphics = inDesc;
+            initializeBase(pipelineDesc);
+        }
+        void init(const ComputePipelineStateDesc& inDesc)
+        {
+            PipelineStateDesc pipelineDesc;
+            pipelineDesc.type = PipelineType::Compute;
+            pipelineDesc.compute = inDesc;
+            initializeBase(pipelineDesc);
+        }
     };
 
     struct BoundVertexBuffer
@@ -755,15 +762,14 @@ protected:
 
     HWND m_hwnd = nullptr;
 
-    List<String> m_features;
-
     bool m_nvapi = false;
 };
 
-SlangResult SLANG_MCALL createD3D12Renderer(IRenderer** outRenderer)
+SlangResult SLANG_MCALL createD3D12Renderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer)
 {
-    *outRenderer = new D3D12Renderer();
-    (*outRenderer)->addRef();
+    RefPtr<D3D12Renderer> result = new D3D12Renderer();
+    SLANG_RETURN_ON_FAIL(result->initialize(*desc, windowHandle));
+    *outRenderer = result.detach();
     return SLANG_OK;
 }
 
@@ -1160,7 +1166,7 @@ Result D3D12Renderer::_bindRenderState(PipelineStateImpl* pipelineStateImpl, ID3
 {
     // TODO: we should only set some of this state as needed...
 
-    auto pipelineTypeIndex = (int) pipelineStateImpl->m_pipelineType;
+    auto pipelineTypeIndex = (int) pipelineStateImpl->desc.type;
     auto pipelineLayout = pipelineStateImpl->m_pipelineLayout;
 
     submitter->setRootSignature(pipelineLayout->m_rootSignature);
@@ -1348,7 +1354,12 @@ static bool _isSupportedNVAPIOp(ID3D12Device* dev, uint32_t op)
 
 Result D3D12Renderer::initialize(const Desc& desc, void* inWindowHandle)
 {
+    SLANG_RETURN_ON_FAIL(slangContext.initialize(desc.slang, SLANG_DXBC, "sm_5_1"));
+
+    SLANG_RETURN_ON_FAIL(GraphicsAPIRenderer::initialize(desc, inWindowHandle));
+
     m_hwnd = (HWND)inWindowHandle;
+    
     // Rather than statically link against D3D, we load it dynamically.
 
     HMODULE d3dModule = LoadLibraryA("d3d12.dll");
@@ -1458,6 +1469,7 @@ Result D3D12Renderer::initialize(const Desc& desc, void* inWindowHandle)
 
         m_nvapi = true;
 #endif
+
     }
 
     // Find what features are supported
@@ -2689,7 +2701,7 @@ void D3D12Renderer::setScissorRects(UInt count, ScissorRect const* rects)
     m_commandList->RSSetScissorRects(UINT(count), dxRects);
 }
 
-void D3D12Renderer::setPipelineState(PipelineType pipelineType, IPipelineState* state)
+void D3D12Renderer::setPipelineState(IPipelineState* state)
 {
     m_currentPipelineState = (PipelineStateImpl*)state;
 }
@@ -2699,7 +2711,7 @@ void D3D12Renderer::draw(UInt vertexCount, UInt startVertex)
     ID3D12GraphicsCommandList* commandList = m_commandList;
 
     auto pipelineState = m_currentPipelineState.Ptr();
-    if (!pipelineState || (pipelineState->m_pipelineType != PipelineType::Graphics))
+    if (!pipelineState || (pipelineState->desc.type != PipelineType::Graphics))
     {
         assert(!"No graphics pipeline state set");
         return;
@@ -2947,6 +2959,15 @@ void D3D12Renderer::setDescriptorSet(PipelineType pipelineType, IPipelineLayout*
 
 Result D3D12Renderer::createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram)
 {
+    if (desc.slangProgram && desc.slangProgram->getSpecializationParamCount() != 0)
+    {
+        // For a specializable program, we don't invoke any actual slang compilation yet.
+        RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl();
+        initProgramCommon(shaderProgram, desc);
+        *outProgram = shaderProgram.detach();
+        return SLANG_OK;
+    }
+
     if( desc.kernelCount == 0 )
     {
         return createProgramFromSlang(this, desc, outProgram);
@@ -3712,9 +3733,9 @@ Result D3D12Renderer::createGraphicsPipelineState(const GraphicsPipelineStateDes
     SLANG_RETURN_ON_FAIL(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(pipelineState.writeRef())));
 
     RefPtr<PipelineStateImpl> pipelineStateImpl = new PipelineStateImpl();
-    pipelineStateImpl->m_pipelineType = PipelineType::Graphics;
     pipelineStateImpl->m_pipelineLayout = pipelineLayoutImpl;
     pipelineStateImpl->m_pipelineState = pipelineState;
+    pipelineStateImpl->init(desc);
     *outState = pipelineStateImpl.detach();
     return SLANG_OK;
 }
@@ -3727,47 +3748,58 @@ Result D3D12Renderer::createComputePipelineState(const ComputePipelineStateDesc&
     auto pipelineLayoutImpl = (PipelineLayoutImpl*) desc.pipelineLayout;
     auto programImpl = (ShaderProgramImpl*) desc.program;
 
-    // Describe and create the compute pipeline state object
-    D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
-    computeDesc.pRootSignature = pipelineLayoutImpl->m_rootSignature;
-    computeDesc.CS = { programImpl->m_computeShader.getBuffer(), SIZE_T(programImpl->m_computeShader.getCount()) };
-
+    // Only actually create a D3D12 pipeline state if the pipeline is fully specialized.
     ComPtr<ID3D12PipelineState> pipelineState;
+    if (!programImpl->slangProgram || programImpl->slangProgram->getSpecializationParamCount() == 0)
+    {
+        // Describe and create the compute pipeline state object
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+        computeDesc.pRootSignature = pipelineLayoutImpl->m_rootSignature;
+        computeDesc.CS = {
+            programImpl->m_computeShader.getBuffer(),
+            SIZE_T(programImpl->m_computeShader.getCount())};
 
 #ifdef GFX_NVAPI
-    if (m_nvapi)
-    {
-        // Also fill the extension structure. 
-        // Use the same UAV slot index and register space that are declared in the shader.
-
-        // For simplicities sake we just use u0
-        NVAPI_D3D12_PSO_SET_SHADER_EXTENSION_SLOT_DESC extensionDesc;
-        extensionDesc.baseVersion = NV_PSO_EXTENSION_DESC_VER;
-        extensionDesc.version = NV_SET_SHADER_EXTENSION_SLOT_DESC_VER;
-        extensionDesc.uavSlot = 0;
-        extensionDesc.registerSpace = 0;
-
-        // Put the pointer to the extension into an array - there can be multiple extensions enabled at once.
-        const NVAPI_D3D12_PSO_EXTENSION_DESC* extensions[] = { &extensionDesc };
-
-        // Now create the PSO.
-        const NvAPI_Status nvapiStatus = NvAPI_D3D12_CreateComputePipelineState(m_device, &computeDesc, SLANG_COUNT_OF(extensions), extensions, pipelineState.writeRef());
-
-        if (nvapiStatus != NVAPI_OK)
+        if (m_nvapi)
         {
-            return SLANG_FAIL;
+            // Also fill the extension structure.
+            // Use the same UAV slot index and register space that are declared in the shader.
+
+            // For simplicities sake we just use u0
+            NVAPI_D3D12_PSO_SET_SHADER_EXTENSION_SLOT_DESC extensionDesc;
+            extensionDesc.baseVersion = NV_PSO_EXTENSION_DESC_VER;
+            extensionDesc.version = NV_SET_SHADER_EXTENSION_SLOT_DESC_VER;
+            extensionDesc.uavSlot = 0;
+            extensionDesc.registerSpace = 0;
+
+            // Put the pointer to the extension into an array - there can be multiple extensions
+            // enabled at once.
+            const NVAPI_D3D12_PSO_EXTENSION_DESC* extensions[] = {&extensionDesc};
+
+            // Now create the PSO.
+            const NvAPI_Status nvapiStatus = NvAPI_D3D12_CreateComputePipelineState(
+                m_device,
+                &computeDesc,
+                SLANG_COUNT_OF(extensions),
+                extensions,
+                pipelineState.writeRef());
+
+            if (nvapiStatus != NVAPI_OK)
+            {
+                return SLANG_FAIL;
+            }
+        }
+        else
+#endif
+        {
+            SLANG_RETURN_ON_FAIL(m_device->CreateComputePipelineState(
+                &computeDesc, IID_PPV_ARGS(pipelineState.writeRef())));
         }
     }
-    else
-#endif
-    {
-        SLANG_RETURN_ON_FAIL(m_device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(pipelineState.writeRef())));
-    }
-
     RefPtr<PipelineStateImpl> pipelineStateImpl = new PipelineStateImpl();
-    pipelineStateImpl->m_pipelineType = PipelineType::Compute;
     pipelineStateImpl->m_pipelineLayout = pipelineLayoutImpl;
     pipelineStateImpl->m_pipelineState = pipelineState;
+    pipelineStateImpl->init(desc);
     *outState = pipelineStateImpl.detach();
     return SLANG_OK;
 }

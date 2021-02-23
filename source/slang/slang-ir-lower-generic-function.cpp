@@ -54,11 +54,11 @@ namespace Slang
             {
                 if (genericChild == func)
                     continue;
-                if (genericChild->op == kIROp_ReturnVal)
+                if (genericChild->getOp() == kIROp_ReturnVal)
                     continue;
                 // Process all generic parameters and local type definitions.
                 auto clonedChild = cloneInst(&cloneEnv, &builder, genericChild);
-                if (clonedChild->op == kIROp_Param)
+                if (clonedChild->getOp() == kIROp_Param)
                 {
                     auto paramType = clonedChild->getFullType();
                     auto loweredParamType = sharedContext->lowerType(&builder, paramType);
@@ -159,22 +159,30 @@ namespace Slang
             {
                 if (auto entry = as<IRInterfaceRequirementEntry>(interfaceType->getOperand(i)))
                 {
+                    // Note: The logic that creates the `IRInterfaceRequirementEntry`s does
+                    // not currently guarantee that the *value* part of each key-value pair
+                    // gets filled in. We thus need to defend against a null `requirementVal`
+                    // here, at least until the underlying issue gets resolved.
+                    //
+                    IRInst* requirementVal = entry->getRequirementVal();
                     IRInst* loweredVal = nullptr;
-                    if (auto funcType = as<IRFuncType>(entry->getRequirementVal()))
+                    if(!requirementVal)
+                    {}
+                    else if (auto funcType = as<IRFuncType>(requirementVal))
                     {
                         loweredVal = lowerFuncType(&builder, funcType, Dictionary<IRInst*, IRInst*>(), ArrayView<IRInst*>());
                     }
-                    else if (auto genericFuncType = as<IRGeneric>(entry->getRequirementVal()))
+                    else if (auto genericFuncType = as<IRGeneric>(requirementVal))
                     {
                         loweredVal = lowerGenericFuncType(&builder, genericFuncType);
                     }
-                    else if (entry->getRequirementVal()->op == kIROp_AssociatedType)
+                    else if (requirementVal->getOp() == kIROp_AssociatedType)
                     {
                         loweredVal = builder.getRTTIHandleType();
                     }
                     else
                     {
-                        loweredVal = entry->getRequirementVal();
+                        loweredVal = requirementVal;
                     }
                     auto newEntry = builder.createInterfaceRequirementEntry(entry->getRequirementKey(), loweredVal);
                     newEntries.add(newEntry);
@@ -193,7 +201,7 @@ namespace Slang
         {
             auto type = inst->getDataType();
             if (!type) return false;
-            return type->op == kIROp_TypeKind;
+            return type->getOp() == kIROp_TypeKind;
         }
 
         // Lower items in a witness table. This triggers lowering of generic functions,
@@ -220,7 +228,7 @@ namespace Slang
                 if (auto genericVal = as<IRGeneric>(entry->getSatisfyingVal()))
                 {
                     // Lower generic functions in witness table.
-                    if (findGenericReturnVal(genericVal)->op == kIROp_Func)
+                    if (findGenericReturnVal(genericVal)->getOp() == kIROp_Func)
                     {
                         auto loweredFunc = lowerGenericFunction(genericVal);
                         entry->satisfyingVal.set(loweredFunc);
@@ -262,7 +270,7 @@ namespace Slang
             // translate it into call(gFunc, args, Targs).
             IRInst* loweredFunc = nullptr;
             auto funcToSpecialize = specializeInst->getBase();
-            if (funcToSpecialize->op == kIROp_Generic)
+            if (funcToSpecialize->getOp() == kIROp_Generic)
             {
                 loweredFunc = lowerGenericFunction(funcToSpecialize);
                 if (loweredFunc != funcToSpecialize)
