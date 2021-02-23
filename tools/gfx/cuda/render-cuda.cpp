@@ -6,6 +6,7 @@
 
 #include "../renderer-shared.h"
 #include "../render-graphics-common.h"
+#include "../slang-context.h"
 
 #ifdef GFX_ENABLE_CUDA
 #include <cuda.h>
@@ -241,64 +242,28 @@ public:
     RefPtr<TextureCUDAResource> textureResource = nullptr;
 };
 
-class CUDAProgramLayout;
-
-class CUDAShaderProgram : public IShaderProgram, public RefObject
+class CUDAShaderObjectLayout : public ShaderObjectLayoutBase
 {
 public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IShaderProgram* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IShaderProgram)
-            return static_cast<IShaderProgram*>(this);
-        return nullptr;
-    }
-public:
-    CUmodule cudaModule = nullptr;
-    CUfunction cudaKernel;
-    String kernelName;
-    ComPtr<slang::IComponentType> slangProgram;
-    RefPtr<CUDAProgramLayout> layout;
-
-    ~CUDAShaderProgram()
-    {
-        if (cudaModule)
-            cuModuleUnload(cudaModule);
-    }
-};
-
-class CUDAPipelineState : public IPipelineState, public RefObject
-{
-public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IPipelineState* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IPipelineState)
-            return static_cast<IPipelineState*>(this);
-        return nullptr;
-    }
-public:
-    RefPtr<CUDAShaderProgram> shaderProgram;
-};
-
-class CUDAShaderObjectLayout : public IShaderObjectLayout, public RefObject
-{
-public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IShaderObjectLayout* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IShaderObjectLayout)
-            return static_cast<IShaderObjectLayout*>(this);
-        return nullptr;
-    }
-public:
-    slang::TypeLayoutReflection* typeLayout = nullptr;
-
     struct BindingRangeInfo
     {
         slang::BindingType bindingType;
         Index count;
         Index baseIndex; // Flat index for sub-ojects
+
+        // TODO: The `uniformOffset` field should be removed,
+        // since it cannot be supported by the Slang reflection
+        // API once we fix some design issues.
+        //
+        // It is only being used today for pre-allocation of sub-objects
+        // for constant buffers and parameter blocks (which should be
+        // deprecated/removed anyway).
+        //
+        // Note: We would need to bring this field back, plus
+        // a lot of other complexity, if we ever want to support
+        // setting of resources/buffers directly by a binding
+        // range index and array index.
+        //
         Index uniformOffset; // Uniform offset for a resource typed field.
     };
 
@@ -334,30 +299,40 @@ public:
         }
     }
 
-    CUDAShaderObjectLayout(slang::TypeLayoutReflection* layout)
+    CUDAShaderObjectLayout(RendererBase* renderer, slang::TypeLayoutReflection* layout)
     {
+        initBase(renderer, layout);
+
         Index subObjectCount = 0;
 
-        typeLayout = unwrapParameterGroups(layout);
+        m_elementTypeLayout = unwrapParameterGroups(layout);
 
         // Compute the binding ranges that are used to store
         // the logical contents of the object in memory. These will relate
         // to the descriptor ranges in the various sets, but not always
         // in a one-to-one fashion.
 
-        SlangInt bindingRangeCount = typeLayout->getBindingRangeCount();
+        SlangInt bindingRangeCount = m_elementTypeLayout->getBindingRangeCount();
         for (SlangInt r = 0; r < bindingRangeCount; ++r)
         {
-            slang::BindingType slangBindingType = typeLayout->getBindingRangeType(r);
-            SlangInt count = typeLayout->getBindingRangeBindingCount(r);
+            slang::BindingType slangBindingType = m_elementTypeLayout->getBindingRangeType(r);
+            SlangInt count = m_elementTypeLayout->getBindingRangeBindingCount(r);
             slang::TypeLayoutReflection* slangLeafTypeLayout =
-                typeLayout->getBindingRangeLeafTypeLayout(r);
+                m_elementTypeLayout->getBindingRangeLeafTypeLayout(r);
 
-            SlangInt descriptorSetIndex = typeLayout->getBindingRangeDescriptorSetIndex(r);
+            SlangInt descriptorSetIndex = m_elementTypeLayout->getBindingRangeDescriptorSetIndex(r);
             SlangInt rangeIndexInDescriptorSet =
-                typeLayout->getBindingRangeFirstDescriptorRangeIndex(r);
+                m_elementTypeLayout->getBindingRangeFirstDescriptorRangeIndex(r);
 
-            auto uniformOffset = typeLayout->getDescriptorSetDescriptorRangeIndexOffset(
+            // TODO: This logic assumes that for any binding range that might consume
+            // multiple kinds of resources, the descriptor range for its uniform
+            // usage will be the first one in the range.
+            //
+            // We need to decide whether that assumption is one we intend to support
+            // applications making, or whether they should be forced to perform a
+            // linear search over the descriptor ranges for a specific binding range.
+            //
+            auto uniformOffset = m_elementTypeLayout->getDescriptorSetDescriptorRangeIndexOffset(
                 descriptorSetIndex, rangeIndexInDescriptorSet);
 
             Index baseIndex = 0;
@@ -382,13 +357,13 @@ public:
             m_bindingRanges.add(bindingRangeInfo);
         }
 
-        SlangInt subObjectRangeCount = typeLayout->getSubObjectRangeCount();
+        SlangInt subObjectRangeCount = m_elementTypeLayout->getSubObjectRangeCount();
         for (SlangInt r = 0; r < subObjectRangeCount; ++r)
         {
-            SlangInt bindingRangeIndex = typeLayout->getSubObjectRangeBindingRangeIndex(r);
-            auto slangBindingType = typeLayout->getBindingRangeType(bindingRangeIndex);
+            SlangInt bindingRangeIndex = m_elementTypeLayout->getSubObjectRangeBindingRangeIndex(r);
+            auto slangBindingType = m_elementTypeLayout->getBindingRangeType(bindingRangeIndex);
             slang::TypeLayoutReflection* slangLeafTypeLayout =
-                typeLayout->getBindingRangeLeafTypeLayout(bindingRangeIndex);
+                m_elementTypeLayout->getBindingRangeLeafTypeLayout(bindingRangeIndex);
 
             // A sub-object range can either represent a sub-object of a known
             // type, like a `ConstantBuffer<Foo>` or `ParameterBlock<Foo>`
@@ -401,7 +376,7 @@ public:
             if (slangBindingType != slang::BindingType::ExistentialValue)
             {
                 subObjectLayout =
-                    new CUDAShaderObjectLayout(slangLeafTypeLayout->getElementTypeLayout());
+                    new CUDAShaderObjectLayout(renderer, slangLeafTypeLayout->getElementTypeLayout());
             }
 
             SubObjectRangeInfo subObjectRange;
@@ -417,13 +392,14 @@ class CUDAProgramLayout : public CUDAShaderObjectLayout
 public:
     slang::ProgramLayout* programLayout = nullptr;
     List<RefPtr<CUDAShaderObjectLayout>> entryPointLayouts;
-    CUDAProgramLayout(slang::ProgramLayout* inProgramLayout)
-        : CUDAShaderObjectLayout(inProgramLayout->getGlobalParamsTypeLayout())
+    CUDAProgramLayout(RendererBase* renderer, slang::ProgramLayout* inProgramLayout)
+        : CUDAShaderObjectLayout(renderer, inProgramLayout->getGlobalParamsTypeLayout())
         , programLayout(inProgramLayout)
     {
         for (UInt i =0; i< programLayout->getEntryPointCount(); i++)
         {
             entryPointLayouts.add(new CUDAShaderObjectLayout(
+                renderer,
                 programLayout->getEntryPointByIndex(i)->getTypeLayout()));
         }
 
@@ -449,25 +425,20 @@ public:
     }
 };
 
-class CUDAShaderObject : public IShaderObject, public RefObject
+class CUDAShaderObject : public ShaderObjectBase
 {
 public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IShaderObject* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IShaderObject)
-            return static_cast<IShaderObject*>(this);
-        return nullptr;
-    }
-
-public:
     RefPtr<MemoryCUDAResource> bufferResource;
-    RefPtr<CUDAShaderObjectLayout> layout;
     List<RefPtr<CUDAShaderObject>> objects;
     List<RefPtr<CUDAResourceView>> resources;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL
         init(IRenderer* renderer, CUDAShaderObjectLayout* typeLayout);
+
+    CUDAShaderObjectLayout* getLayout()
+    {
+        return static_cast<CUDAShaderObjectLayout*>(m_layout.Ptr());
+    }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL initBuffer(IRenderer* renderer, size_t bufferSize)
     {
@@ -493,7 +464,7 @@ public:
 
     virtual SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL getElementTypeLayout() override
     {
-        return layout->typeLayout;
+        return getLayout()->getElementTypeLayout();
     }
 
     virtual SLANG_NO_THROW UInt SLANG_MCALL getEntryPointCount() override { return 0; }
@@ -515,10 +486,21 @@ public:
         return SLANG_OK;
     }
     virtual SLANG_NO_THROW Result SLANG_MCALL
+        setDeviceData(size_t offset, void* data, size_t size)
+    {
+        size = Math::Min(size, bufferResource->getDesc()->sizeInBytes - offset);
+        SLANG_CUDA_RETURN_ON_FAIL(cudaMemcpy(
+            (uint8_t*)bufferResource->m_cudaMemory + offset,
+            data,
+            size,
+            cudaMemcpyHostToDevice));
+        return SLANG_OK;
+    }
+    virtual SLANG_NO_THROW Result SLANG_MCALL
         getObject(ShaderOffset const& offset, IShaderObject** object)
     {
         auto subObjectIndex =
-            layout->m_bindingRanges[offset.bindingRangeIndex].baseIndex + offset.bindingArrayIndex;
+            getLayout()->m_bindingRanges[offset.bindingRangeIndex].baseIndex + offset.bindingArrayIndex;
         if (subObjectIndex >= objects.getCount())
         {
             *object = nullptr;
@@ -531,17 +513,34 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL
         setObject(ShaderOffset const& offset, IShaderObject* object)
     {
-        auto subObjectIndex =
-            layout->m_bindingRanges[offset.bindingRangeIndex].baseIndex + offset.bindingArrayIndex;
-        SLANG_ASSERT(
-            offset.uniformOffset ==
-            layout->m_bindingRanges[offset.bindingRangeIndex].uniformOffset +
-                offset.bindingArrayIndex * sizeof(void*));
+        auto layout = getLayout();
+        SLANG_ASSERT(offset.bindingRangeIndex >= 0);
+        SLANG_ASSERT(offset.bindingRangeIndex < layout->m_bindingRanges.getCount());
+        auto& bindingRange = layout->m_bindingRanges[offset.bindingRangeIndex];
+
+        auto subObjectIndex = bindingRange.baseIndex + offset.bindingArrayIndex;
         auto cudaObject = dynamic_cast<CUDAShaderObject*>(object);
         if (subObjectIndex >= objects.getCount())
             objects.setCount(subObjectIndex + 1);
         objects[subObjectIndex] = cudaObject;
-        return setData(offset, &cudaObject->bufferResource->m_cudaMemory, sizeof(void*));
+
+        switch( bindingRange.bindingType )
+        {
+        default:
+            SLANG_RETURN_ON_FAIL(setData(offset, &cudaObject->bufferResource->m_cudaMemory, sizeof(void*)));
+            break;
+
+        case slang::BindingType::ExistentialValue:
+            // TODO: handle the "does it fit" logic
+            {
+                auto valueSize = cudaObject->m_layout->getElementTypeLayout()->getSize();
+                auto valueOffset = 16;
+                SLANG_RETURN_ON_FAIL(setDeviceData(offset.uniformOffset + valueOffset, cudaObject->getBuffer(), valueSize));
+            }
+            break;
+        }
+
+        return SLANG_OK;
     }
     virtual SLANG_NO_THROW Result SLANG_MCALL
         setResource(ShaderOffset const& offset, IResourceView* resourceView)
@@ -592,6 +591,54 @@ public:
         setResource(offset, textureView);
         return SLANG_OK;
     }
+
+    // Appends all types that are used to specialize the element type of this shader object in `args` list.
+    virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
+    {
+        // TODO: the logic here is a copy-paste of `GraphicsCommonShaderObject::collectSpecializationArgs`,
+        // consider moving the implementation to `ShaderObjectBase` and share the logic among different implementations.
+
+        auto& subObjectRanges = getLayout()->subObjectRanges;
+        // The following logic is built on the assumption that all fields that involve existential types (and
+        // therefore require specialization) will results in a sub-object range in the type layout.
+        // This allows us to simply scan the sub-object ranges to find out all specialization arguments.
+        for (Index subObjIndex = 0; subObjIndex < subObjectRanges.getCount(); subObjIndex++)
+        {
+            // Retrieve the corresponding binding range of the sub object.
+            auto bindingRange = getLayout()->m_bindingRanges[subObjectRanges[subObjIndex].bindingRangeIndex];
+            switch (bindingRange.bindingType)
+            {
+            case slang::BindingType::ExistentialValue:
+            {
+                // A binding type of `ExistentialValue` means the sub-object represents a interface-typed field.
+                // In this case the specialization argument for this field is the actual specialized type of the bound
+                // shader object. If the shader object's type is an ordinary type without existential fields, then the
+                // type argument will simply be the ordinary type. But if the sub object's type is itself a specialized
+                // type, we need to make sure to use that type as the specialization argument.
+
+                // TODO: need to implement the case where the field is an array of existential values.
+                SLANG_ASSERT(bindingRange.count == 1);
+                ExtendedShaderObjectType specializedSubObjType;
+                SLANG_RETURN_ON_FAIL(objects[subObjIndex]->getSpecializedShaderObjectType(&specializedSubObjType));
+                args.add(specializedSubObjType);
+                break;
+            }
+            case slang::BindingType::ParameterBlock:
+            case slang::BindingType::ConstantBuffer:
+                // Currently we only handle the case where the field's type is
+                // `ParameterBlock<SomeStruct>` or `ConstantBuffer<SomeStruct>`, where `SomeStruct` is a struct type
+                // (not directly an interface type). In this case, we just recursively collect the specialization arguments
+                // from the bound sub object.
+                SLANG_RETURN_ON_FAIL(objects[subObjIndex]->collectSpecializationArgs(args));
+                // TODO: we need to handle the case where the field is of the form `ParameterBlock<IFoo>`. We should treat
+                // this case the same way as the `ExistentialValue` case here, but currently we lack a mechanism to distinguish
+                // the two scenarios.
+                break;
+            }
+            // TODO: need to handle another case where specialization happens on resources fields e.g. `StructuredBuffer<IFoo>`.
+        }
+        return SLANG_OK;
+    }
 };
 
 class CUDAEntryPointShaderObject : public CUDAShaderObject
@@ -617,6 +664,19 @@ public:
             size);
         return SLANG_OK;
     }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL
+        setDeviceData(size_t offset, void* data, size_t size)
+    {
+        size = Math::Min(size, uniformBufferSize - offset);
+        SLANG_CUDA_RETURN_ON_FAIL(cudaMemcpy(
+            (uint8_t*)hostBuffer + offset,
+            data,
+            size,
+            cudaMemcpyDeviceToHost));
+        return SLANG_OK;
+    }
+
 
     virtual SLANG_NO_THROW void* SLANG_MCALL getBuffer() override
     {
@@ -648,20 +708,46 @@ public:
         entryPointObjects[index]->addRef();
         return SLANG_OK;
     }
-
+    virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
+    {
+        SLANG_RETURN_ON_FAIL(CUDAShaderObject::collectSpecializationArgs(args));
+        for (auto& entryPoint : entryPointObjects)
+        {
+            SLANG_RETURN_ON_FAIL(entryPoint->collectSpecializationArgs(args));
+        }
+        return SLANG_OK;
+    }
 };
 
-class CUDARenderer : public IRenderer, public RefObject
+class CUDAShaderProgram : public ShaderProgramBase
 {
 public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    IRenderer* getInterface(const Guid& guid)
+    CUmodule cudaModule = nullptr;
+    CUfunction cudaKernel;
+    String kernelName;
+    RefPtr<CUDAProgramLayout> layout;
+    ~CUDAShaderProgram()
     {
-        return (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IRenderer)
-                   ? static_cast<IRenderer*>(this)
-                   : nullptr;
+        if (cudaModule)
+            cuModuleUnload(cudaModule);
     }
+};
 
+class CUDAPipelineState : public PipelineStateBase
+{
+public:
+    RefPtr<CUDAShaderProgram> shaderProgram;
+    void init(const ComputePipelineStateDesc& inDesc)
+    {
+        PipelineStateDesc pipelineDesc;
+        pipelineDesc.type = PipelineType::Compute;
+        pipelineDesc.compute = inDesc;
+        initializeBase(pipelineDesc);
+    }
+};
+
+class CUDARenderer : public RendererBase
+{
 private:
     static const CUDAReportStyle reportType = CUDAReportStyle::Normal;
     static int _calcSMCountPerMultiProcessor(int major, int minor)
@@ -780,11 +866,13 @@ private:
     int m_deviceIndex = -1;
     CUdevice m_device = 0;
     CUcontext m_context = nullptr;
-    CUDAPipelineState* currentPipeline = nullptr;
-    CUDARootShaderObject* currentRootObject = nullptr;
+    RefPtr<CUDAPipelineState> currentPipeline = nullptr;
+    RefPtr<CUDARootShaderObject> currentRootObject = nullptr;
  public:
     ~CUDARenderer()
     {
+        currentPipeline = nullptr;
+        currentRootObject = nullptr;
         if (m_context)
         {
             cuCtxDestroy(m_context);
@@ -792,6 +880,10 @@ private:
     }
     virtual SLANG_NO_THROW SlangResult SLANG_MCALL initialize(const Desc& desc, void* inWindowHandle) override
     {
+        SLANG_RETURN_ON_FAIL(slangContext.initialize(desc.slang, SLANG_PTX, "sm_5_1"));
+
+        SLANG_RETURN_ON_FAIL(RendererBase::initialize(desc, inWindowHandle));
+
         SLANG_RETURN_ON_FAIL(_initCuda(reportType));
 
         SLANG_RETURN_ON_FAIL(_findMaxFlopsDeviceIndex(&m_deviceIndex));
@@ -1256,18 +1348,21 @@ private:
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObjectLayout(
-        slang::TypeLayoutReflection* typeLayout, IShaderObjectLayout** outLayout) override
+    virtual Result createShaderObjectLayout(
+        slang::TypeLayoutReflection*    typeLayout,
+        ShaderObjectLayoutBase**        outLayout) override
     {
         RefPtr<CUDAShaderObjectLayout> cudaLayout;
-        cudaLayout = new CUDAShaderObjectLayout(typeLayout);
+        cudaLayout = new CUDAShaderObjectLayout(this, typeLayout);
         *outLayout = cudaLayout.detach();
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createShaderObject(IShaderObjectLayout* layout, IShaderObject** outObject) override
+    virtual Result createShaderObject(
+        ShaderObjectLayoutBase* layout,
+        IShaderObject**         outObject) override
     {
+
         RefPtr<CUDAShaderObject> result = new CUDAShaderObject();
         SLANG_RETURN_ON_FAIL(result->init(this, dynamic_cast<CUDAShaderObjectLayout*>(layout)));
         *outObject = result.detach();
@@ -1298,6 +1393,18 @@ private:
     virtual SLANG_NO_THROW Result SLANG_MCALL
         createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override
     {
+        // If this is a specializable program, we just keep a reference to the slang program and
+        // don't actually create any kernels. This program will be specialized later when we know
+        // the shader object bindings.
+        if (desc.slangProgram && desc.slangProgram->getSpecializationParamCount() != 0)
+        {
+            RefPtr<CUDAShaderProgram> cudaProgram = new CUDAShaderProgram();
+            cudaProgram->slangProgram = desc.slangProgram;
+            cudaProgram->layout = new CUDAProgramLayout(this, desc.slangProgram->getLayout());
+            *outProgram = cudaProgram.detach();
+            return SLANG_OK;
+        }
+
         if( desc.kernelCount == 0 )
         {
             return createProgramFromSlang(this, desc, outProgram);
@@ -1321,7 +1428,7 @@ private:
                 return SLANG_FAIL;
 
             RefPtr<CUDAProgramLayout> cudaLayout;
-            cudaLayout = new CUDAProgramLayout(slangProgramLayout);
+            cudaLayout = new CUDAProgramLayout(this, slangProgramLayout);
             cudaLayout->programLayout = slangProgramLayout;
             cudaProgram->layout = cudaLayout;
         }
@@ -1335,6 +1442,7 @@ private:
     {
         RefPtr<CUDAPipelineState> state = new CUDAPipelineState();
         state->shaderProgram = dynamic_cast<CUDAShaderProgram*>(desc.program);
+        state->init(desc);
         *outState = state.detach();
         return Result();
     }
@@ -1349,18 +1457,19 @@ private:
         SLANG_UNUSED(buffer);
     }
 
-    virtual SLANG_NO_THROW void SLANG_MCALL
-        setPipelineState(PipelineType pipelineType, IPipelineState* state) override
+    virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
     {
-        SLANG_ASSERT(pipelineType == PipelineType::Compute);
         currentPipeline = dynamic_cast<CUDAPipelineState*>(state);
     }
 
     virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
     {
+        // Specialize the compute kernel based on the shader object bindings.
+        maybeSpecializePipeline(currentRootObject);
+
         // Find out thread group size from program reflection.
         auto& kernelName = currentPipeline->shaderProgram->kernelName;
-        auto programLayout = dynamic_cast<CUDAProgramLayout*>(currentRootObject->layout.Ptr());
+        auto programLayout = static_cast<CUDAProgramLayout*>(currentRootObject->getLayout());
         int kernelId = programLayout->getKernelIndex(kernelName.getUnownedSlice());
         SLANG_ASSERT(kernelId != -1);
         UInt threadGroupSize[3];
@@ -1440,21 +1549,12 @@ private:
         return RendererType::CUDA;
     }
 
+    virtual PipelineStateBase* getCurrentPipeline() override
+    {
+        return currentPipeline;
+    }
+
 public:
-    // Unused public interfaces. These functions are not supported on CUDA.
-    SLANG_NO_THROW Result SLANG_MCALL getFeatures(
-        const char** outFeatures, UInt bufferSize, UInt* outFeatureCount)
-    {
-        if (outFeatureCount)
-            *outFeatureCount = 0;
-        return SLANG_OK;
-    }
-
-    SLANG_NO_THROW bool SLANG_MCALL hasFeature(const char* featureName)
-    {
-        return false;
-    }
-
     virtual SLANG_NO_THROW void SLANG_MCALL setClearColor(const float color[4]) override
     {
         SLANG_UNUSED(color);
@@ -1591,8 +1691,8 @@ public:
 
 SlangResult CUDAShaderObject::init(IRenderer* renderer, CUDAShaderObjectLayout* typeLayout)
 {
-    this->layout = typeLayout;
-    
+    m_layout = typeLayout;
+
     // If the layout tells us that there is any uniform data,
     // then we need to allocate a constant buffer to hold that data.
     //
@@ -1602,8 +1702,8 @@ SlangResult CUDAShaderObject::init(IRenderer* renderer, CUDAShaderObjectLayout* 
     // TODO: When/where do we bind this constant buffer into
     // a descriptor set for later use?
     //
-    auto slangLayout = layout->typeLayout;
-    size_t uniformSize = layout->typeLayout->getSize();
+    auto slangLayout = getLayout()->getElementTypeLayout();
+    size_t uniformSize = slangLayout->getSize();
     if (uniformSize)
     {
         initBuffer(renderer, uniformSize);
@@ -1615,7 +1715,7 @@ SlangResult CUDAShaderObject::init(IRenderer* renderer, CUDAShaderObjectLayout* 
     Index subObjectCount = slangLayout->getSubObjectRangeCount();
     objects.setCount(subObjectCount);
 
-    for (auto subObjectRange : layout->subObjectRanges)
+    for (auto subObjectRange : getLayout()->subObjectRanges)
     {
         RefPtr<CUDAShaderObjectLayout> subObjectLayout = subObjectRange.layout;
 
@@ -1632,7 +1732,7 @@ SlangResult CUDAShaderObject::init(IRenderer* renderer, CUDAShaderObjectLayout* 
         // in each entry in this range, based on the layout
         // information we already have.
 
-        auto& bindingRangeInfo = layout->m_bindingRanges[subObjectRange.bindingRangeIndex];
+        auto& bindingRangeInfo = getLayout()->m_bindingRanges[subObjectRange.bindingRangeIndex];
         for (Index i = 0; i < bindingRangeInfo.count; ++i)
         {
             RefPtr<CUDAShaderObject> subObject = new CUDAShaderObject();
@@ -1660,15 +1760,18 @@ SlangResult CUDARootShaderObject::init(IRenderer* renderer, CUDAShaderObjectLayo
     return SLANG_OK;
 }
 
-SlangResult SLANG_MCALL createCUDARenderer(IRenderer** outRenderer)
+SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer)
 {
-    *outRenderer = new CUDARenderer();
-    (*outRenderer)->addRef();
+    RefPtr<CUDARenderer> result = new CUDARenderer();
+    SLANG_RETURN_ON_FAIL(result->initialize(*desc, windowHandle));
+    *outRenderer = result.detach();
     return SLANG_OK;
 }
 #else
-SlangResult SLANG_MCALL createCUDARenderer(IRenderer** outRenderer)
+SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer)
 {
+    SLANG_UNUSED(desc);
+    SLANG_UNUSED(windowHandle);
     *outRenderer = nullptr;
     return SLANG_OK;
 }

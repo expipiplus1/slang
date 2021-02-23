@@ -312,7 +312,9 @@ public:
 struct IRInst
 {
     // The operation that this value represents
-    IROp op;
+    IROp m_op;
+
+    IROp getOp() const { return m_op; }
 
     // The total number of operands of this instruction.
     //
@@ -531,7 +533,7 @@ struct IRInst
 template<typename T>
 T* dynamicCast(IRInst* inst)
 {
-    if (inst && T::isaImpl(inst->op))
+    if (inst && T::isaImpl(inst->getOp()))
         return static_cast<T*>(inst);
     return nullptr;
 }
@@ -539,7 +541,7 @@ T* dynamicCast(IRInst* inst)
 template<typename T>
 const T* dynamicCast(const IRInst* inst)
 {
-    if (inst && T::isaImpl(inst->op))
+    if (inst && T::isaImpl(inst->getOp()))
         return static_cast<const T*>(inst);
     return nullptr;
 }
@@ -609,7 +611,7 @@ IRType* unwrapArray(IRType* type);
 
 struct IRBasicType : IRType
 {
-    BaseType getBaseType() { return BaseType(op - kIROp_FirstBasicType); }
+    BaseType getBaseType() { return BaseType(getOp() - kIROp_FirstBasicType); }
 
     IR_PARENT_ISA(BasicType)
 };
@@ -930,7 +932,7 @@ struct IRResourceTypeBase : IRType
 {
     TextureFlavor getFlavor() const
     {
-        return TextureFlavor((op >> kIROpMeta_OtherShift) & 0xFFFF);
+        return TextureFlavor((getOp() >> kIROpMeta_OtherShift) & 0xFFFF);
     }
 
     TextureFlavor::Shape GetBaseShape() const
@@ -1252,6 +1254,14 @@ struct IRTaggedUnionType : IRType
     IR_LEAF_ISA(TaggedUnionType)
 };
 
+struct IRConjunctionType : IRType
+{
+    IR_LEAF_ISA(ConjunctionType)
+
+    Int getCaseCount() { return getOperandCount(); }
+    IRType* getCaseType(Int index) { return (IRType*) getOperand(index); }
+};
+
 /// Represents a tuple. Tuples are created by `IRMakeTuple` and its elements
 /// are accessed via `GetTupleElement(tupleValue, IRIntLit)`.
 struct IRTupleType : IRType
@@ -1463,21 +1473,33 @@ struct IRModule : RefObject
     IRModuleInst* moduleInst;
 };
 
-    /// How much detail to include in dumped IR.
-    ///
-    /// Used with the `dumpIR` functions to determine
-    /// whether a completely faithful, but verbose, IR
-    /// dump is produced, or something simplified for ease
-    /// or reading.
-    ///
-enum class IRDumpMode
+
+struct IRDumpOptions
 {
+    typedef uint32_t Flags;
+    struct Flag
+    {
+        enum Enum : Flags
+        {
+            SourceLocations = 0x1,          ///< If set will output source locations 
+        };
+    };
+
+        /// How much detail to include in dumped IR.
+        ///
+        /// Used with the `dumpIR` functions to determine
+        /// whether a completely faithful, but verbose, IR
+        /// dump is produced, or something simplified for ease
+        /// or reading.
+        ///
+    enum class Mode
+    {
         /// Produce a simplified IR dump.
         ///
         /// Simplified IR dumping will skip certain instructions
         /// and print them at their use sites instead, so that
         /// the overall dump is shorter and easier to read.
-    Simplified,
+        Simplified,
 
         /// Produce a detailed/accurate IR dump.
         ///
@@ -1485,15 +1507,24 @@ enum class IRDumpMode
         /// the instructions that were present with no attempt
         /// to selectively skip them or give special formatting.
         ///
-    Detailed,
+        Detailed,
+    };
+
+    Mode mode = Mode::Simplified;
+        /// Flags to control output
+        /// Add Flag::SourceLocations to output source locations set on IR
+    Flags flags = 0;
+    
+        /// Must be set if source location output is desired
+    SourceManager* sourceManager = nullptr;         
 };
 
-void printSlangIRAssembly(StringBuilder& builder, IRModule* module, IRDumpMode mode = IRDumpMode::Simplified);
-String getSlangIRAssembly(IRModule* module, IRDumpMode mode = IRDumpMode::Simplified);
+void printSlangIRAssembly(StringBuilder& builder, IRModule* module, const IRDumpOptions& options);
+String getSlangIRAssembly(IRModule* module, const IRDumpOptions& options);
 
-void dumpIR(IRModule* module, ISlangWriter* writer, IRDumpMode mode = IRDumpMode::Simplified);
-void dumpIR(IRInst* globalVal, ISlangWriter* writer, IRDumpMode mode = IRDumpMode::Simplified);
-void dumpIR(IRModule* module, ISlangWriter* slangWriter, char const* label);
+void dumpIR(IRModule* module, const IRDumpOptions& options, ISlangWriter* writer);
+void dumpIR(IRInst* globalVal, const IRDumpOptions& options, ISlangWriter* writer);
+void dumpIR(IRModule* module, const IRDumpOptions& options, char const* label, ISlangWriter* writer);
 
 IRInst* createEmptyInst(
     IRModule*   module,

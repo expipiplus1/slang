@@ -3,7 +3,7 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include "options.h"
-#include "render.h"
+#include "slang-gfx.h"
 #include "tools/gfx-util/shader-cursor.h"
 #include "slang-support.h"
 #include "surface.h"
@@ -357,6 +357,7 @@ SlangResult _assignVarsFromLayout(
 
                 IResourceView::Desc viewDesc;
                 viewDesc.type = IResourceView::Type::ShaderResource;
+                viewDesc.format = texture->getDesc()->format;
                 auto textureView = renderer->createTextureView(
                     texture,
                     viewDesc);
@@ -396,14 +397,13 @@ SlangResult _assignVarsFromLayout(
         case ShaderInputType::Object:
             {
                 auto typeName = entry.objectDesc.typeName;
-                slang::TypeLayoutReflection* slangTypeLayout = nullptr;
+                slang::TypeReflection* slangType = nullptr;
                 if(typeName.getLength() != 0)
                 {
                     // If the input line specified the name of the type
                     // to allocate, then we use it directly.
                     //
-                    auto slangType = slangReflection->findTypeByName(typeName.getBuffer());
-                    slangTypeLayout = slangReflection->getTypeLayout(slangType);
+                    slangType = slangReflection->findTypeByName(typeName.getBuffer());
                 }
                 else
                 {
@@ -411,7 +411,7 @@ SlangResult _assignVarsFromLayout(
                     // then we will infer the type from the type of the
                     // value pointed to by `entryCursor`.
                     //
-                    slangTypeLayout = entryCursor.getTypeLayout();
+                    auto slangTypeLayout = entryCursor.getTypeLayout();
                     switch(slangTypeLayout->getKind())
                     {
                     default:
@@ -427,11 +427,11 @@ SlangResult _assignVarsFromLayout(
                         slangTypeLayout = slangTypeLayout->getElementTypeLayout();
                         break;
                     }
+                    slangType = slangTypeLayout->getType();
                 }
 
-                ComPtr<IShaderObjectLayout> shaderObjectLayout = renderer->createShaderObjectLayout(slangTypeLayout);
                 ComPtr<IShaderObject> shaderObject =
-                    renderer->createShaderObject(shaderObjectLayout);
+                    renderer->createShaderObject(slangType);
 
                 entryCursor.setObject(shaderObject);
             }
@@ -711,7 +711,7 @@ void RenderTestApp::renderFrame()
 
     auto pipelineType = PipelineType::Graphics;
 
-    m_renderer->setPipelineState(pipelineType, m_pipelineState);
+    m_renderer->setPipelineState(m_pipelineState);
 
 	m_renderer->setPrimitiveTopology(PrimitiveTopology::TriangleList);
 	m_renderer->setVertexBuffer(0, m_vertexBuffer, sizeof(Vertex));
@@ -724,7 +724,7 @@ void RenderTestApp::renderFrame()
 void RenderTestApp::runCompute()
 {
     auto pipelineType = PipelineType::Compute;
-    m_renderer->setPipelineState(pipelineType, m_pipelineState);
+    m_renderer->setPipelineState(m_pipelineState);
     applyBinding(pipelineType);
 
     m_startTicks = ProcessUtil::getClockTick();
@@ -1279,45 +1279,53 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
 
     Slang::ComPtr<IRenderer> renderer;
     {
-        SGRendererCreateFunc createFunc = gfxGetCreateFunc(options.rendererType);
-        if (createFunc)
-        {
-            createFunc(renderer.writeRef());
-        }
-
-        if (!renderer)
-        {
-            if (!options.onlyStartup)
-            {
-                fprintf(stderr, "Unable to create renderer %s\n", rendererName.getBuffer());
-            }
-            return SLANG_FAIL;
-        }
-
-        IRenderer::Desc desc;
+        IRenderer::Desc desc = {};
+        desc.rendererType = options.rendererType;
         desc.width = gWindowWidth;
         desc.height = gWindowHeight;
         desc.adapter = options.adapter.getBuffer();
+
         List<const char*> requiredFeatureList;
-        for (auto & name : options.renderFeatures)
+        for (auto& name : options.renderFeatures)
             requiredFeatureList.add(name.getBuffer());
+
         desc.requiredFeatures = requiredFeatureList.getBuffer();
         desc.requiredFeatureCount = (int)requiredFeatureList.getCount();
+
         desc.nvapiExtnSlot = int(nvapiExtnSlot);
-
+        desc.slang.slangGlobalSession = session;
         window = renderer_test::Window::create();
-        SLANG_RETURN_ON_FAIL(window->initialize(gWindowWidth, gWindowHeight));
-
-        SlangResult res = renderer->initialize(desc, window->getHandle());
-        if (SLANG_FAILED(res))
+        void* windowHandle = nullptr;
+        if (window)
         {
-            // Returns E_NOT_AVAILABLE only when specified features are not available.
-            // Will cause to be ignored.
-            if (!options.onlyStartup && res != SLANG_E_NOT_AVAILABLE)
+            SLANG_RETURN_ON_FAIL(window->initialize(gWindowWidth, gWindowHeight));
+            windowHandle = window->getHandle();
+        }
+
+        {
+            SlangResult res = gfxCreateRenderer(&desc, windowHandle, renderer.writeRef());
+            if (SLANG_FAILED(res))
             {
-                fprintf(stderr, "Unable to initialize renderer %s\n", rendererName.getBuffer());
+                // We need to be careful here about SLANG_E_NOT_AVAILABLE. This return value means that the renderer couldn't
+                // be created because it required *features* that were *not available*. It does not mean the renderer in general couldn't
+                // be constructed.
+                //
+                // Returning SLANG_E_NOT_AVAILABLE will lead to the test infrastructure ignoring this test.
+                //
+                // We also don't want to output the 'Unable to create renderer' error, as this isn't an error.
+                if (res == SLANG_E_NOT_AVAILABLE)
+                {
+                    return res;
+                }
+
+                if (!options.onlyStartup)
+                {
+                    fprintf(stderr, "Unable to create renderer %s\n", rendererName.getBuffer());
+                }
+
+                return res;
             }
-            return res;
+            SLANG_ASSERT(renderer);
         }
 
         for (const auto& feature : requiredFeatureList)
