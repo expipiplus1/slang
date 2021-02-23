@@ -3692,6 +3692,18 @@ namespace slang
         virtual SLANG_NO_THROW SlangResult SLANG_MCALL addTargetCapability(
             SlangInt            targetIndex,
             SlangCapabilityID   capability) = 0;
+
+            /** Get the (linked) program for a compile request, including all entry points.
+
+            The resulting program will include all of the global-scope modules for the
+            translation units in the program, plus any modules that they `import`
+            (transitively), specialized to any global specialization arguments that
+            were provided via the API, as well as all entry points specified for compilation,
+            specialized to their entry-point specialization arguments.
+            */
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL getProgramWithEntryPoints(
+            slang::IComponentType** outProgram) = 0;
+
     };
 
     #define SLANG_UUID_ICompileRequest { 0x96d33993, 0x317c, 0x4db5, { 0xaf, 0xd8, 0x66, 0x6e, 0xe7, 0x72, 0x48, 0xe2 } };
@@ -3979,6 +3991,10 @@ namespace slang
             SlangInt    targetIndex = 0,
             IBlob**     outDiagnostics = nullptr) = 0;
 
+            /** Get the number of (unspecialized) specialization parameters for the component type.
+            */
+        virtual SLANG_NO_THROW SlangInt SLANG_MCALL getSpecializationParamCount() = 0;
+
             /** Get the compiled code for the entry point at `entryPointIndex` for the chosen `targetIndex`
 
             Entry point code can only be computed for a component type that
@@ -4124,6 +4140,12 @@ namespace slang
 /** @see slang::ICompileRequest::getProgram
 */
 SLANG_EXTERN_C SLANG_API SlangResult spCompileRequest_getProgram(
+    SlangCompileRequest*    request,
+    slang::IComponentType** outProgram);
+
+/** @see slang::ICompileRequest::getProgramWithEntryPoints
+*/
+SLANG_EXTERN_C SLANG_API SlangResult spCompileRequest_getProgramWithEntryPoints(
     SlangCompileRequest*    request,
     slang::IComponentType** outProgram);
 

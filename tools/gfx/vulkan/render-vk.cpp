@@ -2,17 +2,15 @@
 #include "render-vk.h"
 
 //WORKING:#include "options.h"
-#include "../render.h"
+#include "../renderer-shared.h"
 #include "../render-graphics-common.h"
 
-#include "core/slang-smart-pointer.h"
+#include "core/slang-basic.h"
 
 #include "vk-api.h"
 #include "vk-util.h"
 #include "vk-device-queue.h"
 #include "vk-swap-chain.h"
-
-#include "../surface.h"
 
 // Vulkan has a different coordinate system to ogl
 // http://anki3d.org/vulkan-coordinate-system/
@@ -43,84 +41,80 @@ public:
 
     // Renderer    implementation
     virtual SLANG_NO_THROW SlangResult SLANG_MCALL initialize(const Desc& desc, void* inWindowHandle) override;
-    virtual SLANG_NO_THROW const List<String>& SLANG_MCALL getFeatures() override
-    {
-        return m_features;
-    }
     virtual SLANG_NO_THROW void SLANG_MCALL setClearColor(const float color[4]) override;
     virtual SLANG_NO_THROW void SLANG_MCALL clearFrame() override;
     virtual SLANG_NO_THROW void SLANG_MCALL presentFrame() override;
     virtual SLANG_NO_THROW TextureResource::Desc SLANG_MCALL getSwapChainTextureDesc() override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureResource(
-        Resource::Usage initialUsage,
-        const TextureResource::Desc& desc,
-        const TextureResource::Data* initData,
-        TextureResource** outResource) override;
+        IResource::Usage initialUsage,
+        const ITextureResource::Desc& desc,
+        const ITextureResource::Data* initData,
+        ITextureResource** outResource) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferResource(
-        Resource::Usage initialUsage,
-        const BufferResource::Desc& desc,
+        IResource::Usage initialUsage,
+        const IBufferResource::Desc& desc,
         const void* initData,
-        BufferResource** outResource) override;
+        IBufferResource** outResource) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL
-        createSamplerState(SamplerState::Desc const& desc, SamplerState** outSampler) override;
+        createSamplerState(ISamplerState::Desc const& desc, ISamplerState** outSampler) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureView(
-        TextureResource* texture, ResourceView::Desc const& desc, ResourceView** outView) override;
+        ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferView(
-        BufferResource* buffer, ResourceView::Desc const& desc, ResourceView** outView) override;
+        IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createInputLayout(
         const InputElementDesc* inputElements,
         UInt inputElementCount,
-        InputLayout** outLayout) override;
+        IInputLayout** outLayout) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createDescriptorSetLayout(
-        const DescriptorSetLayout::Desc& desc,
-        DescriptorSetLayout** outLayout) override;
+        const IDescriptorSetLayout::Desc& desc,
+        IDescriptorSetLayout** outLayout) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL
-        createPipelineLayout(const PipelineLayout::Desc& desc, PipelineLayout** outLayout) override;
+        createPipelineLayout(const IPipelineLayout::Desc& desc, IPipelineLayout** outLayout) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL
-        createDescriptorSet(DescriptorSetLayout* layout, DescriptorSet** outDescriptorSet) override;
+        createDescriptorSet(IDescriptorSetLayout* layout, IDescriptorSet** outDescriptorSet) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL
-        createProgram(const ShaderProgram::Desc& desc, ShaderProgram** outProgram) override;
+        createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createGraphicsPipelineState(
         const GraphicsPipelineStateDesc& desc,
-        PipelineState** outState) override;
+        IPipelineState** outState) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createComputePipelineState(
         const ComputePipelineStateDesc& desc,
-        PipelineState** outState) override;
+        IPipelineState** outState) override;
 
-    virtual SLANG_NO_THROW SlangResult SLANG_MCALL captureScreenSurface(Surface& surface) override;
+    virtual SLANG_NO_THROW SlangResult SLANG_MCALL captureScreenSurface(
+        void* buffer, size_t* inOutBufferSize, size_t* outRowPitch, size_t* outPixelSize) override;
 
-    virtual SLANG_NO_THROW void* SLANG_MCALL map(BufferResource* buffer, MapFlavor flavor) override;
-    virtual SLANG_NO_THROW void SLANG_MCALL unmap(BufferResource* buffer) override;
+    virtual SLANG_NO_THROW void* SLANG_MCALL map(IBufferResource* buffer, MapFlavor flavor) override;
+    virtual SLANG_NO_THROW void SLANG_MCALL unmap(IBufferResource* buffer) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
         setPrimitiveTopology(PrimitiveTopology topology) override;
 
     virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSet(
         PipelineType pipelineType,
-        PipelineLayout* layout,
+        IPipelineLayout* layout,
         UInt index,
-        DescriptorSet* descriptorSet) override;
+        IDescriptorSet* descriptorSet) override;
 
     virtual SLANG_NO_THROW void SLANG_MCALL setVertexBuffers(
         UInt startSlot,
         UInt slotCount,
-        BufferResource* const* buffers,
+        IBufferResource* const* buffers,
         const UInt* strides,
         const UInt* offsets) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
-        setIndexBuffer(BufferResource* buffer, Format indexFormat, UInt offset) override;
+        setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
-        setDepthStencilTarget(ResourceView* depthStencilView) override;
+        setDepthStencilTarget(IResourceView* depthStencilView) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
         setViewports(UInt count, Viewport const* viewports) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
         setScissorRects(UInt count, ScissorRect const* rects) override;
-    virtual SLANG_NO_THROW void SLANG_MCALL
-        setPipelineState(PipelineType pipelineType, PipelineState* state) override;
+    virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override;
     virtual SLANG_NO_THROW void SLANG_MCALL draw(UInt vertexCount, UInt startVertex) override;
     virtual SLANG_NO_THROW void SLANG_MCALL
         drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex) override;
@@ -131,7 +125,10 @@ public:
     {
         return RendererType::Vulkan;
     }
-
+    virtual PipelineStateBase* getCurrentPipeline() override
+    {
+        return m_currentPipeline.Ptr();
+    }
         /// Dtor
     ~VKRenderer();
 
@@ -169,8 +166,16 @@ public:
         const VulkanApi* m_api;
     };
 
-    class InputLayoutImpl : public InputLayout
-    {
+    class InputLayoutImpl : public IInputLayout, public RefObject
+	{
+    public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        IInputLayout* getInterface(const Guid& guid)
+        {
+            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IInputLayout)
+                return static_cast<IInputLayout*>(this);
+            return nullptr;
+        }
     public:
         List<VkVertexInputAttributeDescription> m_vertexDescs;
         int m_vertexSize;
@@ -181,7 +186,7 @@ public:
         public:
         typedef BufferResource Parent;
 
-        BufferResourceImpl(Resource::Usage initialUsage, const BufferResource::Desc& desc, VKRenderer* renderer):
+        BufferResourceImpl(IResource::Usage initialUsage, const IBufferResource::Desc& desc, VKRenderer* renderer):
             Parent(desc),
             m_renderer(renderer),
             m_initialUsage(initialUsage)
@@ -189,7 +194,7 @@ public:
             assert(renderer);
         }
 
-        Resource::Usage m_initialUsage;
+        IResource::Usage m_initialUsage;
         VKRenderer* m_renderer;
         Buffer m_buffer;
         Buffer m_uploadBuffer;
@@ -232,14 +237,38 @@ public:
         const VulkanApi* m_api;
     };
 
-    class SamplerStateImpl : public SamplerState
+    class SamplerStateImpl : public ISamplerState, public RefObject
     {
     public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        ISamplerState* getInterface(const Guid& guid)
+        {
+            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ISamplerState)
+                return static_cast<ISamplerState*>(this);
+            return nullptr;
+        }
+    public:
         VkSampler m_sampler;
+        const VulkanApi* m_api;
+        SamplerStateImpl(const VulkanApi* api)
+            : m_api(api)
+        {}
+        ~SamplerStateImpl()
+        {
+            m_api->vkDestroySampler(m_api->m_device, m_sampler, nullptr);
+        }
     };
 
-    class ResourceViewImpl : public ResourceView
+    class ResourceViewImpl : public IResourceView, public RefObject
     {
+    public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        IResourceView* getInterface(const Guid& guid)
+        {
+            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IResourceView)
+                return static_cast<IResourceView*>(this);
+            return nullptr;
+        }
     public:
         enum class ViewType
         {
@@ -247,17 +276,26 @@ public:
             TexelBuffer,
             PlainBuffer,
         };
+    public:
+        ResourceViewImpl(ViewType viewType, const VulkanApi* api)
+            : m_type(viewType), m_api(api)
+        {
+        }
         ViewType            m_type;
+        const VulkanApi* m_api;
     };
 
     class TextureResourceViewImpl : public ResourceViewImpl
     {
     public:
-        TextureResourceViewImpl()
+        TextureResourceViewImpl(const VulkanApi* api)
+            : ResourceViewImpl(ViewType::Texture, api)
         {
-            m_type = ViewType::Texture;
         }
-
+        ~TextureResourceViewImpl()
+        {
+            m_api->vkDestroyImageView(m_api->m_device, m_view, nullptr);
+        }
         RefPtr<TextureResourceImpl> m_texture;
         VkImageView                 m_view;
         VkImageLayout               m_layout;
@@ -266,11 +304,14 @@ public:
     class TexelBufferResourceViewImpl : public ResourceViewImpl
     {
     public:
-        TexelBufferResourceViewImpl()
+        TexelBufferResourceViewImpl(const VulkanApi* api)
+            : ResourceViewImpl(ViewType::TexelBuffer, api)
         {
-            m_type = ViewType::TexelBuffer;
         }
-
+        ~TexelBufferResourceViewImpl()
+        {
+            m_api->vkDestroyBufferView(m_api->m_device, m_view, nullptr);
+        }
         RefPtr<BufferResourceImpl>  m_buffer;
         VkBufferView m_view;
     };
@@ -278,19 +319,18 @@ public:
     class PlainBufferResourceViewImpl : public ResourceViewImpl
     {
     public:
-        PlainBufferResourceViewImpl()
+        PlainBufferResourceViewImpl(const VulkanApi* api)
+            : ResourceViewImpl(ViewType::PlainBuffer, api)
         {
-            m_type = ViewType::PlainBuffer;
         }
-
         RefPtr<BufferResourceImpl>  m_buffer;
         VkDeviceSize                offset;
         VkDeviceSize                size;
     };
 
-    class ShaderProgramImpl: public ShaderProgram
+    class ShaderProgramImpl: public GraphicsCommonShaderProgram
     {
-        public:
+    public:
 
         ShaderProgramImpl(const VulkanApi& api, PipelineType pipelineType):
             m_api(&api),
@@ -322,8 +362,16 @@ public:
         VkShaderModule m_modules[2];
     };
 
-    class DescriptorSetLayoutImpl : public DescriptorSetLayout
+    class DescriptorSetLayoutImpl : public IDescriptorSetLayout, public RefObject
     {
+    public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        IDescriptorSetLayout* getInterface(const Guid& guid)
+        {
+            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IDescriptorSetLayout)
+                return static_cast<IDescriptorSetLayout*>(this);
+            return nullptr;
+        }
     public:
         DescriptorSetLayoutImpl(const VulkanApi& api)
             : m_api(&api)
@@ -399,8 +447,18 @@ public:
         Index m_totalBoundObjectCount = 0;
     };
 
-    class PipelineLayoutImpl : public PipelineLayout
+    class PipelineLayoutImpl : public IPipelineLayout, public RefObject
     {
+    public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        IPipelineLayout* getInterface(const Guid& guid)
+        {
+            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IPipelineLayout)
+            {
+                return static_cast<IPipelineLayout*>(this);
+            }
+            return nullptr;
+        }
     public:
         PipelineLayoutImpl(const VulkanApi& api)
             : m_api(&api)
@@ -423,8 +481,16 @@ public:
         List<uint32_t>      m_descriptorSetRootConstantOffsets;
     };
 
-    class DescriptorSetImpl : public DescriptorSet
+    class DescriptorSetImpl : public IDescriptorSet, public RefObject
     {
+    public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        IDescriptorSet* getInterface(const Guid& guid)
+        {
+            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IDescriptorSet)
+                return static_cast<IDescriptorSet*>(this);
+            return nullptr;
+        }
     public:
         DescriptorSetImpl(VKRenderer* renderer)
             : m_renderer(renderer)
@@ -435,15 +501,18 @@ public:
         {
         }
 
-        virtual void setConstantBuffer(UInt range, UInt index, BufferResource* buffer) override;
-        virtual void setResource(UInt range, UInt index, ResourceView* view) override;
-        virtual void setSampler(UInt range, UInt index, SamplerState* sampler) override;
-        virtual void setCombinedTextureSampler(
+        virtual SLANG_NO_THROW void SLANG_MCALL setConstantBuffer(UInt range, UInt index, IBufferResource* buffer) override;
+        virtual SLANG_NO_THROW void SLANG_MCALL
+            setResource(UInt range, UInt index, IResourceView* view) override;
+        virtual SLANG_NO_THROW void SLANG_MCALL
+            setSampler(UInt range, UInt index, ISamplerState* sampler) override;
+        virtual SLANG_NO_THROW void SLANG_MCALL setCombinedTextureSampler(
             UInt range,
             UInt index,
-            ResourceView*   textureView,
-            SamplerState*   sampler) override;
-        virtual void setRootConstants(
+            IResourceView*   textureView,
+            ISamplerState*   sampler) override;
+        virtual SLANG_NO_THROW void SLANG_MCALL
+            setRootConstants(
             UInt range,
             UInt offset,
             UInt size,
@@ -467,7 +536,7 @@ public:
         int m_offset;
     };
 
-    class PipelineStateImpl : public PipelineState
+    class PipelineStateImpl : public PipelineStateBase
     {
     public:
         PipelineStateImpl(const VulkanApi& api):
@@ -480,6 +549,21 @@ public:
             {
                 m_api->vkDestroyPipeline(m_api->m_device, m_pipeline, nullptr);
             }
+        }
+
+        void init(const GraphicsPipelineStateDesc& inDesc)
+        {
+            PipelineStateDesc pipelineDesc;
+            pipelineDesc.type = PipelineType::Graphics;
+            pipelineDesc.graphics = inDesc;
+            initializeBase(pipelineDesc);
+        }
+        void init(const ComputePipelineStateDesc& inDesc)
+        {
+            PipelineStateDesc pipelineDesc;
+            pipelineDesc.type = PipelineType::Compute;
+            pipelineDesc.compute = inDesc;
+            initializeBase(pipelineDesc);
         }
 
         const VulkanApi* m_api;
@@ -497,7 +581,7 @@ public:
         /// Note that the outShaderModule value should be cleaned up when no longer needed by caller
         /// via vkShaderModuleDestroy()
     VkPipelineShaderStageCreateInfo compileEntryPoint(
-        ShaderProgram::KernelDesc const&    kernelDesc,
+        IShaderProgram::KernelDesc const&    kernelDesc,
         VkShaderStageFlagBits stage,
         List<char>& outBuffer,
         VkShaderModule& outShaderModule);
@@ -550,7 +634,6 @@ public:
     float m_clearColor[4] = { 0, 0, 0, 0 };
 
     Desc m_desc;
-    List<String> m_features;
 };
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! VkRenderer::Buffer !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
@@ -858,10 +941,11 @@ void VKRenderer::_endRender()
     m_deviceQueue.flush();
 }
 
-SlangResult createVKRenderer(IRenderer** outRenderer)
+Result SLANG_MCALL createVKRenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer)
 {
-    *outRenderer = new VKRenderer();
-    (*outRenderer)->addRef();
+    RefPtr<VKRenderer> result = new VKRenderer();
+    SLANG_RETURN_ON_FAIL(result->initialize(*desc, windowHandle));
+    *outRenderer = result.detach();
     return SLANG_OK;
 }
 
@@ -941,7 +1025,7 @@ VkBool32 VKRenderer::handleDebugMessage(VkDebugReportFlagsEXT flags, VkDebugRepo
 }
 
 VkPipelineShaderStageCreateInfo VKRenderer::compileEntryPoint(
-    ShaderProgram::KernelDesc const&    kernelDesc,
+    IShaderProgram::KernelDesc const&    kernelDesc,
     VkShaderStageFlagBits stage,
     List<char>& outBuffer,
     VkShaderModule& outShaderModule)
@@ -978,6 +1062,10 @@ VkPipelineShaderStageCreateInfo VKRenderer::compileEntryPoint(
 
 SlangResult VKRenderer::initialize(const Desc& desc, void* inWindowHandle)
 {
+    SLANG_RETURN_ON_FAIL(slangContext.initialize(desc.slang, SLANG_SPIRV, "sm_5_1"));
+
+    SLANG_RETURN_ON_FAIL(GraphicsAPIRenderer::initialize(desc, inWindowHandle));
+
     SLANG_RETURN_ON_FAIL(m_module.init());
     SLANG_RETURN_ON_FAIL(m_api.initGlobalProcs(m_module));
 
@@ -1085,11 +1173,11 @@ SlangResult VKRenderer::initialize(const Desc& desc, void* inWindowHandle)
 
     Index selectedDeviceIndex = 0;
 
-    if (desc.adapter.getLength())
+    if (desc.adapter)
     {
         selectedDeviceIndex = -1;
 
-        String lowerAdapter = desc.adapter.toLower();
+        String lowerAdapter = String(desc.adapter).toLower();
 
         for (Index i = 0; i < physicalDevices.getCount(); ++i)
         {
@@ -1371,18 +1459,23 @@ void VKRenderer::presentFrame()
 TextureResource::Desc VKRenderer::getSwapChainTextureDesc()
 {
     TextureResource::Desc desc;
-    desc.init2D(Resource::Type::Texture2D, Format::Unknown, m_desc.width, m_desc.height, 1);
+    desc.init2D(IResource::Type::Texture2D, Format::Unknown, m_desc.width, m_desc.height, 1);
     return desc;
 }
 
-SlangResult VKRenderer::captureScreenSurface(Surface& surfaceOut)
+SlangResult VKRenderer::captureScreenSurface(
+    void* buffer, size_t* inOutBufferSize, size_t* outRowPitch, size_t* outPixelSize)
 {
+    SLANG_UNUSED(buffer);
+    SLANG_UNUSED(inOutBufferSize);
+    SLANG_UNUSED(outRowPitch);
+    SLANG_UNUSED(outPixelSize);
     return SLANG_FAIL;
 }
 
-static VkBufferUsageFlagBits _calcBufferUsageFlags(Resource::BindFlag::Enum bind)
+static VkBufferUsageFlagBits _calcBufferUsageFlags(IResource::BindFlag::Enum bind)
 {
-    typedef Resource::BindFlag BindFlag;
+    typedef IResource::BindFlag BindFlag;
 
     switch (bind)
     {
@@ -1409,7 +1502,7 @@ static VkBufferUsageFlagBits _calcBufferUsageFlags(int bindFlags)
     while (bindFlags)
     {
         int lsb = bindFlags & -bindFlags;
-        dstFlags |= _calcBufferUsageFlags(Resource::BindFlag::Enum(lsb));
+        dstFlags |= _calcBufferUsageFlags(IResource::BindFlag::Enum(lsb));
         bindFlags &= ~lsb;
     }
     return VkBufferUsageFlagBits(dstFlags);
@@ -1419,12 +1512,12 @@ static VkBufferUsageFlags _calcBufferUsageFlags(int bindFlags, int cpuAccessFlag
 {
     VkBufferUsageFlags usage = _calcBufferUsageFlags(bindFlags);
 
-    if (cpuAccessFlags & Resource::AccessFlag::Read)
+    if (cpuAccessFlags & IResource::AccessFlag::Read)
     {
         // If it can be read from, set this
         usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     }
-    if ((cpuAccessFlags & Resource::AccessFlag::Write) || initData)
+    if ((cpuAccessFlags & IResource::AccessFlag::Write) || initData)
     {
         usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     }
@@ -1432,9 +1525,9 @@ static VkBufferUsageFlags _calcBufferUsageFlags(int bindFlags, int cpuAccessFlag
     return usage;
 }
 
-static VkImageUsageFlagBits _calcImageUsageFlags(Resource::BindFlag::Enum bind)
+static VkImageUsageFlagBits _calcImageUsageFlags(IResource::BindFlag::Enum bind)
 {
-    typedef Resource::BindFlag BindFlag;
+    typedef IResource::BindFlag BindFlag;
 
     switch (bind)
     {
@@ -1460,7 +1553,7 @@ static VkImageUsageFlagBits _calcImageUsageFlags(int bindFlags)
     while (bindFlags)
     {
         int lsb = bindFlags & -bindFlags;
-        dstFlags |= _calcImageUsageFlags(Resource::BindFlag::Enum(lsb));
+        dstFlags |= _calcImageUsageFlags(IResource::BindFlag::Enum(lsb));
         bindFlags &= ~lsb;
     }
     return VkImageUsageFlagBits(dstFlags);
@@ -1472,12 +1565,12 @@ static VkImageUsageFlags _calcImageUsageFlags(int bindFlags, int cpuAccessFlags,
 
     usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
-    if (cpuAccessFlags & Resource::AccessFlag::Read)
+    if (cpuAccessFlags & IResource::AccessFlag::Read)
     {
         // If it can be read from, set this
         usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
-    if ((cpuAccessFlags & Resource::AccessFlag::Write) || initData)
+    if ((cpuAccessFlags & IResource::AccessFlag::Write) || initData)
     {
         usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     }
@@ -1530,7 +1623,22 @@ void VKRenderer::_transitionImageLayout(VkImage image, VkFormat format, const Te
     m_api.vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const TextureResource::Desc& descIn, const TextureResource::Data* initData, TextureResource** outResource)
+size_t calcRowSize(Format format, int width)
+{
+    size_t pixelSize = gfxGetFormatSize(format);
+    if (pixelSize == 0)
+    {
+        return 0;
+    }
+    return size_t(pixelSize * width);
+}
+
+size_t calcNumRows(Format format, int height)
+{
+    return (size_t)height;
+}
+
+Result VKRenderer::createTextureResource(IResource::Usage initialUsage, const ITextureResource::Desc& descIn, const ITextureResource::Data* initData, ITextureResource** outResource)
 {
     TextureResource::Desc desc(descIn);
     desc.setDefaults(initialUsage);
@@ -1552,25 +1660,25 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
 
         switch (desc.type)
         {
-            case Resource::Type::Texture1D:
+            case IResource::Type::Texture1D:
             {
                 imageInfo.imageType = VK_IMAGE_TYPE_1D;
                 imageInfo.extent = VkExtent3D{ uint32_t(descIn.size.width), 1, 1 };
                 break;
             }
-            case Resource::Type::Texture2D:
+            case IResource::Type::Texture2D:
             {
                 imageInfo.imageType = VK_IMAGE_TYPE_2D;
                 imageInfo.extent = VkExtent3D{ uint32_t(descIn.size.width), uint32_t(descIn.size.height), 1 };
                 break;
             }
-            case Resource::Type::TextureCube:
+            case IResource::Type::TextureCube:
             {
                 imageInfo.imageType = VK_IMAGE_TYPE_2D;
                 imageInfo.extent = VkExtent3D{ uint32_t(descIn.size.width), uint32_t(descIn.size.height), 1 };
                 break;
             }
-            case Resource::Type::Texture3D:
+            case IResource::Type::Texture3D:
             {
                 // Can't have an array and 3d texture
                 assert(desc.arraySize <= 1);
@@ -1640,8 +1748,8 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
         {
             const TextureResource::Size mipSize = desc.size.calcMipSize(j);
 
-            const int rowSizeInBytes = Surface::calcRowSize(desc.format, mipSize.width);
-            const int numRows =  Surface::calcNumRows(desc.format, mipSize.height);
+            auto rowSizeInBytes = calcRowSize(desc.format, mipSize.width);
+            auto numRows = calcNumRows(desc.format, mipSize.height);
 
             mipSizes.add(mipSize);
 
@@ -1671,8 +1779,8 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
                     const auto& mipSize = mipSizes[j];
 
                     const ptrdiff_t srcRowStride = initData->mipRowStrides[j];
-                    const int dstRowSizeInBytes = Surface::calcRowSize(desc.format, mipSize.width);
-                    const int numRows = Surface::calcNumRows(desc.format, mipSize.height);
+                    auto dstRowSizeInBytes = calcRowSize(desc.format, mipSize.width);
+                    auto numRows = calcNumRows(desc.format, mipSize.height);
 
                     for (int k = 0; k < mipSize.depth; k++)
                     {
@@ -1694,7 +1802,7 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
             m_api.vkUnmapMemory(m_device, uploadBuffer.m_memory);
         }
 
-        _transitionImageLayout(texture->m_image, format, texture->getDesc(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        _transitionImageLayout(texture->m_image, format, *texture->getDesc(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
         {
             size_t srcOffset = 0;
@@ -1704,8 +1812,8 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
                 {
                     const auto& mipSize = mipSizes[j];
 
-                    const int rowSizeInBytes = Surface::calcRowSize(desc.format, mipSize.width);
-                    const int numRows = Surface::calcNumRows(desc.format, mipSize.height);
+                    auto rowSizeInBytes = calcRowSize(desc.format, mipSize.width);
+                    auto numRows = calcNumRows(desc.format, mipSize.height);
 
                     // https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/VkBufferImageCopy.html
                     // bufferRowLength and bufferImageHeight specify the data in buffer memory as a subregion of a larger two- or three-dimensional image,
@@ -1734,7 +1842,7 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
             }
         }
 
-        _transitionImageLayout(texture->m_image, format, texture->getDesc(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        _transitionImageLayout(texture->m_image, format, *texture->getDesc(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         m_deviceQueue.flushAndWait();
     }
@@ -1743,7 +1851,7 @@ Result VKRenderer::createTextureResource(Resource::Usage initialUsage, const Tex
     return SLANG_OK;
 }
 
-Result VKRenderer::createBufferResource(Resource::Usage initialUsage, const BufferResource::Desc& descIn, const void* initData, BufferResource** outResource)
+Result VKRenderer::createBufferResource(IResource::Usage initialUsage, const IBufferResource::Desc& descIn, const void* initData, IBufferResource** outResource)
 {
     BufferResource::Desc desc(descIn);
     desc.setDefaults(initialUsage);
@@ -1756,7 +1864,7 @@ Result VKRenderer::createBufferResource(Resource::Usage initialUsage, const Buff
 
     switch (initialUsage)
     {
-        case Resource::Usage::ConstantBuffer:
+        case IResource::Usage::ConstantBuffer:
         {
             reqMemoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
             break;
@@ -1767,7 +1875,7 @@ Result VKRenderer::createBufferResource(Resource::Usage initialUsage, const Buff
     RefPtr<BufferResourceImpl> buffer(new BufferResourceImpl(initialUsage, desc, this));
     SLANG_RETURN_ON_FAIL(buffer->m_buffer.init(m_api, desc.sizeInBytes, usage, reqMemoryProperties));
 
-    if ((desc.cpuAccessFlags & Resource::AccessFlag::Write) || initData)
+    if ((desc.cpuAccessFlags & IResource::AccessFlag::Write) || initData)
     {
         SLANG_RETURN_ON_FAIL(buffer->m_uploadBuffer.init(m_api, bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
     }
@@ -1875,7 +1983,7 @@ static VkCompareOp translateComparisonFunc(ComparisonFunc func)
     }
 }
 
-Result VKRenderer::createSamplerState(SamplerState::Desc const& desc, SamplerState** outSampler)
+Result VKRenderer::createSamplerState(ISamplerState::Desc const& desc, ISamplerState** outSampler)
 {
     VkSamplerCreateInfo samplerInfo = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 
@@ -1900,25 +2008,77 @@ Result VKRenderer::createSamplerState(SamplerState::Desc const& desc, SamplerSta
     VkSampler sampler;
     SLANG_VK_RETURN_ON_FAIL(m_api.vkCreateSampler(m_device, &samplerInfo, nullptr, &sampler));
 
-    RefPtr<SamplerStateImpl> samplerImpl = new SamplerStateImpl();
+    RefPtr<SamplerStateImpl> samplerImpl = new SamplerStateImpl(&m_api);
     samplerImpl->m_sampler = sampler;
     *outSampler = samplerImpl.detach();
     return SLANG_OK;
 }
 
-Result VKRenderer::createTextureView(TextureResource* texture, ResourceView::Desc const& desc, ResourceView** outView)
+Result VKRenderer::createTextureView(ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView)
 {
-    assert(!"unimplemented");
-    return SLANG_FAIL;
+    auto resourceImpl = static_cast<TextureResourceImpl*>(texture);
+    RefPtr<TextureResourceViewImpl> view = new TextureResourceViewImpl(&m_api);
+    view->m_texture = resourceImpl;
+    VkImageViewCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    createInfo.flags = 0;
+    createInfo.format = VulkanUtil::getVkFormat(desc.format);
+    createInfo.image = resourceImpl->m_image;
+    createInfo.components = VkComponentMapping{ VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,VK_COMPONENT_SWIZZLE_B,VK_COMPONENT_SWIZZLE_A };
+    switch (resourceImpl->getType())
+    {
+    case IResource::Type::Texture1D:
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_1D;
+        break;
+    case IResource::Type::Texture2D:
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        break;
+    case IResource::Type::Texture3D:
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+        break;
+    case IResource::Type::TextureCube:
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+        break;
+    default:
+        SLANG_UNIMPLEMENTED_X("Unknown Texture type.");
+        break;
+    }
+    createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    createInfo.subresourceRange.baseArrayLayer = 0;
+    createInfo.subresourceRange.baseMipLevel = 0;
+    createInfo.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+    createInfo.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    switch (desc.type)
+    {
+    case IResourceView::Type::DepthStencil:
+        view->m_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        break;
+    case IResourceView::Type::RenderTarget:
+        view->m_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        break;
+    case IResourceView::Type::ShaderResource:
+        view->m_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        break;
+    case IResourceView::Type::UnorderedAccess:
+        view->m_layout = VK_IMAGE_LAYOUT_GENERAL;
+        break;
+    default:
+        SLANG_UNIMPLEMENTED_X("Unknown TextureViewDesc type.");
+        break;
+    }
+    m_api.vkCreateImageView(m_device, &createInfo, nullptr, &view->m_view);
+    *outView = view.detach();
+    return SLANG_OK;
 }
 
-Result VKRenderer::createBufferView(BufferResource* buffer, ResourceView::Desc const& desc, ResourceView** outView)
+Result VKRenderer::createBufferView(IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView)
 {
     auto resourceImpl = (BufferResourceImpl*) buffer;
 
     // TODO: These should come from the `ResourceView::Desc`
     VkDeviceSize offset = 0;
-    VkDeviceSize size = resourceImpl->getDesc().sizeInBytes;
+    VkDeviceSize size = resourceImpl->getDesc()->sizeInBytes;
 
     // There are two different cases we need to think about for buffers.
     //
@@ -1945,14 +2105,14 @@ Result VKRenderer::createBufferView(BufferResource* buffer, ResourceView::Desc c
         assert(!"unhandled");
         return SLANG_FAIL;
 
-    case ResourceView::Type::UnorderedAccess:
+    case IResourceView::Type::UnorderedAccess:
         // Is this a formatted view?
         //
         if(desc.format == Format::Unknown)
         {
             // Buffer usage that doesn't involve formatting doesn't
             // require a view in Vulkan.
-            RefPtr<PlainBufferResourceViewImpl> viewImpl = new PlainBufferResourceViewImpl();
+            RefPtr<PlainBufferResourceViewImpl> viewImpl = new PlainBufferResourceViewImpl(&m_api);
             viewImpl->m_buffer = resourceImpl;
             viewImpl->offset = 0;
             viewImpl->size = size;
@@ -1964,7 +2124,7 @@ Result VKRenderer::createBufferView(BufferResource* buffer, ResourceView::Desc c
         // it just like we would for a "sampled" buffer:
         //
         // FALLTHROUGH
-    case ResourceView::Type::ShaderResource:
+    case IResourceView::Type::ShaderResource:
         {
             VkBufferViewCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO };
 
@@ -1976,7 +2136,7 @@ Result VKRenderer::createBufferView(BufferResource* buffer, ResourceView::Desc c
             VkBufferView view;
             SLANG_VK_RETURN_ON_FAIL(m_api.vkCreateBufferView(m_device, &info, nullptr, &view));
 
-            RefPtr<TexelBufferResourceViewImpl> viewImpl = new TexelBufferResourceViewImpl();
+            RefPtr<TexelBufferResourceViewImpl> viewImpl = new TexelBufferResourceViewImpl(&m_api);
             viewImpl->m_buffer = resourceImpl;
             viewImpl->m_view = view;
             *outView = viewImpl.detach();
@@ -1986,7 +2146,7 @@ Result VKRenderer::createBufferView(BufferResource* buffer, ResourceView::Desc c
     }
 }
 
-Result VKRenderer::createInputLayout(const InputElementDesc* elements, UInt numElements, InputLayout** outLayout)
+Result VKRenderer::createInputLayout(const InputElementDesc* elements, UInt numElements, IInputLayout** outLayout)
 {
     RefPtr<InputLayoutImpl> layout(new InputLayoutImpl);
 
@@ -2010,7 +2170,7 @@ Result VKRenderer::createInputLayout(const InputElementDesc* elements, UInt numE
 
         dstDesc.offset = uint32_t(srcDesc.offset);
 
-        const size_t elementSize = RendererUtil::getFormatSize(srcDesc.format);
+        const size_t elementSize = gfxGetFormatSize(srcDesc.format);
         assert(elementSize > 0);
         const size_t endElement = srcDesc.offset + elementSize;
 
@@ -2023,7 +2183,7 @@ Result VKRenderer::createInputLayout(const InputElementDesc* elements, UInt numE
     return SLANG_OK;
 }
 
-void* VKRenderer::map(BufferResource* bufferIn, MapFlavor flavor)
+void* VKRenderer::map(IBufferResource* bufferIn, MapFlavor flavor)
 {
     BufferResourceImpl* buffer = static_cast<BufferResourceImpl*>(bufferIn);
     assert(buffer->m_mapFlavor == MapFlavor::Unknown);
@@ -2031,7 +2191,7 @@ void* VKRenderer::map(BufferResource* bufferIn, MapFlavor flavor)
     // Make sure everything has completed before reading...
     m_deviceQueue.flushAndWait();
 
-    const size_t bufferSize = buffer->getDesc().sizeInBytes;
+    const size_t bufferSize = buffer->getDesc()->sizeInBytes;
 
     switch (flavor)
     {
@@ -2083,12 +2243,12 @@ void* VKRenderer::map(BufferResource* bufferIn, MapFlavor flavor)
     }
 }
 
-void VKRenderer::unmap(BufferResource* bufferIn)
+void VKRenderer::unmap(IBufferResource* bufferIn)
 {
     BufferResourceImpl* buffer = static_cast<BufferResourceImpl*>(bufferIn);
     assert(buffer->m_mapFlavor != MapFlavor::Unknown);
 
-    const size_t bufferSize = buffer->getDesc().sizeInBytes;
+    const size_t bufferSize = buffer->getDesc()->sizeInBytes;
 
     switch (buffer->m_mapFlavor)
     {
@@ -2120,7 +2280,7 @@ void VKRenderer::setPrimitiveTopology(PrimitiveTopology topology)
     m_primitiveTopology = VulkanUtil::getVkPrimitiveTopology(topology);
 }
 
-void VKRenderer::setVertexBuffers(UInt startSlot, UInt slotCount, BufferResource*const* buffers, const UInt* strides, const UInt* offsets)
+void VKRenderer::setVertexBuffers(UInt startSlot, UInt slotCount, IBufferResource*const* buffers, const UInt* strides, const UInt* offsets)
 {
     {
         const Index num = Index(startSlot + slotCount);
@@ -2135,7 +2295,7 @@ void VKRenderer::setVertexBuffers(UInt startSlot, UInt slotCount, BufferResource
         BufferResourceImpl* buffer = static_cast<BufferResourceImpl*>(buffers[i]);
         if (buffer)
         {
-            assert(buffer->m_initialUsage == Resource::Usage::VertexBuffer);
+            assert(buffer->m_initialUsage == IResource::Usage::VertexBuffer);
         }
 
         BoundVertexBuffer& boundBuffer = m_boundVertexBuffers[startSlot + i];
@@ -2145,11 +2305,11 @@ void VKRenderer::setVertexBuffers(UInt startSlot, UInt slotCount, BufferResource
     }
 }
 
-void VKRenderer::setIndexBuffer(BufferResource* buffer, Format indexFormat, UInt offset)
+void VKRenderer::setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset)
 {
 }
 
-void VKRenderer::setDepthStencilTarget(ResourceView* depthStencilView)
+void VKRenderer::setDepthStencilTarget(IResourceView* depthStencilView)
 {
 }
 
@@ -2197,9 +2357,9 @@ void VKRenderer::setScissorRects(UInt count, ScissorRect const* rects)
     m_api.vkCmdSetScissor(commandBuffer, 0, uint32_t(count), vkRects);
 }
 
-void VKRenderer::setPipelineState(PipelineType pipelineType, PipelineState* state)
+void VKRenderer::setPipelineState(IPipelineState* state)
 {
-    m_currentPipeline = (PipelineStateImpl*)state;
+    m_currentPipeline = static_cast<PipelineStateImpl*>(state);
 }
 
 void VKRenderer::_flushBindingState(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint)
@@ -2295,14 +2455,14 @@ void VKRenderer::dispatchCompute(int x, int y, int z)
     m_api.vkCmdDispatch(commandBuffer, x, y, z);
 }
 
-static VkImageViewType _calcImageViewType(TextureResource::Type type, const TextureResource::Desc& desc)
+static VkImageViewType _calcImageViewType(ITextureResource::Type type, const ITextureResource::Desc& desc)
 {
     switch (type)
     {
-        case Resource::Type::Texture1D:        return desc.arraySize > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D;
-        case Resource::Type::Texture2D:        return desc.arraySize > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-        case Resource::Type::TextureCube:      return desc.arraySize > 1 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE;
-        case Resource::Type::Texture3D:
+        case IResource::Type::Texture1D:        return desc.arraySize > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D;
+        case IResource::Type::Texture2D:        return desc.arraySize > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+        case IResource::Type::TextureCube:      return desc.arraySize > 1 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE;
+        case IResource::Type::Texture3D:
         {
             // Can't have an array and 3d texture
             assert(desc.arraySize <= 1);
@@ -2335,6 +2495,7 @@ static VkDescriptorType translateDescriptorType(DescriptorSlotType type)
         CASE(UniformTexelBuffer,    UNIFORM_TEXEL_BUFFER);
         CASE(StorageTexelBuffer,    STORAGE_TEXEL_BUFFER);
         CASE(UniformBuffer,         UNIFORM_BUFFER);
+        CASE(ReadOnlyStorageBuffer, STORAGE_BUFFER);
         CASE(StorageBuffer,         STORAGE_BUFFER);
         CASE(DynamicUniformBuffer,  UNIFORM_BUFFER_DYNAMIC);
         CASE(DynamicStorageBuffer,  STORAGE_BUFFER_DYNAMIC);
@@ -2344,7 +2505,7 @@ static VkDescriptorType translateDescriptorType(DescriptorSlotType type)
     }
 }
 
-Result VKRenderer::createDescriptorSetLayout(const DescriptorSetLayout::Desc& desc, DescriptorSetLayout** outLayout)
+Result VKRenderer::createDescriptorSetLayout(const IDescriptorSetLayout::Desc& desc, IDescriptorSetLayout** outLayout)
 {
     RefPtr<DescriptorSetLayoutImpl> descriptorSetLayoutImpl = new DescriptorSetLayoutImpl(m_api);
 
@@ -2479,7 +2640,7 @@ Result VKRenderer::createDescriptorSetLayout(const DescriptorSetLayout::Desc& de
     return SLANG_OK;
 }
 
-Result VKRenderer::createPipelineLayout(const PipelineLayout::Desc& desc, PipelineLayout** outLayout)
+Result VKRenderer::createPipelineLayout(const IPipelineLayout::Desc& desc, IPipelineLayout** outLayout)
 {
     UInt descriptorSetCount = desc.descriptorSetCount;
 
@@ -2542,7 +2703,7 @@ Result VKRenderer::createPipelineLayout(const PipelineLayout::Desc& desc, Pipeli
     return SLANG_OK;
 }
 
-Result VKRenderer::createDescriptorSet(DescriptorSetLayout* layout, DescriptorSet** outDescriptorSet)
+Result VKRenderer::createDescriptorSet(IDescriptorSetLayout* layout, IDescriptorSet** outDescriptorSet)
 {
     auto layoutImpl = (DescriptorSetLayoutImpl*)layout;
 
@@ -2565,7 +2726,7 @@ Result VKRenderer::createDescriptorSet(DescriptorSetLayout* layout, DescriptorSe
     return SLANG_OK;
 }
 
-void VKRenderer::DescriptorSetImpl::setConstantBuffer(UInt range, UInt index, BufferResource* buffer)
+void VKRenderer::DescriptorSetImpl::setConstantBuffer(UInt range, UInt index, IBufferResource* buffer)
 {
     auto bufferImpl = (BufferResourceImpl*)buffer;
 
@@ -2577,7 +2738,7 @@ void VKRenderer::DescriptorSetImpl::setConstantBuffer(UInt range, UInt index, Bu
     VkDescriptorBufferInfo bufferInfo = {};
     bufferInfo.buffer = bufferImpl->m_buffer.m_buffer;
     bufferInfo.offset = 0;
-    bufferInfo.range = bufferImpl->getDesc().sizeInBytes;
+    bufferInfo.range = bufferImpl->getDesc()->sizeInBytes;
 
     VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     writeInfo.dstSet = m_descriptorSet;
@@ -2588,10 +2749,10 @@ void VKRenderer::DescriptorSetImpl::setConstantBuffer(UInt range, UInt index, Bu
     writeInfo.pBufferInfo = &bufferInfo;
 
     m_renderer->m_api.vkUpdateDescriptorSets(m_renderer->m_device, 1, &writeInfo, 0, nullptr);
-    m_boundObjects[boundObjectIndex] = buffer;
+    m_boundObjects[boundObjectIndex] = dynamic_cast<RefObject*>(buffer);
 }
 
-void VKRenderer::DescriptorSetImpl::setResource(UInt range, UInt index, ResourceView* view)
+void VKRenderer::DescriptorSetImpl::setResource(UInt range, UInt index, IResourceView* view)
 {
     SLANG_ASSERT(range < UInt(m_layout->m_ranges.getCount()));
     auto& rangeInfo = m_layout->m_ranges[range];
@@ -2608,7 +2769,6 @@ void VKRenderer::DescriptorSetImpl::setResource(UInt range, UInt index, Resource
             VkDescriptorImageInfo imageInfo = {};
             imageInfo.imageView = textureViewImpl->m_view;
             imageInfo.imageLayout = textureViewImpl->m_layout;
-            //            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
             VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
             writeInfo.dstSet = m_descriptorSet;
@@ -2660,10 +2820,10 @@ void VKRenderer::DescriptorSetImpl::setResource(UInt range, UInt index, Resource
         break;
     }
 
-    m_boundObjects[boundObjectIndex] = view;
+    m_boundObjects[boundObjectIndex] = dynamic_cast<RefObject*>(view);
 }
 
-void VKRenderer::DescriptorSetImpl::setSampler(UInt range, UInt index, SamplerState* sampler)
+void VKRenderer::DescriptorSetImpl::setSampler(UInt range, UInt index, ISamplerState* sampler)
 {
     SLANG_ASSERT(range < UInt(m_layout->m_ranges.getCount()));
     auto& rangeInfo = m_layout->m_ranges[range];
@@ -2672,16 +2832,25 @@ void VKRenderer::DescriptorSetImpl::setSampler(UInt range, UInt index, SamplerSt
     auto boundObjectIndex = rangeInfo.arrayIndex + index;
     auto descriptorType = rangeInfo.vkDescriptorType;
 
-    // TODO: Actually bind it!
+    VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    writeInfo.dstSet = m_descriptorSet;
+    writeInfo.dstBinding = uint32_t(bindingIndex);
+    writeInfo.dstArrayElement = uint32_t(index);
+    writeInfo.descriptorCount = 1;
+    writeInfo.descriptorType = descriptorType;
+    VkDescriptorImageInfo imageInfo = {};
+    imageInfo.sampler = static_cast<SamplerStateImpl*>(sampler)->m_sampler;
+    writeInfo.pImageInfo = &imageInfo;
+    m_renderer->m_api.vkUpdateDescriptorSets(m_renderer->m_device, 1, &writeInfo, 0, nullptr);
 
-    m_boundObjects[boundObjectIndex] = sampler;
+    m_boundObjects[boundObjectIndex] = dynamic_cast<RefObject*>(sampler);
 }
 
 void VKRenderer::DescriptorSetImpl::setCombinedTextureSampler(
     UInt range,
     UInt index,
-    ResourceView*   textureView,
-    SamplerState*   sampler)
+    IResourceView*   textureView,
+    ISamplerState*   sampler)
 {
     SLANG_ASSERT(range < UInt(m_layout->m_ranges.getCount()));
     auto& rangeInfo = m_layout->m_ranges[range];
@@ -2696,8 +2865,8 @@ void VKRenderer::DescriptorSetImpl::setCombinedTextureSampler(
     // to keep both the texture view and the sampler object live.
     //
     auto boundObjectIndex = rangeInfo.arrayIndex + 2 * index;
-    m_boundObjects[boundObjectIndex + 0] = textureView;
-    m_boundObjects[boundObjectIndex + 1] = sampler;
+    m_boundObjects[boundObjectIndex + 0] = dynamic_cast<RefObject*>(textureView);
+    m_boundObjects[boundObjectIndex + 1] = dynamic_cast<RefObject*>(sampler);
 }
 
 void VKRenderer::DescriptorSetImpl::setRootConstants(
@@ -2725,7 +2894,7 @@ void VKRenderer::DescriptorSetImpl::setRootConstants(
     memcpy(m_rootConstantData.getBuffer() + rootConstantRangeInfo.offset + offset, data, size);
 }
 
-void VKRenderer::setDescriptorSet(PipelineType pipelineType, PipelineLayout* layout, UInt index, DescriptorSet* descriptorSet)
+void VKRenderer::setDescriptorSet(PipelineType pipelineType, IPipelineLayout* layout, UInt index, IDescriptorSet* descriptorSet)
 {
     // Ideally this should eventually be as simple as:
     //
@@ -2749,8 +2918,22 @@ void VKRenderer::setDescriptorSet(PipelineType pipelineType, PipelineLayout* lay
     m_currentDescriptorSets[index] = descriptorSetImpl->m_descriptorSet;
 }
 
-Result VKRenderer::createProgram(const ShaderProgram::Desc& desc, ShaderProgram** outProgram)
+Result VKRenderer::createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram)
 {
+    if (desc.slangProgram && desc.slangProgram->getSpecializationParamCount() != 0)
+    {
+        // For a specializable program, we don't invoke any actual slang compilation yet.
+        RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl(m_api, desc.pipelineType);
+        initProgramCommon(shaderProgram, desc);
+        *outProgram = shaderProgram.detach();
+        return SLANG_OK;
+    }
+
+    if( desc.kernelCount == 0 )
+    {
+        return createProgramFromSlang(this, desc, outProgram);
+    }
+
     RefPtr<ShaderProgramImpl> impl = new ShaderProgramImpl(m_api, desc.pipelineType);
     if( desc.pipelineType == PipelineType::Compute)
     {
@@ -2765,11 +2948,12 @@ Result VKRenderer::createProgram(const ShaderProgram::Desc& desc, ShaderProgram*
         impl->m_vertex = compileEntryPoint(*vertexKernel, VK_SHADER_STAGE_VERTEX_BIT, impl->m_buffers[0], impl->m_modules[0]);
         impl->m_fragment = compileEntryPoint(*fragmentKernel, VK_SHADER_STAGE_FRAGMENT_BIT, impl->m_buffers[1], impl->m_modules[1]);
     }
+    initProgramCommon(impl, desc);
     *outProgram = impl.detach();
     return SLANG_OK;
 }
 
-Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& inDesc, PipelineState** outState)
+Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& inDesc, IPipelineState** outState)
 {
     GraphicsPipelineStateDesc desc = inDesc;
     preparePipelineDesc(desc);
@@ -2779,9 +2963,6 @@ Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& 
     auto programImpl = (ShaderProgramImpl*) desc.program;
     auto pipelineLayoutImpl = (PipelineLayoutImpl*) desc.pipelineLayout;
     auto inputLayoutImpl = (InputLayoutImpl*) desc.inputLayout;
-
-    const int width = int(desc.framebufferWidth);
-    const int height = int(desc.framebufferHeight);
 
     // Shader Stages
     //
@@ -2827,14 +3008,16 @@ Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& 
     VkViewport viewport = {};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = (float)width;
-    viewport.height = (float)height;
+    // We are using dynamic viewport and scissor state.
+    // Here we specify an arbitrary size, actual viewport will be set at `beginRenderPass` time.
+    viewport.width = 16.0f;
+    viewport.height = 16.0f;
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 
     VkRect2D scissor = {};
     scissor.offset = { 0, 0 };
-    scissor.extent = { uint32_t(width), uint32_t(height) };
+    scissor.extent = { uint32_t(16), uint32_t(16) };
 
     VkPipelineViewportStateCreateInfo viewportState = {};
     viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -2873,6 +3056,12 @@ Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& 
     colorBlending.blendConstants[2] = 0.0f;
     colorBlending.blendConstants[3] = 0.0f;
 
+    VkPipelineDynamicStateCreateInfo dynamicStateInfo = {};
+    dynamicStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicStateInfo.dynamicStateCount = 2;
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT , VK_DYNAMIC_STATE_SCISSOR};
+    dynamicStateInfo.pDynamicStates = dynamicStates;
+
     VkGraphicsPipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
 
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -2888,6 +3077,7 @@ Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& 
     pipelineInfo.renderPass = m_renderPass;
     pipelineInfo.subpass = 0;
     pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+    pipelineInfo.pDynamicState = &dynamicStateInfo;
 
     VkPipeline pipeline = VK_NULL_HANDLE;
     SLANG_VK_CHECK(m_api.vkCreateGraphicsPipelines(m_device, pipelineCache, 1, &pipelineInfo, nullptr, &pipeline));
@@ -2896,11 +3086,12 @@ Result VKRenderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& 
     pipelineStateImpl->m_pipeline = pipeline;
     pipelineStateImpl->m_pipelineLayout = pipelineLayoutImpl;
     pipelineStateImpl->m_shaderProgram = programImpl;
+    pipelineStateImpl->init(desc);
     *outState = pipelineStateImpl.detach();
     return SLANG_OK;
 }
 
-Result VKRenderer::createComputePipelineState(const ComputePipelineStateDesc& inDesc, PipelineState** outState)
+Result VKRenderer::createComputePipelineState(const ComputePipelineStateDesc& inDesc, IPipelineState** outState)
 {
     ComputePipelineStateDesc desc = inDesc;
     preparePipelineDesc(desc);
@@ -2921,6 +3112,7 @@ Result VKRenderer::createComputePipelineState(const ComputePipelineStateDesc& in
     pipelineStateImpl->m_pipeline = pipeline;
     pipelineStateImpl->m_pipelineLayout = pipelineLayoutImpl;
     pipelineStateImpl->m_shaderProgram = programImpl;
+    pipelineStateImpl->init(desc);
     *outState = pipelineStateImpl.detach();
     return SLANG_OK;
 }

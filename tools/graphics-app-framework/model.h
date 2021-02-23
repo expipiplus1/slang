@@ -1,7 +1,7 @@
 // model.h
 #pragma once
 
-#include "tools/gfx/render.h"
+#include "slang-gfx.h"
 #include "vector-math.h"
 #include "slang-com-ptr.h"
 #include <vector>
@@ -17,7 +17,7 @@ struct ModelLoader
         glm::vec3                   specularColor;
         float                       specularity;
 
-        RefPtr<TextureResource>     diffuseMap;
+        ComPtr<ITextureResource>     diffuseMap;
     };
 
     struct Vertex
@@ -39,8 +39,8 @@ struct ModelLoader
 
     struct ModelData
     {
-        RefPtr<BufferResource>  vertexBuffer;
-        RefPtr<BufferResource>  indexBuffer;
+        ComPtr<IBufferResource> vertexBuffer;
+        ComPtr<IBufferResource> indexBuffer;
         PrimitiveTopology       primitiveTopology;
         int                     vertexCount;
         int                     indexCount;

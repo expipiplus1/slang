@@ -76,7 +76,7 @@ struct SpecializationContext
         // can't mark an interface as used until its requirements are
         // used, etc.
         //
-        if(inst->op == kIROp_InterfaceRequirementEntry)
+        if(inst->getOp() == kIROp_InterfaceRequirementEntry)
             return true;
 
         return fullySpecializedInsts.Contains(inst);
@@ -107,9 +107,7 @@ struct SpecializationContext
     // to be considered for specialization or simplification,
     // whether generic, existential, etc.
     //
-    List<IRInst*> workList;
-    HashSet<IRInst*> workListSet;
-
+    OrderedHashSet<IRInst*> workList;
     HashSet<IRInst*> cleanInsts;
 
     void addToWorkList(
@@ -125,14 +123,12 @@ struct SpecializationContext
                 return;
         }
 
-        if(workListSet.Contains(inst))
-            return;
+        if (workList.Add(inst))
+        {
+            cleanInsts.Remove(inst);
 
-        workList.add(inst);
-        workListSet.Add(inst);
-        cleanInsts.Remove(inst);
-
-        addUsersToWorkList(inst);
+            addUsersToWorkList(inst);
+        }
     }
 
     // When a transformation makes a change to an instruction,
@@ -400,7 +396,7 @@ struct SpecializationContext
         // since values are an important class of instruction we want
         // to deduplicate.
 
-        switch(inst->op)
+        switch(inst->getOp())
         {
         default:
             // The default case is that an instruction can
@@ -480,7 +476,7 @@ struct SpecializationContext
     void maybeSpecializeInst(
         IRInst*                     inst)
     {
-        switch(inst->op)
+        switch(inst->getOp())
         {
         default:
             // By default we assume that specialization is
@@ -682,17 +678,17 @@ struct SpecializationContext
         //
         addToWorkList(module->getModuleInst());
 
-        while(workList.getCount() != 0)
+        while(workList.Count() != 0)
         {
 
         // We will then iterate until our work list goes dry.
         //
-        while(workList.getCount() != 0)
+        while(workList.Count() != 0)
         {
             IRInst* inst = workList.getLast();
 
             workList.removeLast();
-            workListSet.Remove(inst);
+
             cleanInsts.Add(inst);
 
             // For each instruction we process, we want to perform
@@ -838,15 +834,29 @@ struct SpecializationContext
                     // we should update it to be `specialize(.operator[], elementType)`, so the return type
                     // of the load call is `elementType`.
                     auto oldCallee = inst->getCallee();
-                    auto newCallee = getNewSpecializedBufferLoadCallee(inst->getCallee(), sbType, elementType);
-                    auto newCall = builder.emitCallInst(elementType, newCallee, args);
+
+                    // A subscript operation on mutable buffers returns a ptr type instead of a value type.
+                    // We need to make sure the pointer-ness is preserved correctly.
+                    auto innerResultType = elementType;
+                    if (auto ptrResultType = as<IRPtrType>(inst->getDataType()))
+                    {
+                        innerResultType = builder.getPtrType(elementType);
+                    }
+                    auto newCallee = getNewSpecializedBufferLoadCallee(inst->getCallee(), sbType, innerResultType);
+                    auto newCall = builder.emitCallInst(innerResultType, newCallee, args);
                     auto newWrapExistential = builder.emitWrapExistential(
                         resultType, newCall, slotOperandCount, slotOperands.getBuffer());
                     inst->replaceUsesWith(newWrapExistential);
+                    workList.Remove(inst);
                     inst->removeAndDeallocate();
                     SLANG_ASSERT(!oldCallee->hasUses());
+                    workList.Remove(oldCallee);
                     oldCallee->removeAndDeallocate();
                     addUsersToWorkList(newWrapExistential);
+
+                    workList.Remove(wrapExistential);
+                    SLANG_ASSERT(!wrapExistential->hasUses());
+                    wrapExistential->removeAndDeallocate();
                     return true;
                 }
             }
@@ -1125,7 +1135,7 @@ struct SpecializationContext
             // we can simply check if the `concreteType` is a compile-time
             // constant value.
             //
-            if(concreteType->op == kIROp_ExtractExistentialType)
+            if(concreteType->getOp() == kIROp_ExtractExistentialType)
                 return false;
 
             return true;
@@ -1812,7 +1822,7 @@ struct SpecializationContext
                 slotOperands.add(wrapInst->getSlotOperand(ii));
             }
 
-            auto elementPtrType = builder.getPtrType(ptrType->op, elementType);
+            auto elementPtrType = builder.getPtrType(ptrType->getOp(), elementType);
             auto newElementAddr = builder.emitElementAddress(elementPtrType, val, index);
 
             auto newWrapExistentialInst = builder.emitWrapExistential(
@@ -1911,7 +1921,7 @@ struct SpecializationContext
                 type->getExistentialArgs());
 
             auto newPtrLikeType = builder.getType(
-                baseType->op,
+                baseType->getOp(),
                 1,
                 &wrappedElementType);
             addUsersToWorkList(type);
@@ -2039,7 +2049,7 @@ struct SpecializationContext
             {
                 next = inst->getNextInst();
 
-                switch(inst->op)
+                switch(inst->getOp())
                 {
                 default:
                     break;

@@ -8,7 +8,10 @@
 *.ilk
 *.obj
 *.slang-module
+*.zip
+*.ini
 .clang-format
+
 bin/
 intermediate/
 build.*/

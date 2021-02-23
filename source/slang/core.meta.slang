@@ -1358,6 +1358,16 @@ for (int tt = 0; tt < kBaseTextureTypeCount; ++tt)
                         sb << "float" << kBaseTextureTypes[tt].coordCount << " gradX, ";
                         sb << "float" << kBaseTextureTypes[tt].coordCount << " gradY, ";
                         sb << "constexpr int" << kBaseTextureTypes[tt].coordCount << " offset);\n";
+
+                        sb << "__glsl_extension(GL_ARB_sparse_texture_clamp)";
+                        sb << "__target_intrinsic(glsl, \"$ctextureGradOffsetClampARB($p, $2, $3, $4, $5, $6)$z\")\n";
+                        sb << "T SampleGrad(SamplerState s, ";
+                        sb << "float" << kBaseTextureTypes[tt].coordCount + isArray << " location, ";
+                        sb << "float" << kBaseTextureTypes[tt].coordCount << " gradX, ";
+                        sb << "float" << kBaseTextureTypes[tt].coordCount << " gradY, ";
+                        sb << "constexpr int" << kBaseTextureTypes[tt].coordCount << " offset, ";
+                        sb << "float lodClamp);\n";
+
                     }
 
                     // `SampleLevel`
@@ -1913,12 +1923,37 @@ ${{{{
 
 }}}}
 
-
+// Bit cast
+__generic<T, U>
+[__unsafeForceInlineEarly]
+__intrinsic_op($(kIROp_BitCast))
+T bit_cast(U value);
 
 // Specialized function
 
 __intrinsic_op
 int getStringHash(String string);
+
+// Use will produce a syntax error in downstream compiler
+// Useful for testing diagnostics around compilation errors of downstream compiler
+// It 'returns' an int so can be used in expressions without the front end complaining.
+__target_intrinsic(hlsl, " @ ")
+__target_intrinsic(glsl, " @ ")
+__target_intrinsic(cuda, " @ ")
+__target_intrinsic(cpp, " @ ")
+int __SyntaxError();
+
+/// Mark beginning of "interlocked" operations in a fragment shader.
+__target_intrinsic(glsl, "beginInvocationInterlockARB")
+__glsl_extension(GL_ARB_fragment_shader_interlock)
+__glsl_version(420)
+void beginInvocationInterlock() {}
+
+/// Mark end of "interlocked" operations in a fragment shader.
+__target_intrinsic(glsl, "endInvocationInterlockARB")
+__glsl_extension(GL_ARB_fragment_shader_interlock)
+__glsl_version(420)
+void endInvocationInterlock() {}
 
 // Operators to apply to `enum` types
 
@@ -2085,3 +2120,6 @@ attribute_syntax [__requiresNVAPI] : RequiresNVAPIAttribute;
 
 __attributeTarget(FunctionDeclBase)
 attribute_syntax [noinline] : NoInlineAttribute;
+
+__attributeTarget(StructDecl)
+attribute_syntax [payload] : PayloadAttribute;

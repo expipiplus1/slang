@@ -1,10 +1,9 @@
 #pragma once
 
-#include <cstdint>
+#include "../renderer-shared.h"
 
 namespace gfx
 {
-class IRenderer;
 
-int32_t createCUDARenderer(IRenderer** outRenderer);
+SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer);
 }

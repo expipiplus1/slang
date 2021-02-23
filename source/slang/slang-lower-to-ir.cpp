@@ -1438,6 +1438,61 @@ struct ValLoweringVisitor : ValVisitor<ValLoweringVisitor, LoweredValInfo, Lower
         return LoweredValInfo::simple(context->thisTypeWitness);
     }
 
+    LoweredValInfo visitConjunctionSubtypeWitness(ConjunctionSubtypeWitness* val)
+    {
+        // A witness `T : L & R` for a conformance of `T` to a conjunction of
+        // types `L` and `R` will be lowered as a tuple of two witnesses: one
+        // for `T : L` and one for `T : R`. Luckily, those two conformances
+        // are exactly what the `ConjunctionSubtypeWitness` stores, so we just
+        // need to lower them individually and make a tuple.
+        //
+        auto left   = lowerSimpleVal(context, val->leftWitness);
+        auto right  = lowerSimpleVal(context, val->rightWitness);
+        return LoweredValInfo::simple(getBuilder()->emitMakeTuple(left, right));
+    }
+
+    LoweredValInfo visitExtractFromConjunctionSubtypeWitness(ExtractFromConjunctionSubtypeWitness* val)
+    {
+        auto builder = getBuilder();
+
+        // We know from `visitConjunctionSubtypeWitness` that a witness for a relationship
+        // like `T : L & R` will be a tuple `(w_l, w_r)` where `w_l` is a witness
+        // for `T : L` and `w_r` will be a witness for `T : R`.
+        //
+        // An `ExtractFromConjunctionSubtypeWitness` represents the intention to
+        // extract one of those two sub-witnesses. It directly stores the original
+        // witness that `T : L & R`, so lower that first and expect it to be
+        // a value of tuple type.
+        //
+        auto conjunctionWitness = lowerSimpleVal(context, val->conunctionWitness);
+        auto conjunctionTupleType = as<IRTupleType>(conjunctionWitness->getDataType());
+        SLANG_ASSERT(conjunctionTupleType);
+
+        // The `ExtractFromConjunctionSubtypeWitness` also stores the index of
+        // the witness/supertype we want in the conjunction `L & R`.
+        //
+        auto indexInConjunction = val->indexInConjunction;
+
+        // We want to extract the appropriate element from the tuple based on
+        // the index, but to know the type of the result we need to look up
+        // the element type that corresponds to that index.
+        //
+        // TODO: `IRTupleType` should really have `getElementCount()` and
+        // `getElementType(index)` accessors.
+        //
+        auto elementType = (IRType*) conjunctionTupleType->getOperand(indexInConjunction);
+
+        // With the information we've extracted above, we now just need to
+        // extract the appropriate element from the `(w_l, w_r)` tuple of
+        // witnesses, and we will have our desired result.
+        //
+        return LoweredValInfo::simple(builder->emitGetTupleElement(
+            elementType,
+            conjunctionWitness,
+            indexInConjunction));
+    }
+
+
     LoweredValInfo visitConstantIntVal(ConstantIntVal* val)
     {
         // TODO: it is a bit messy here that the `ConstantIntVal` representation
@@ -1712,6 +1767,15 @@ struct ValLoweringVisitor : ValVisitor<ValLoweringVisitor, LoweredValInfo, Lower
         if (context->thisType != nullptr)
             return LoweredValInfo::simple(context->thisType);
         return emitDeclRef(context, type->interfaceDeclRef, getBuilder()->getTypeKind());
+    }
+
+    LoweredValInfo visitAndType(AndType* type)
+    {
+        auto left = lowerType(context, type->left);
+        auto right = lowerType(context, type->right);
+
+        auto irType = getBuilder()->getConjunctionType(left, right);
+        return LoweredValInfo::simple(irType);
     }
 
     // We do not expect to encounter the following types in ASTs that have
@@ -3234,6 +3298,18 @@ struct ExprLoweringVisitorBase : ExprVisitor<Derived, LoweredValInfo>
                     continue;
                 }
             }
+            else if( auto andType = as<AndType>(e->type) )
+            {
+                // TODO: We might eventually need to tell the difference
+                // between conjunctions of interfaces and conjunctions
+                // that might include non-interface types.
+                //
+                // For now we assume that any case to a conjunction
+                // is effectively a cast to an interface type.
+                //
+                e = castExpr->valueArg;
+                continue;
+            }
             break;
         }
         return e;
@@ -3533,6 +3609,12 @@ struct ExprLoweringVisitorBase : ExprVisitor<Derived, LoweredValInfo>
     LoweredValInfo visitThisTypeExpr(ThisTypeExpr* /*expr*/)
     {
         SLANG_UNIMPLEMENTED_X("this-type expression during code generation");
+        UNREACHABLE_RETURN(LoweredValInfo());
+    }
+
+    LoweredValInfo visitAndTypeExpr(AndTypeExpr* /*expr*/)
+    {
+        SLANG_UNIMPLEMENTED_X("'&' type expression during code generation");
         UNREACHABLE_RETURN(LoweredValInfo());
     }
 
@@ -5676,79 +5758,6 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         return false;
     }
 
-    IRInst* defaultSpecializeOuterGeneric(
-        IRInst*         outerVal,
-        IRType*         type,
-        GenericDecl*    genericDecl)
-    {
-        auto builder = getBuilder();
-
-        // We need to specialize any generics that are further out...
-        auto specialiedOuterVal = defaultSpecializeOuterGenerics(
-            outerVal,
-            builder->getGenericKind(),
-            genericDecl);
-
-        List<IRInst*> genericArgs;
-
-        // Walk the parameters of the generic, and emit an argument for each,
-        // which will be a reference to binding for that parameter in the
-        // current scope.
-        //
-        // First we start with type and value parameters,
-        // in the order they were declared.
-        for (auto member : genericDecl->members)
-        {
-            if (auto typeParamDecl = as<GenericTypeParamDecl>(member))
-            {
-                genericArgs.add(getSimpleVal(context, ensureDecl(context, typeParamDecl)));
-            }
-            else if (auto valDecl = as<GenericValueParamDecl>(member))
-            {
-                genericArgs.add(getSimpleVal(context, ensureDecl(context, valDecl)));
-            }
-        }
-        // Then we emit constraint parameters, again in
-        // declaration order.
-        for (auto member : genericDecl->members)
-        {
-            if (auto constraintDecl = as<GenericTypeConstraintDecl>(member))
-            {
-                genericArgs.add(getSimpleVal(context, ensureDecl(context, constraintDecl)));
-            }
-        }
-
-        return builder->emitSpecializeInst(type, specialiedOuterVal, genericArgs.getCount(), genericArgs.getBuffer());
-    }
-
-    IRInst* defaultSpecializeOuterGenerics(
-        IRInst* val,
-        IRType* type,
-        Decl*   decl)
-    {
-        if(!val) return nullptr;
-
-        auto parentVal = val->getParent();
-        while(parentVal)
-        {
-            if(as<IRGeneric>(parentVal))
-                break;
-            parentVal = parentVal->getParent();
-        }
-        if(!parentVal)
-            return val;
-
-        for(auto pp = decl->parentDecl; pp; pp = pp->parentDecl)
-        {
-            if(auto genericAncestor = as<GenericDecl>(pp))
-            {
-                return defaultSpecializeOuterGeneric(parentVal, type, genericAncestor);
-            }
-        }
-
-        return val;
-    }
-
     struct NestedContext
     {
         IRGenEnv        subEnvStorage;
@@ -5798,16 +5807,30 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         if(decl->hasModifier<ConstModifier>())
             return lowerFunctionStaticConstVarDecl(decl);
 
-        // A global variable may need to be generic, if one
-        // of the outer declarations is generic.
+        // A function-scope `static` variable is effectively a global,
+        // and a simple solution here would be to try to emit this
+        // variable directly into the global scope.
+        //
+        // The one major wrinkle we need to deal with is the way that
+        // a function-scope `static` variable could be nested under
+        // a generic, leading to the situation that different instances
+        // of that same generic would need distinct storage for that
+        // variable declaration.
+        //
+        // We will handle that constraint by carefully nesting the
+        // IR global variable under the parent of its containing
+        // function.
+        //
+        auto parent = getBuilder()->insertIntoParent;
+        if(auto block = as<IRBlock>(parent))
+            parent = block->getParent();
+
         NestedContext nestedContext(this);
         auto subBuilder = nestedContext.getBuilder();
         auto subContext = nestedContext.getContext();
-        subBuilder->setInsertInto(subBuilder->getModule()->getModuleInst());
-        auto outerGeneric = emitOuterGenerics(subContext, decl, decl);
+        subBuilder->setInsertBefore(parent);
 
         IRType* subVarType = lowerType(subContext, decl->getType());
-
         IRGlobalValueWithCode* irGlobal = subBuilder->createGlobalVar(subVarType);
         addVarDecorations(subContext, irGlobal, decl);
 
@@ -5816,46 +5839,14 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
 
         subBuilder->addHighLevelDeclDecoration(irGlobal, decl);
 
-        // We are inside of a function, and that function might be generic,
-        // in which case the `static` variable will be lowered to another
-        // generic. Let's start with a terrible example:
-        //
-        //      interface IHasCount { int getCount(); }
-        //      int incrementCounter<T : IHasCount >(T val) {
-        //          static int counter = 0;
-        //          counter += val.getCount();
-        //          return counter;
-        //      }
-        //
-        // In this case, `incrementCounter` will lower to a function
-        // nested in a generic, while `counter` will be lowered to
-        // a global variable nested in a *different* generic.
-        // The net result is something like this:
-        //
-        //      int counter<T:IHasCount> = 0;
-        //
-        //      int incrementCounter<T:IHasCount>(T val) {
-        //          counter<T> += val.getCount();
-        //          return counter<T>;
-        //
-        // The references to `counter` inside of `incrementCounter`
-        // become references to `counter<T>`.
-        //
-        // At the IR level, this means that the value we install
-        // for `decl` needs to be a specialized reference to `irGlobal`,
-        // for any outer generics.
-        //
-        IRType* varType = lowerType(context, decl->getType());
-        IRType* varPtrType = getBuilder()->getPtrType(varType);
-        auto irSpecializedGlobal = defaultSpecializeOuterGenerics(irGlobal, varPtrType, decl);
-        LoweredValInfo globalVal = LoweredValInfo::ptr(irSpecializedGlobal);
+        LoweredValInfo globalVal = LoweredValInfo::ptr(irGlobal);
         setValue(context, decl, globalVal);
 
         // A `static` variable with an initializer needs special handling,
         // at least if the initializer isn't a compile-time constant.
         if( auto initExpr = decl->initExpr )
         {
-            // We must create an ordinary global `bool isInitialized = false`
+            // We must create another global `bool isInitialized = false`
             // to represent whether we've initialized this before.
             // Then emit code like:
             //
@@ -5867,14 +5858,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             // or not generating it in the first place. That is a bit
             // more complexity than I'm ready for at the moment.
             //
-
-            // Of course, if we are under a generic, then the Boolean
-            // variable need to be generic as well!
-            NestedContext nestedBoolContext(this);
-            auto boolBuilder = nestedBoolContext.getBuilder();
-            auto boolContext = nestedBoolContext.getContext();
-            boolBuilder->setInsertInto(boolBuilder->getModule()->getModuleInst());
-            emitOuterGenerics(boolContext, decl, decl);
+            auto boolBuilder = subBuilder;
 
             auto irBoolType = boolBuilder->getBoolType();
             auto irBool = boolBuilder->createGlobalVar(irBoolType);
@@ -5882,7 +5866,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             boolBuilder->setInsertInto(boolBuilder->createBlock());
             boolBuilder->emitReturn(boolBuilder->getBoolValue(false));
 
-            auto boolVal = LoweredValInfo::ptr(defaultSpecializeOuterGenerics(irBool, irBoolType, decl));
+            auto boolVal = LoweredValInfo::ptr(irBool);
 
 
             // Okay, with our global Boolean created, we can move on to
@@ -5904,8 +5888,6 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             builder->insertBlock(afterBlock);
         }
 
-        irGlobal->moveToEnd();
-        finishOuterGenerics(subBuilder, irGlobal, outerGeneric);
         return globalVal;
     }
 
@@ -5981,7 +5963,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         for (auto constraintDecl : decl->getMembersOfType<GenericTypeConstraintDecl>())
         {
             auto baseType = lowerType(context, constraintDecl->sup.type);
-            SLANG_ASSERT(baseType && baseType->op == kIROp_InterfaceType);
+            SLANG_ASSERT(baseType && baseType->getOp() == kIROp_InterfaceType);
             constraintInterfaces.add((IRInterfaceType*)baseType);
         }
         auto assocType = context->irBuilder->getAssociatedType(
@@ -6057,7 +6039,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             IRInst* requirementVal = ensureDecl(subContext, requirementDecl).val;
             if (requirementVal)
             {
-                switch (requirementVal->op)
+                switch (requirementVal->getOp())
                 {
                 case kIROp_Func:
                 case kIROp_Generic:
@@ -6066,8 +6048,6 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
                     // function types.
                     auto reqType = requirementVal->getFullType();
                     entry->setRequirementVal(reqType);
-                    if (!requirementVal->hasUses())
-                        requirementVal->removeAndDeallocate();
                     break;
                 }
                 default:
@@ -6211,6 +6191,11 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         addNameHint(context, irStruct, decl);
         addLinkageDecoration(context, irStruct, decl);
 
+        if( auto payloadAttribute = decl->findModifier<PayloadAttribute>() )
+        {
+            subBuilder->addDecoration(irStruct, kIROp_PayloadDecoration);
+        }
+
         subBuilder->setInsertInto(irStruct);
 
         // A `struct` that inherits from another `struct` must start
@@ -6281,6 +6266,20 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         return LoweredValInfo::simple(finishOuterGenerics(subBuilder, irStruct, outerGeneric));
     }
 
+    void lowerRayPayloadAccessModifier(IRInst* inst, RayPayloadAccessSemantic* semantic, IROp op)
+    {
+        auto builder = getBuilder();
+
+        List<IRInst*> operands;
+        for(auto stageNameToken : semantic->stageNameTokens)
+        {
+            IRInst* stageName = builder->getStringValue(stageNameToken.getContent());
+            operands.add(stageName);
+        }
+
+        builder->addDecoration(inst, op, operands.getBuffer(), operands.getCount());
+    }
+
     LoweredValInfo lowerMemberVarDecl(VarDecl* fieldDecl)
     {
         // Each field declaration in the AST translates into
@@ -6305,6 +6304,15 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             builder->addSemanticDecoration(irFieldKey, semanticModifier->name.getName()->text.getUnownedSlice());
         }
 
+        if( auto readModifier = fieldDecl->findModifier<RayPayloadReadSemantic>() )
+        {
+            lowerRayPayloadAccessModifier(irFieldKey, readModifier, kIROp_StageReadAccessDecoration);
+        }
+        if( auto writeModifier = fieldDecl->findModifier<RayPayloadWriteSemantic>())
+        {
+            lowerRayPayloadAccessModifier(irFieldKey, writeModifier, kIROp_StageWriteAccessDecoration);
+        }
+
         // We allow a field to be marked as a target intrinsic,
         // so that we can override its mangled name in the
         // output for the chosen target.
@@ -6326,6 +6334,79 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
     IRType* maybeGetConstExprType(IRType* type, Decl* decl)
     {
         return Slang::maybeGetConstExprType(getBuilder(), type, decl);
+    }
+
+        /// Emit appropriate generic parameters for a constraint, and return the value of that constraint.
+        ///
+        /// The `supType` paramete represents the super-type that a parameter is constrained to.
+    IRInst* emitGenericConstraintValue(
+        IRGenContext*               subContext,
+        GenericTypeConstraintDecl*  constraintDecl,
+        IRType*                     supType)
+    {
+        auto subBuilder = subContext->irBuilder;
+
+        // There are two cases we care about here.
+        //
+        if(auto andType = as<IRConjunctionType>(supType))
+        {
+            // The non-trivial case is when the constraint on a generic parameter
+            // was of the form `T : A & B`. In this case, we really want to
+            // emit the function with parameters for each of the two independent
+            // constraints `T : A` and `T : B`.
+            //
+            // We will loop over the "cases" of the conjunction (since
+            // the `IRConunctionType` can support more than just binary
+            // conjunctions) and recursively add constraints for each.
+            //
+            List<IRInst*> caseVals;
+            auto caseCount = andType->getCaseCount();
+            for(Int i = 0; i < caseCount; ++i)
+            {
+                auto caseType = andType->getCaseType(i);
+                auto caseVal = emitGenericConstraintValue(subContext, constraintDecl, caseType);
+                caseVals.add(caseVal);
+            }
+
+            return subBuilder->emitMakeTuple(caseVals);
+        }
+        else
+        {
+            // The case case is any other type being used as the constraint.
+            //
+            // The constraint will then map to a single generic parameter passing
+            // a witness table for conformance to the given `supType`.
+            //
+            auto param = subBuilder->emitParam(subBuilder->getWitnessTableType(supType));
+            addNameHint(context, param, constraintDecl);
+
+            // In order to support some of the "any-value" work in dynamic dispatch
+            // we have to attach the interface that was used as a constraint onto the
+            // type that is being constrained (which we expect to be a generic type
+            // parameter).
+            //
+            // TODO: It feels a bit gross to be doing this here; perhaps the front-end
+            // should handle propgation of value-size information from constraints
+            // back to generic parameters?
+            //
+            if (auto declRefType = as<DeclRefType>(constraintDecl->sub.type))
+            {
+                auto typeParamDeclVal = subContext->findLoweredDecl(declRefType->declRef.decl);
+                SLANG_ASSERT(typeParamDeclVal && typeParamDeclVal->val);
+                subBuilder->addTypeConstraintDecoration(typeParamDeclVal->val, supType);
+            }
+
+            return param;
+        }
+    }
+
+    void emitGenericConstraintDecl(
+        IRGenContext*               subContext,
+        GenericTypeConstraintDecl*  constraintDecl)
+    {
+        auto supType = lowerType(context, constraintDecl->sup.type);
+        auto value = emitGenericConstraintValue(subContext, constraintDecl, supType);
+        setValue(subContext, constraintDecl, LoweredValInfo::simple(value));
     }
 
     IRGeneric* emitOuterGeneric(
@@ -6374,22 +6455,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         {
             if (auto constraintDecl = as<GenericTypeConstraintDecl>(member))
             {
-                // TODO: use a `WitnessTableKind` to represent the
-                // classifier of the parameter.
-                auto supType = lowerType(context, constraintDecl->sup.type);
-                auto param = subBuilder->emitParam(subBuilder->getWitnessTableType(supType));
-                addNameHint(context, param, constraintDecl);
-                setValue(subContext, constraintDecl, LoweredValInfo::simple(param));
-
-                // Attach the constraint interface type as a decoration to the IRParam value
-                // representing the generic parameter, to provide downstream passes knowledge
-                // of the correspondence.
-                if (auto declRefType = as<DeclRefType>(constraintDecl->sub.type))
-                {
-                    auto typeParamDeclVal = subContext->findLoweredDecl(declRefType->declRef.decl);
-                    SLANG_ASSERT(typeParamDeclVal && typeParamDeclVal->val);
-                    subBuilder->addTypeConstraintDecoration(typeParamDeclVal->val, supType);
-                }
+                emitGenericConstraintDecl(subContext, constraintDecl);
             }
         }
 
@@ -6977,7 +7043,16 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
                 {
                     // `void`-returning function can get an implicit
                     // return on exit of the body statement.
-                    subContext->irBuilder->emitReturn();
+                    IRInst* returnInst = subContext->irBuilder->emitReturn();
+
+                    if (BlockStmt* blockStmt = as<BlockStmt>(decl->body))
+                    {
+                        returnInst->sourceLoc = blockStmt->closingSourceLoc;
+                    }
+                    else
+                    {
+                        returnInst->sourceLoc = SourceLoc();
+                    }
                 }
                 else
                 {
@@ -7330,6 +7405,32 @@ static bool isInterfaceRequirement(Decl* decl)
    return false;
 }
 
+    /// Add flattened "leaf" elements from `val` to the `ioArgs` list
+static void _addFlattenedTupleArgs(
+    List<IRInst*>&  ioArgs,
+    IRInst*         val)
+{
+    if( auto tupleVal = as<IRMakeTuple>(val) )
+    {
+        // If the value is a tuple, we can add its element directly.
+        auto elementCount = tupleVal->getOperandCount();
+        for( UInt i = 0; i < elementCount; ++i )
+        {
+            _addFlattenedTupleArgs(ioArgs, tupleVal->getOperand(i));
+        }
+    }
+    //
+    // TODO: We should handle the case here where `val`
+    // is not a `makeTuple` instruction, but still has
+    // a tuple *type*. In that case we should apply `getTupleElement`
+    // for each of its elements and then recurse on them.
+    //
+    else
+    {
+        ioArgs.add(val);
+    }
+}
+
 LoweredValInfo emitDeclRef(
     IRGenContext*           context,
     Decl*            decl,
@@ -7338,11 +7439,6 @@ LoweredValInfo emitDeclRef(
 {
     // We need to proceed by considering the specializations that
     // have been put in place.
-
-    // Ignore any global generic type substitutions during lowering.
-    // Really, we don't even expect these to appear.
-    while(auto globalGenericSubst = as<GlobalGenericParamSubstitution>(subst))
-        subst = globalGenericSubst->outer;
 
     // If the declaration would not get wrapped in a `IRGeneric`,
     // even if it is nested inside of an AST `GenericDecl`, then
@@ -7398,7 +7494,19 @@ LoweredValInfo emitDeclRef(
         {
             auto irArgVal = lowerSimpleVal(context, argVal);
             SLANG_ASSERT(irArgVal);
-            irArgs.add(irArgVal);
+
+            // It is possible that some of the arguments to the generic
+            // represent conformances to conjunction types like `A & B`.
+            // These conjunction conformances will appear as tuples in
+            // the IR, and we want to "flatten" them here so that we
+            // pass each "leaf" witness table as its own argument (to
+            // match the way that generic parameters are being emitted
+            // to the IR).
+            //
+            // TODO: This isn't a robust strategy if we ever have to deal
+            // with tuples as ordinary values.
+            //
+            _addFlattenedTupleArgs(irArgs, irArgVal);
         }
 
         // Once we have both the generic and its arguments,
@@ -7839,7 +7947,11 @@ IRModule* generateIRForTranslationUnit(
     if(compileRequest->shouldDumpIR)
     {
         DiagnosticSinkWriter writer(compileRequest->getSink());
-        dumpIR(module, &writer, "LOWER-TO-IR");
+
+        IRDumpOptions options;
+        options.sourceManager = compileRequest->getSourceManager();
+
+        dumpIR(module, options, "LOWER-TO-IR", &writer);
     }
 
     return module;
@@ -7939,7 +8051,7 @@ struct SpecializedComponentTypeIRGenContext : ComponentTypeVisitor
                     auto irType = lowerSimpleVal(context, specializationArg.val);
                     auto irWitness = lowerSimpleVal(context, specializationArg.witness);
 
-                    if (irType->op != kIROp_DynamicType)
+                    if (irType->getOp() != kIROp_DynamicType)
                         hasConcreteTypeArg = true;
 
                     irSlotArgs.add(irType);

@@ -718,7 +718,8 @@ SLANG_API SlangReflectionType * spReflection_FindTypeByName(SlangReflection * re
     // when type lookup fails.
     //
     Slang::DiagnosticSink sink(
-        programLayout->getTargetReq()->getLinkage()->getSourceManager());
+        programLayout->getTargetReq()->getLinkage()->getSourceManager(),
+        Lexer::sourceLocationLexer);
 
     try
     {
@@ -1147,9 +1148,13 @@ namespace Slang
         {
             return SLANG_BINDING_TYPE_CONSTANT_BUFFER;
         }
+        else if( as<SamplerStateType>(type) )
+        {
+            return SLANG_BINDING_TYPE_SAMPLER;
+        }
         else
         {
-            SLANG_UNEXPECTED("unhandled resource binding type");
+            return SLANG_BINDING_TYPE_UNKNOWN;
         }
     }
 
@@ -1167,13 +1172,11 @@ namespace Slang
         }
         else
         {
-            SLANG_UNEXPECTED("unhandled resource binding type");
+            return SLANG_BINDING_TYPE_UNKNOWN;
         }
     }
 
-
     SlangBindingType _calcBindingType(
-        Slang::TypeLayout*  typeLayout,
         LayoutResourceKind  kind)
     {
         switch( kind )
@@ -1188,21 +1191,42 @@ namespace Slang
     #define CASE(FROM, TO) \
         case LayoutResourceKind::FROM: return SLANG_BINDING_TYPE_##TO
 
-        CASE(ConstantBuffer, CONSTANT_BUFFER);
-        CASE(SamplerState, SAMPLER);
-        CASE(VaryingInput, VARYING_INPUT);
-        CASE(VaryingOutput, VARYING_OUTPUT);
-        CASE(ExistentialObjectParam, EXISTENTIAL_VALUE);
-        CASE(PushConstantBuffer, PUSH_CONSTANT);
+        CASE(ConstantBuffer,            CONSTANT_BUFFER);
+        CASE(SamplerState,              SAMPLER);
+        CASE(VaryingInput,              VARYING_INPUT);
+        CASE(VaryingOutput,             VARYING_OUTPUT);
+        CASE(ExistentialObjectParam,    EXISTENTIAL_VALUE);
+        CASE(PushConstantBuffer,        PUSH_CONSTANT);
+        CASE(Uniform,                   INLINE_UNIFORM_DATA);
         // TODO: register space
 
     #undef CASE
-
-        case LayoutResourceKind::ShaderResource:
-        case LayoutResourceKind::UnorderedAccess:
-        case LayoutResourceKind::DescriptorTableSlot:
-            return _calcResourceBindingType(typeLayout);
         }
+    }
+
+
+
+    SlangBindingType _calcBindingType(
+        Slang::TypeLayout*  typeLayout,
+        LayoutResourceKind  kind)
+    {
+        // If the type or type layout implies a specific binding type
+        // (e.g., a `Texture2D` implies a texture binding), then we
+        // will always favor the binding type implied.
+        //
+        if( auto bindingType = _calcResourceBindingType(typeLayout) )
+        {
+            if(bindingType != SLANG_BINDING_TYPE_UNKNOWN)
+                return bindingType;
+        }
+
+        // As a fallback, we may look at the kind of resources consumed
+        // by a type layout, and use that to infer the type of binding
+        // used. Note that, for example, a `float4` might represent
+        // multiple different kinds of binding, depending on where/how
+        // it is used (e.g., as a varying parameter, a root constant, etc.).
+        //
+        return _calcBindingType(kind);
     }
 
     static DeclRefType* asInterfaceType(Type* type)
@@ -1299,6 +1323,10 @@ namespace Slang
                 SlangBindingType bindingType = SLANG_BINDING_TYPE_CONSTANT_BUFFER;
                 Index spaceOffset = -1;
                 LayoutResourceKind kind = LayoutResourceKind::None;
+
+                // TODO: It is unclear if this should be looking at the resource
+                // usage of the parameter group, or of its "container" layout.
+                //
                 for(auto& resInfo : parameterGroupTypeLayout->resourceInfos)
                 {
                     kind = resInfo.kind;
@@ -1307,10 +1335,18 @@ namespace Slang
                     default:
                         continue;
 
+                        // Note: the only case where a parameter group should
+                        // reflect as consuming `Uniform` storage is on CPU/CUDA,
+                        // where that will be the only resource it contains.
+                        //
+                        // TODO: If we ever support targets that don't have
+                        // constant buffers at all, this logic would be questionable.
+                        //
                     case LayoutResourceKind::ConstantBuffer:
                     case LayoutResourceKind::PushConstantBuffer:
                     case LayoutResourceKind::RegisterSpace:
                     case LayoutResourceKind::DescriptorTableSlot:
+                    case LayoutResourceKind::Uniform:
                         break;
                     }
 
@@ -1345,39 +1381,79 @@ namespace Slang
                 // It is possible that the sub-object has descriptor ranges
                 // that will need to be exposed upward, into the parent.
                 //
+                // Note: it is a subtle point, but we are only going to expose
+                // *descriptor ranges* upward and not *binding ranges*. The
+                // distinction here comes down to:
+                //
+                // * Descriptor ranges are used to describe the entries that
+                //   must be allocated in one or more API descriptor sets to
+                //   physically hold a value of a given type (layout).
+                //
+                // * Binding ranges are used to describe the entries that must
+                //   be allocated in an application shader object to logically
+                //   hold a value of a given type (layout).
+                //
+                // In practice, a binding range might logically belong to a
+                // sub-object, but physically belong to a parent. Consider:
+                //
+                //    cbuffer C { Texture2D a; float b; }
+                //
+                // Independent of the API we compile for, we expect the global
+                // scope to have a sub-object for `C`, and for that sub-object
+                // to have a binding range for `a` (that is, we bind the texture
+                // into the sub-object).
+                //
+                // When compiling for D3D12 or Vulkan, we expect that the global
+                // scope must have two descriptor ranges for `C`: one for the
+                // constant buffer itself, and another for the texture `a`.
+                // The reason for this is that `a` needs to be bound as part
+                // of a descriptor set, and `C` doesn't create/allocate its own
+                // descriptor set(s).
+                //
+                // When compiling for CPU or CUDA, we expect that the global scope
+                // will have a descriptor range for `C` but *not* one for `C.a`,
+                // because the physical storage for `C.a` is provided by the
+                // memory allocation for `C` itself.
+
                 if( spaceOffset != -1 )
                 {
+                    // The logic here assumes that when a parameter group consumes
+                    // resources that must "leak" into the outer scope (including
+                    // reosurces consumed by the group "container"), those resources
+                    // will amount to descriptor ranges that are part of the same
+                    // descriptor set.
+                    //
+                    // (If the contents of a group consume whole spaces/sets, then
+                    // those resources will be accounted for separately).
+                    //
                     Int descriptorSetIndex = _findOrAddDescriptorSet(spaceOffset);
                     auto descriptorSet = m_extendedInfo->m_descriptorSets[descriptorSetIndex];
                     auto firstDescriptorRangeIndex = descriptorSet->descriptorRanges.getCount();
 
-                    // TODO: We need to recursively add descriptor ranges (but not binding
-                    // ranges!) for anything in the element type that "leaks" into
-                    // the surrounding context.
+                    // First, we need to deal with any descriptor ranges that are
+                    // introduced by the "container" type itself.
                     //
                     switch(kind)
                     {
+                        // If the parameter group was allocated to consume one or
+                        // more whole register spaces/sets, then nothing should
+                        // leak through that is measured in descriptor sets.
+                        //
                     case LayoutResourceKind::RegisterSpace:
-                    case LayoutResourceKind::Uniform:
                     case LayoutResourceKind::None:
                         break;
 
                     default:
                         {
-                            // This means we are in the constant-buffer-like case
-                            // (even if the user wrote `ParameterBlock<T>`), and any
-                            // resource usage inside the element type should "leak"
-                            // out to the parent scope.
-                            //
-                            // It *also* means we should add a suitable descriptor
-                            // range if one is required for the "container" type.
+                            // In a constant-buffer-like case, then all the (non-space/set) resource
+                            // usage of the "container" should be reflected as descriptor
+                            // ranges in the parent scope.
                             //
                             for(auto resInfo : parameterGroupTypeLayout->containerVarLayout->typeLayout->resourceInfos)
                             {
                                 switch( resInfo.kind )
                                 {
                                 case LayoutResourceKind::RegisterSpace:
-                                case LayoutResourceKind::Uniform:
                                     continue;
 
                                 default:
@@ -1400,14 +1476,53 @@ namespace Slang
 
                                 descriptorSet->descriptorRanges.add(descriptorRange);
                             }
+                        }
 
-                            // Now we need to recursively walk the element type and add all its
-                            // descriptor ranges, so that they can be used for binding in
-                            // the parent.
+                    }
+
+                    // Second, we need to consider resource usage from the "element"
+                    // type that might leak through to the parent.
+                    //
+                    switch(kind)
+                    {
+                        // If the parameter group was allocated as a full register space/set,
+                        // *or* if it was allocated as ordinary uniform storage (likely
+                        // because it was compiled for CPU/CUDA), then there should
+                        // be no "leakage" of descriptor ranges from the element type
+                        // to the parent.
+                        //
+                    case LayoutResourceKind::RegisterSpace:
+                    case LayoutResourceKind::Uniform:
+                    case LayoutResourceKind::None:
+                        break;
+
+                    default:
+                        {
+                            // If we are in the constant-buffer-like case, on an API
+                            // where constant bufers "leak" resource usage to the
+                            // outer context, then we need to add the descriptor ranges
+                            // implied by the element type.
                             //
-                            // We have this a bit by collecting both binding ranges and
-                            // descriptor ranges, and then throwing away the binding ranges
-                            // from the element type.
+                            // HACK: We enumerate these nested ranges by recurisvely
+                            // calling `addRangesRec`, which adds all of descriptor ranges,
+                            // binding ranges, and sub-object ranges, and then we trim
+                            // the lists we don't actually care about as a post-process.
+                            //
+                            // TODO: We could try to consider a model where we first
+                            // query the extended layout information of the element
+                            // type (which might already be cached) and then enumerate
+                            // the descriptor ranges and copy them over.
+                            //
+                            // TODO: It is possible that there could be cases where
+                            // some, but not all, of the nested descriptor ranges ought
+                            // to be enumerated here. In that case we might have to introduce
+                            // a kind of "mask" parameter that is passed down into
+                            // the recursive call so that only the appropriate ranges
+                            // get added.
+
+                            // We need to add a link to the "path" that is used when looking
+                            // up binding information, to ensure that the descriptor ranges
+                            // that get enumerated here have correct register/binding offsets.
                             //
                             BindingRangePathLink elementPath(path, parameterGroupTypeLayout->elementVarLayout);
 
@@ -1434,151 +1549,186 @@ namespace Slang
             }
             else if(asInterfaceType(typeLayout->type))
             {
-                // An `interface` type should introduce a sub-object range,
-                // with no concrete descriptor ranges to store its value
-                // (since we don't know until runtime what type of
-                // value will be plugged in).
+                // An `interface` type should introduce a binding range and a matching
+                // sub-object range.
                 //
-
-                LayoutResourceKind kind = LayoutResourceKind::ExistentialObjectParam;
-                auto count = multiplier;
-                auto spaceOffset = _calcSpaceOffset(path, kind);
-
-                Int descriptorSetIndex = _findOrAddDescriptorSet(spaceOffset);
-                auto descriptorSet = m_extendedInfo->m_descriptorSets[descriptorSetIndex];
-
+                // We currently do *not* allocate any descriptor ranges to represent
+                // an interface-type field, since the only direct storage required
+                // is all uniform/ordinary data.
+                //
                 TypeLayout::ExtendedInfo::BindingRangeInfo bindingRange;
                 bindingRange.leafTypeLayout = typeLayout;
                 bindingRange.bindingType = SLANG_BINDING_TYPE_EXISTENTIAL_VALUE;
                 bindingRange.count = multiplier;
-                bindingRange.descriptorSetIndex = descriptorSetIndex;
-                bindingRange.firstDescriptorRangeIndex = descriptorSet->descriptorRanges.getCount();
-                bindingRange.descriptorRangeCount = 1;
+                bindingRange.descriptorSetIndex = 0;
+                bindingRange.descriptorRangeCount = 0;
+                bindingRange.firstDescriptorRangeIndex = 0;
 
                 TypeLayout::ExtendedInfo::SubObjectRangeInfo subObjectRange;
                 subObjectRange.bindingRangeIndex = m_extendedInfo->m_bindingRanges.getCount();
 
+                // TODO: if we have "pending" layout information that tells us where
+                // data for the sub-object range has been allocated, then we need
+                // a way to reference that data here.
+
                 m_extendedInfo->m_bindingRanges.add(bindingRange);
                 m_extendedInfo->m_subObjectRanges.add(subObjectRange);
             }
-            // TODO: We need to handle `interface` types here, because they are
-            // another case that introduces a "sub-object" for the purposes of
-            // application-side allocation.
-            //
-            // TODO: There are a few cases of "leaf" fields that might
-            // still result in multiple descriptors (or at least multiple
-            // `LayoutResourceKind`s) depending on the target.
-            //
-            // For eample, combined texture-sampler types should be treated
-            // as "leaf" fields for this code (since a portable engine would
-            // need to abstract over them), but would map to two descriptors
-            // on targets that don't actually support combining them.
             else
             {
-                Int resourceKindCount = typeLayout->resourceInfos.getCount();
-                if(resourceKindCount == 0)
-                {
-                    // This is a field that consumes no resources, and as
-                    // such does not need a binding or descriptor ranges
-                    // allocated for it.
-                    //
-                    return;
-                }
-                else if(resourceKindCount == 1)
-                {
-                    auto& resInfo = typeLayout->resourceInfos[0];
-                    LayoutResourceKind kind = resInfo.kind;
+                // Here we have the catch-all case that handles "leaf" fields
+                // that should never introduce a sub-object range, but might
+                // need to introduce a binding range and descriptor ranges.
+                //
+                // First, we want to determine what type of binding this
+                // leaf field should map to, if any. We being by querying
+                // the type itself, since there are many distinct descriptor
+                // types for textures/buffers that can only be determined
+                // by type, rather than by a `LayoutResourceKind`.
+                //
+                auto bindingType = _calcResourceBindingType(typeLayout);
 
-                    if(kind == LayoutResourceKind::Uniform)
+                // It is possible that the type alone isn't enough to tell
+                // us a specific binding type, at which point we need to
+                // start looking at the actual resources the type layout
+                // consumes.
+                //
+                if(bindingType == SLANG_BINDING_TYPE_UNKNOWN)
+                {
+                    // We will search through all the resource kinds that
+                    // the type layout consumes, to see if we can find
+                    // one that indicates a binding type we actually
+                    // want to reflect.
+                    //
+                    for( auto resInfo : typeLayout->resourceInfos )
                     {
-                        // We do not consider uniform resource usage
-                        // in the ranges we compute.
+                        auto kind = resInfo.kind;
+                        if(kind == LayoutResourceKind::Uniform)
+                            continue;
+
+                        auto kindBindingType = _calcBindingType(kind);
+                        if(kindBindingType == SLANG_BINDING_TYPE_UNKNOWN)
+                            continue;
+
+                        // If we find a relevant binding type based on
+                        // one of the resource kinds that are consumed,
+                        // then we immediately stop the search and use
+                        // the first one found (whether or not later
+                        // entries might also provide something relevant).
                         //
-                        // TODO: We may need to revise that rule for types that
-                        // represent resources, even when one or more targets
-                        // map those resource types to ordinary/uniform data.
-                        //
-                        return;
+                        bindingType = kindBindingType;
+                        break;
                     }
+                }
 
-                    // This leaf field will map to a single binding range and,
-                    // if it is appropriate, a single descriptor range.
-                    //
-                    auto bindingType = _calcBindingType(typeLayout, kind);
-                    auto count = resInfo.count * multiplier;
-                    auto indexOffset = _calcIndexOffset(path, kind);
-                    auto spaceOffset = _calcSpaceOffset(path, kind);
+                // After we've tried to determine a binding type, if
+                // we have nothing to go on then we don't want to add
+                // a binding range.
+                //
+                if(bindingType == SLANG_BINDING_TYPE_UNKNOWN)
+                    return;
 
-                    Int descriptorSetIndex = -1;
-                    Int firstDescriptorIndex = 0;
-                    RefPtr<TypeLayout::ExtendedInfo::DescriptorSetInfo> descriptorSet;
+                // We now know that the leaf field will map to a single binding range,
+                // and zero or more descriptor ranges.
+                //
+                TypeLayout::ExtendedInfo::BindingRangeInfo bindingRange;
+                bindingRange.leafTypeLayout = typeLayout;
+                bindingRange.bindingType = bindingType;
+                bindingRange.count = multiplier;
+                bindingRange.descriptorSetIndex = 0;
+                bindingRange.firstDescriptorRangeIndex = 0;
+                bindingRange.descriptorRangeCount = 0;
+
+                // We will associate the binding range with a specific descriptor
+                // set on demand *if* we discover that it shold contain any
+                // descriptor ranges.
+                //
+                RefPtr<TypeLayout::ExtendedInfo::DescriptorSetInfo> descriptorSet;
+
+
+                // We will add a descriptor range for each relevant resource kind
+                // that the type layout consumes.
+                //
+                for(auto resInfo : typeLayout->resourceInfos)
+                {
+                    auto kind = resInfo.kind;
                     switch( kind )
                     {
+                    default:
+                        break;
+
+
+                        // There are many resource kinds that we do not want
+                        // to expose as descriptor ranges simply because they
+                        // do not actually allocate descriptors on our target
+                        // APIs.
+                        //
+                        // Notably included here are uniform/ordinary data and
+                        // varying input/output (including the ray-tracing cases).
+                        //
+                        // It is worth noting that we *do* allow root/push-constant
+                        // ranges to be reflected as "descriptor" ranges here,
+                        // despite the fact that they are not descriptor-bound
+                        // under D3D12/Vulkan.
+                        //
+                        // In practice, even with us filtering out some cases here,
+                        // an application/renderer layer will need to filter/translate
+                        // or descriptor ranges into API-specific ones, and a one-to-one
+                        // mapping should not be assumed.
+                        //
+                        // TODO: Make some clear decisions about what should and should
+                        // not appear here.
+                        //
+                    case LayoutResourceKind::Uniform:
                     case LayoutResourceKind::RegisterSpace:
                     case LayoutResourceKind::VaryingInput:
                     case LayoutResourceKind::VaryingOutput:
                     case LayoutResourceKind::HitAttributes:
                     case LayoutResourceKind::RayPayload:
-                        // Resource kinds that represent "varying" input/output
-                        // do not manifest as entries in API descriptor tables.
-                        //
-                        // TODO: Neither do root constants, if we are being
-                        // precise. This API really needs to carefully match
-                        // the semantics of the target platform/API in terms
-                        // of what things are descriptor-bound and which are
-                        // not, so that a user can easily allocate the platform-specific
-                        // descriptor sets using this info.
-                        //
-                        // (That said, we are purposefully *not* breaking apart
-                        // samplers and SRV/UAV/CBV stuff for our D3D reflection
-                        // of descriptor sets. It seems like the policy here
-                        // really requires careful thought)
-                        //
-                        // TODO: Maybe the best answer is to leave decomposition
-                        // of stuff into descriptor sets up to the application
-                        // layer? This is especially true if a common case would
-                        // be an application that doesn't support arbitrary manual
-                        // binding of parameters to register/spaces.
-                        //
-                        break;
-
-                    default:
-                        {
-                            TypeLayout::ExtendedInfo::DescriptorRangeInfo descriptorRange;
-                            descriptorRange.kind = kind;
-                            descriptorRange.bindingType = bindingType;
-                            descriptorRange.count = count;
-                            descriptorRange.indexOffset = indexOffset;
-
-                            descriptorSetIndex = _findOrAddDescriptorSet(spaceOffset);
-                            descriptorSet = m_extendedInfo->m_descriptorSets[descriptorSetIndex];
-
-                            firstDescriptorIndex = descriptorSet->descriptorRanges.getCount();
-                            descriptorSet->descriptorRanges.add(descriptorRange);
-                        }
-                        break;
+                        continue;
                     }
 
-
-                    TypeLayout::ExtendedInfo::BindingRangeInfo bindingRange;
-                    bindingRange.leafTypeLayout = typeLayout;
-                    bindingRange.bindingType = _calcBindingType(typeLayout, kind);
-                    bindingRange.count = count;
-                    bindingRange.descriptorSetIndex = descriptorSetIndex;
-                    bindingRange.firstDescriptorRangeIndex = firstDescriptorIndex;
-                    bindingRange.descriptorRangeCount = 1;
-
-                    m_extendedInfo->m_bindingRanges.add(bindingRange);
-                }
-                else
-                {
-                    // This type appears to be one that consumes multiple
-                    // resource kinds, but was not handled by any of
-                    // the special-case logic above. In such a case we
-                    // are in trouble.
+                    // We will prefer to use a binding type derived from the specific
+                    // resource kind, but will fall back to information from the
+                    // type layout when that is not available.
                     //
-                    return;
+                    // TODO: This logic probably needs a bit more work to handle
+                    // the case of a combined texture-sampler field that is being
+                    // compiled for an API with separate textures and samplers.
+                    //
+                    auto kindBindingType = _calcBindingType(kind);
+                    if( kindBindingType == SLANG_BINDING_TYPE_UNKNOWN )
+                    {
+                        kindBindingType = bindingType;
+                    }
+
+                    // We now expect to allocate a descriptor range for this
+                    // `resInfo` representing resouce usage.
+                    //
+                    auto count = resInfo.count * multiplier;
+                    auto indexOffset = _calcIndexOffset(path, kind);
+                    auto spaceOffset = _calcSpaceOffset(path, kind);
+
+                    TypeLayout::ExtendedInfo::DescriptorRangeInfo descriptorRange;
+                    descriptorRange.kind = kind;
+                    descriptorRange.bindingType = kindBindingType;
+                    descriptorRange.count = count;
+                    descriptorRange.indexOffset = indexOffset;
+
+                    if(!descriptorSet)
+                    {
+                        Int descriptorSetIndex = _findOrAddDescriptorSet(spaceOffset);
+                        descriptorSet = m_extendedInfo->m_descriptorSets[descriptorSetIndex];
+
+                        bindingRange.descriptorSetIndex = descriptorSetIndex;
+                        bindingRange.firstDescriptorRangeIndex = descriptorSet->descriptorRanges.getCount();
+                    }
+
+                    descriptorSet->descriptorRanges.add(descriptorRange);
+                    bindingRange.descriptorRangeCount++;
                 }
+
+                m_extendedInfo->m_bindingRanges.add(bindingRange);
             }
         }
     };
@@ -2461,7 +2611,7 @@ SLANG_API  SlangReflectionType* spReflection_specializeType(
 
     auto linkage = programLayout->getProgram()->getLinkage();
 
-    DiagnosticSink sink(linkage->getSourceManager());
+    DiagnosticSink sink(linkage->getSourceManager(), Lexer::sourceLocationLexer);
 
     auto specializedType = linkage->specializeType(unspecializedType, specializationArgCount, (Type* const*) specializationArgs, &sink);
 

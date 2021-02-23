@@ -525,7 +525,7 @@ function example(name)
     -- and the `gfx` abstraction layer (which in turn
     -- depends on the `core` library). We specify all of that here,
     -- rather than in each example.
-    links { "slang", "core", "gfx", "graphics-app-framework" }
+    links { "slang", "core", "gfx", "gfx-util", "graphics-app-framework" }
 end
 
 --
@@ -577,6 +577,9 @@ if isTargetWindows then
 
     example "shader-toy"
 end
+
+example "shader-object"
+    kind "ConsoleApp"
 
 example "cpu-hello-world"
     kind "ConsoleApp"
@@ -698,7 +701,7 @@ toolSharedLibrary "render-test"
     uuid "61F7EB00-7281-4BF3-9470-7C2EA92620C3"
     
     includedirs { ".", "external", "source", "tools/gfx", "tools/graphics-app-framework" }
-    links { "core", "slang", "gfx", "graphics-app-framework" }
+    links { "core", "slang", "gfx", "gfx-util", "graphics-app-framework" }
    
     if isTargetWindows then    
         addSourceDir "tools/render-test/windows"
@@ -717,7 +720,7 @@ toolSharedLibrary "render-test"
         defines { "RENDER_TEST_CUDA" }
         includedirs { cudaPath .. "/include" }
         includedirs { cudaPath .. "/include", cudaPath .. "/common/inc" }
-        
+        links { "cuda", "cudart" }
         if optixPath then
             defines { "RENDER_TEST_OPTIX" }
             includedirs { optixPath .. "include/" }
@@ -739,10 +742,15 @@ tool "gfx"
     uuid "222F7498-B40C-4F3F-A704-DDEB91A4484A"
     -- Unlike most of the code under `tools/`, this is a library
     -- rather than a stand-alone executable.
-    kind "StaticLib"
+    kind "SharedLib"
+    links { "core", "slang" }
     pic "On"
-    
+
+    defines { "SLANG_GFX_DYNAMIC", "SLANG_GFX_DYNAMIC_EXPORT" }
+
     includedirs { ".", "external", "source" }
+
+    files {"slang-gfx.h"}
 
     -- Will compile across targets
     addSourceDir "tools/gfx/nvapi"
@@ -808,6 +816,18 @@ tool "gfx"
             
     end
 
+--
+-- `gfx-util` is a static library containing utilities and helpers for using
+-- the `gfx` library.
+--
+tool "gfx-util" 
+    uuid "F5ADB74E-02A7-44FB-AA3B-FC02F8AC7A4B"
+    kind "StaticLib"
+    pic "On"
+
+    includedirs { ".", "source" }
+
+    addSourceDir "tools/gfx-util"
 --
 -- `graphics-app-framework` contains all the utils for a simple graphics application.
 --
@@ -1296,9 +1316,11 @@ standardProject("slang-glslang", "source/slang-glslang")
         -- On Windows we need to add the platform-specific sources and then
         -- remove the `main.cpp` file since it tries to define a `DllMain`
         -- and we don't want the default glslang one.
+        addSourceDir( "external/glslang/glslang/OSDependent/Windows")
         removefiles { "external/glslang/glslang/OSDependent/Windows/main.cpp" }
 
     filter { "system:linux or macosx" }
+        addSourceDir( "external/glslang/glslang/OSDependent/Unix")
         links { "dl" }
         
     

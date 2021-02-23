@@ -22,6 +22,8 @@
 #include "slang-type-layout.h"
 #include "slang-visitor.h"
 
+#include "slang-intrinsic-expand.h"
+
 #include "slang-emit-source-writer.h"
 #include "slang-mangled-lexer.h"
 
@@ -272,7 +274,7 @@ void CLikeSourceEmitter::_emitUnsizedArrayType(IRUnsizedArrayType* arrayType, ED
 
 void CLikeSourceEmitter::_emitType(IRType* type, EDeclarator* declarator)
 {
-    switch (type->op)
+    switch (type->getOp())
     {
     default:
         emitSimpleType(type);
@@ -321,9 +323,9 @@ void CLikeSourceEmitter::emitTypeImpl(IRType* type, const StringSliceLoc* nameAn
 {
     if (nameAndLoc)
     {
-        // TODO(JS): No call to the previous version of this method was passing in a typeLoc, so disabled for
-        // now for simplicity
-        //m_writer->advanceToSourceLocation(typeLoc);
+        // We advance here, such that if there is a #line directive to output it will
+        // be done so before the type name appears.
+        m_writer->advanceToSourceLocationIfValid(nameAndLoc->loc);
 
         EDeclarator nameDeclarator;
         nameDeclarator.flavor = EDeclarator::Flavor::Name;
@@ -502,22 +504,24 @@ UInt CLikeSourceEmitter::getID(IRInst* value)
     return id;
 }
 
-String CLikeSourceEmitter::scrubName(const String& name)
+void CLikeSourceEmitter::appendScrubbedName(const UnownedStringSlice& name, StringBuilder& out)
 {
     // We will use a plain `U` as a dummy character to insert
     // whenever we need to insert things to make a string into
     // valid name.
     //
-    char const* dummyChar = "U";
+    const char dummyChar = 'U';
 
     // Special case a name that is the empty string, just in case.
     if(name.getLength() == 0)
-        return dummyChar;
-
+    {
+        out.appendChar(dummyChar);
+        return;
+    }
+     
     // Otherwise, we are going to walk over the name byte by byte
     // and write some legal characters to the output as we go.
-    StringBuilder sb;
-
+    
     if(getSourceLanguage() == SourceLanguage::GLSL)
     {
         // GLSL reserves all names that start with `gl_`,
@@ -525,7 +529,7 @@ String CLikeSourceEmitter::scrubName(const String& name)
         // our name start with a dummy character instead.
         if(name.startsWith("gl_"))
         {
-            sb.append(dummyChar);
+            out.appendChar(dummyChar);
         }
     }
 
@@ -534,7 +538,7 @@ String CLikeSourceEmitter::scrubName(const String& name)
     // to avoid an possible collision.
     if(name.startsWith("_S"))
     {
-        sb.Append(dummyChar);
+        out.appendChar(dummyChar);
     }
 
     // TODO: This is where we might want to consult
@@ -577,7 +581,7 @@ String CLikeSourceEmitter::scrubName(const String& name)
             // be a valid identifier in many target languages.
             if(prevChar == -1)
             {
-                sb.append(dummyChar);
+                out.appendChar(dummyChar);
             }
         }
         else if(c == '_')
@@ -604,8 +608,8 @@ String CLikeSourceEmitter::scrubName(const String& name)
             // Our solution for now will be very clumsy: we will
             // emit `x` and then the hexadecimal version of
             // the byte we were given.
-            sb.append("x");
-            sb.append(uint32_t((unsigned char) c), 16);
+            out.appendChar('x');
+            out.append(uint32_t((unsigned char) c), 16);
 
             // We don't want to apply the default handling below,
             // so skip to the top of the loop now.
@@ -613,16 +617,58 @@ String CLikeSourceEmitter::scrubName(const String& name)
             continue;
         }
 
-        sb.append(c);
+        out.appendChar(c);
         prevChar = c;
     }
-
-    return sb.ProduceString();
 }
 
 String CLikeSourceEmitter::generateEntryPointNameImpl(IREntryPointDecoration* entryPointDecor)
 {
     return entryPointDecor->getName()->getStringSlice();
+}
+
+String CLikeSourceEmitter::_generateUniqueName(const UnownedStringSlice& name)
+{
+    //
+    // We need to be careful that the name follows the rules of the target language,
+    // so there is a "scrubbing" step that needs to be applied here.
+    //
+    // We also need to make sure that the name won't collide with other declarations
+    // that might have the same name hint applied, so we will still unique
+    // them by appending the numeric ID of the instruction.
+    //
+    // TODO: Find cases where we can drop the suffix safely.
+    //
+    // TODO: When we start having to handle symbols with external linkage for
+    // things like DXIL libraries, we will need to *not* use the friendly
+    // names for stuff that should be link-able.
+    //
+    // The name we output will basically be:
+    //
+    //      <name>_<uniqueID>
+    //
+    // Except that we will "scrub" the name first,
+    // and we will omit the underscore if the (scrubbed)
+    // name hint already ends with one.
+    
+    StringBuilder sb;
+
+    appendScrubbedName(name, sb);
+
+    // Avoid introducing a double underscore
+    if (!sb.endsWith("_"))
+    {
+        sb.append("_");
+    }
+
+    String key = sb.ProduceString();
+    
+    UInt& countRef = m_uniqueNameCounters.GetOrAddValue(key, 0);
+    const UInt count = countRef;
+    countRef = count + 1;
+
+    sb.append(Int32(count));
+    return sb.ProduceString();
 }
 
 String CLikeSourceEmitter::generateName(IRInst* inst)
@@ -667,62 +713,16 @@ String CLikeSourceEmitter::generateName(IRInst* inst)
     }
 
     // If we have a name hint on the instruction, then we will try to use that
-    // to provide the actual name in the output code.
-    //
-    // We need to be careful that the name follows the rules of the target language,
-    // so there is a "scrubbing" step that needs to be applied here.
-    //
-    // We also need to make sure that the name won't collide with other declarations
-    // that might have the same name hint applied, so we will still unique
-    // them by appending the numeric ID of the instruction.
-    //
-    // TODO: Find cases where we can drop the suffix safely.
-    //
-    // TODO: When we start having to handle symbols with external linkage for
-    // things like DXIL libraries, we will need to *not* use the friendly
-    // names for stuff that should be link-able.
-    //
+    // to provide the basis for the actual name in the output code.
     if(auto nameHintDecoration = inst->findDecoration<IRNameHintDecoration>())
     {
-        // The (non-obfuscated) name we output will basically be:
-        //
-        //      <nameHint>_<uniqueID>
-        //
-        // Except that we will "scrub" the name hint first,
-        // and we will omit the underscore if the (scrubbed)
-        // name hint already ends with one.
-        //
-        // The obfuscated name we output will simply be:
-        //
-        //      _<uniqueID>
-        //
-
-        StringBuilder sb;
-
-        String nameHint = nameHintDecoration->getName();
-        nameHint = scrubName(nameHint);
-
-        sb.append(nameHint);
-
-        // Avoid introducing a double underscore
-        if (!nameHint.endsWith("_"))
-        {
-            sb.append("_");
-        }
-        
-        String key = sb.ProduceString();
-        UInt count = 0;
-        m_uniqueNameCounters.TryGetValue(key, count);
-
-        m_uniqueNameCounters[key] = count+1;
-
-        sb.append(Int32(count));
-        return sb.ProduceString();
+        return _generateUniqueName(nameHintDecoration->getName());
     }
 
-    // If the instruction has a mangled name, then emit using that.
+    // If the instruction has a linkage decoration, just use that. 
     if(auto linkageDecoration = inst->findDecoration<IRLinkageDecoration>())
     {
+        // Just use the linkages mangled name directly.
         return linkageDecoration->getMangledName();
     }
 
@@ -774,7 +774,7 @@ void CLikeSourceEmitter::emitDeclarator(IRDeclaratorInfo* declarator)
 
 void CLikeSourceEmitter::emitSimpleValueImpl(IRInst* inst)
 {
-    switch(inst->op)
+    switch(inst->getOp())
     {
     case kIROp_IntLit:
     {
@@ -880,7 +880,7 @@ void CLikeSourceEmitter::emitSimpleValueImpl(IRInst* inst)
 bool CLikeSourceEmitter::shouldFoldInstIntoUseSites(IRInst* inst)
 {
     // Certain opcodes should never/always be folded in
-    switch( inst->op )
+    switch( inst->getOp() )
     {
     default:
         break;
@@ -894,6 +894,12 @@ bool CLikeSourceEmitter::shouldFoldInstIntoUseSites(IRInst* inst)
     case kIROp_Param:
     case kIROp_Func:
     case kIROp_Alloca:
+        return false;
+
+    // Never fold these, because their result cannot be computed
+    // as a sub-expression (they must be emitted as a declaration
+    // or statement).
+    case kIROp_DefaultConstruct:
         return false;
 
     // Always fold these in, because they are trivial
@@ -929,7 +935,7 @@ bool CLikeSourceEmitter::shouldFoldInstIntoUseSites(IRInst* inst)
     if(as<IRAttr>(inst))
         return true;
 
-    switch( inst->op )
+    switch( inst->getOp() )
     {
     default:
         break;
@@ -1072,7 +1078,7 @@ bool CLikeSourceEmitter::shouldFoldInstIntoUseSites(IRInst* inst)
     // definition for certain types on certain targets (e.g. `out TriangleStream<T>`
     // for GLSL), so we check this only after all those special cases are
     // considered.
-    if (inst->op == kIROp_undefined)
+    if (inst->getOp() == kIROp_undefined)
         return false;
 
     // Okay, at this point we know our instruction must have a single use.
@@ -1180,7 +1186,7 @@ void CLikeSourceEmitter::emitDereferenceOperand(IRInst* inst, EmitOpInfo const& 
         // emit its name. i.e. *&var ==> var.
         // We apply this peep hole optimization here to reduce the clutter of
         // resulting code.
-        if (inst->op == kIROp_Var)
+        if (inst->getOp() == kIROp_Var)
         {
             m_writer->emit(getName(inst));
             return;
@@ -1224,7 +1230,7 @@ void CLikeSourceEmitter::emitOperandImpl(IRInst* inst, EmitOpInfo const&  outerP
         return;
     }
 
-    switch(inst->op)
+    switch(inst->getOp())
     {
     case kIROp_Var:
     case kIROp_GlobalVar:
@@ -1413,481 +1419,8 @@ void CLikeSourceEmitter::emitIntrinsicCallExprImpl(
     }
     else
     {
-        int openParenCount = 0;
-
-        const auto returnType = inst->getDataType();
-
-        // If it returns void -> then we don't need parenthesis 
-        if (as<IRVoidType>(returnType) == nullptr)
-        {
-            m_writer->emit("(");
-            openParenCount++;
-        }
-
-        // General case: we are going to emit some more complex text.
-
-        char const* cursor = name.begin();
-        char const* end = name.end();
-        while(cursor != end)
-        {
-            char c = *cursor++;
-            if( c != '$' )
-            {
-                // Not an escape sequence
-                m_writer->emitRawTextSpan(&c, &c+1);
-                continue;
-            }
-
-            SLANG_RELEASE_ASSERT(cursor != end);
-
-            char d = *cursor++;
-
-            switch (d)
-            {
-            case '0': case '1': case '2': case '3': case '4':
-            case '5': case '6': case '7': case '8': case '9':
-                {
-                    // Simple case: emit one of the direct arguments to the call
-                    Index argIndex = d - '0';
-                    SLANG_RELEASE_ASSERT((0 <= argIndex) && (argIndex < argCount));
-                    m_writer->emit("(");
-                    emitOperand(args[argIndex].get(), getInfo(EmitOp::General));
-                    m_writer->emit(")");
-                }
-                break;
-
-            case 'T':
-                // Get the the 'element' type for the type of the param at the index
-                {
-                    SLANG_RELEASE_ASSERT(*cursor >= '0' && *cursor <= '9');
-                    Index argIndex = (*cursor++) - '0';
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-
-                    IRType* type = args[argIndex].get()->getDataType();
-                    if (auto baseTextureType = as<IRTextureType>(type))
-                    {
-                        type = baseTextureType->getElementType();
-                    }
-                    emitType(type);
-                }
-                break;
-            
-            case 'S':
-                // Get the scalar type of a generic at specified index
-                {
-                    SLANG_RELEASE_ASSERT(*cursor >= '0' && *cursor <= '9');
-                    Index argIndex = (*cursor++) - '0';
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-
-                    IRType* type = args[argIndex].get()->getDataType();
-                    if (auto baseTextureType = as<IRTextureType>(type))
-                    {
-                        type = baseTextureType->getElementType();
-                    }
-
-                    IRBasicType* underlyingType = nullptr;
-                    if (auto basicType = as<IRBasicType>(type))
-                    {
-                        underlyingType = basicType;
-                    }
-                    else if (auto vectorType = as<IRVectorType>(type))
-                    {
-                        underlyingType = as<IRBasicType>(vectorType->getElementType());
-                    }
-                    else if (auto matrixType = as<IRMatrixType>(type))
-                    {
-                        underlyingType = as<IRBasicType>(matrixType->getElementType());
-                    }
-
-                    SLANG_ASSERT(underlyingType);
-
-                    emitSimpleType(underlyingType);
-                }
-                break;
-            case 'p':
-                {
-                    // If we are calling a D3D texturing operation in the form t.Foo(s, ...),
-                    // then this form will pair up the t and s arguments as needed for a GLSL
-                    // texturing operation.
-                    SLANG_RELEASE_ASSERT(argCount >= 2);
-
-                    auto textureArg = args[0].get();
-                    auto samplerArg = args[1].get();
-
-                    if (auto baseTextureType = as<IRTextureType>(textureArg->getDataType()))
-                    {
-                        emitTextureOrTextureSamplerTypeImpl(baseTextureType, "sampler");
-
-                        if (auto samplerType = as<IRSamplerStateTypeBase>(samplerArg->getDataType()))
-                        {
-                            if (as<IRSamplerComparisonStateType>(samplerType))
-                            {
-                                m_writer->emit("Shadow");
-                            }
-                        }
-
-                        m_writer->emit("(");
-                        emitOperand(textureArg, getInfo(EmitOp::General));
-                        m_writer->emit(",");
-                        emitOperand(samplerArg, getInfo(EmitOp::General));
-                        m_writer->emit(")");
-                    }
-                    else
-                    {
-                        SLANG_UNEXPECTED("bad format in intrinsic definition");
-                    }
-                }
-                break;
-
-            case 'c':
-                {
-                    // When doing texture access in glsl the result may need to be cast.
-                    // In particular if the underlying texture is 'half' based, glsl only accesses (read/write)
-                    // as float. So we need to cast to a half type on output.
-                    // When storing into a texture it is still the case the value written must be half - but
-                    // we don't need to do any casting there as half is coerced to float without a problem.
-                    SLANG_RELEASE_ASSERT(argCount >= 1);
-                        
-                    auto textureArg = args[0].get();
-                    if (auto baseTextureType = as<IRTextureType>(textureArg->getDataType()))
-                    {
-                        auto elementType = baseTextureType->getElementType();
-                        IRBasicType* underlyingType = nullptr;
-                        if (auto basicType = as<IRBasicType>(elementType))
-                        {
-                            underlyingType = basicType;
-                        }
-                        else if (auto vectorType = as<IRVectorType>(elementType))
-                        {
-                            underlyingType = as<IRBasicType>(vectorType->getElementType());
-                        }
-
-                        // We only need to output a cast if the underlying type is half.
-                        if (underlyingType && underlyingType->op == kIROp_HalfType)
-                        {
-                            emitSimpleType(elementType);
-                            m_writer->emit("(");
-                            openParenCount++;
-                        }
-                    }    
-                }
-                break;
-
-            case 'z':
-                {
-                    // If we are calling a D3D texturing operation in the form t.Foo(s, ...),
-                    // where `t` is a `Texture*<T>`, then this is the step where we try to
-                    // properly swizzle the output of the equivalent GLSL call into the right
-                    // shape.
-                    SLANG_RELEASE_ASSERT(argCount >= 1);
-
-                    auto textureArg = args[0].get();
-                    if (auto baseTextureType = as<IRTextureType>(textureArg->getDataType()))
-                    {
-                        auto elementType = baseTextureType->getElementType();
-                        if (auto basicType = as<IRBasicType>(elementType))
-                        {
-                            // A scalar result is expected
-                            m_writer->emit(".x");
-                        }
-                        else if (auto vectorType = as<IRVectorType>(elementType))
-                        {
-                            // A vector result is expected
-                            auto elementCount = getIntVal(vectorType->getElementCount());
-
-                            if (elementCount < 4)
-                            {
-                                char const* swiz[] = { "", ".x", ".xy", ".xyz", "" };
-                                m_writer->emit(swiz[elementCount]);
-                            }
-                        }
-                        else
-                        {
-                            // What other cases are possible?
-                        }
-                    }
-                    else
-                    {
-                        SLANG_UNEXPECTED("bad format in intrinsic definition");
-                    }
-                }
-                break;
-
-            case 'N':
-                {
-                    // Extract the element count from a vector argument so that
-                    // we can use it in the constructed expression.
-
-                    SLANG_RELEASE_ASSERT(*cursor >= '0' && *cursor <= '9');
-                    Index argIndex = (*cursor++) - '0';
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-
-                    auto vectorArg = args[argIndex].get();
-                    if (auto vectorType = as<IRVectorType>(vectorArg->getDataType()))
-                    {
-                        auto elementCount = getIntVal(vectorType->getElementCount());
-                        m_writer->emit(elementCount);
-                    }
-                    else
-                    {
-                        SLANG_UNEXPECTED("bad format in intrinsic definition");
-                    }
-                }
-                break;
-
-            case 'V':
-                {
-                    // Take an argument of some scalar/vector type and pad
-                    // it out to a 4-vector with the same element type
-                    // (this is the inverse of `$z`).
-                    //
-                    SLANG_RELEASE_ASSERT(*cursor >= '0' && *cursor <= '9');
-                    Index argIndex = (*cursor++) - '0';
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-
-                    auto arg = args[argIndex].get();
-                    IRIntegerValue elementCount = 1;
-                    IRType* elementType = arg->getDataType();
-                    if (auto vectorType = as<IRVectorType>(elementType))
-                    {
-                        elementCount = getIntVal(vectorType->getElementCount());
-                        elementType = vectorType->getElementType();
-                    }
-
-                    if(elementCount == 4)
-                    {
-                        // In the simple case, the operand is already a 4-vector,
-                        // so we can just emit it as-is.
-                        emitOperand(arg, getInfo(EmitOp::General));
-                    }
-                    else
-                    {
-                        // Otherwise, we need to construct a 4-vector from the
-                        // value we have, padding it out with zero elements as
-                        // needed.
-                        //
-                        emitVectorTypeName(elementType, 4);
-                        m_writer->emit("(");
-                        emitOperand(arg, getInfo(EmitOp::General));
-                        for(IRIntegerValue ii = elementCount; ii < 4; ++ii)
-                        {
-                            m_writer->emit(", ");
-                            if(getSourceLanguage() == SourceLanguage::GLSL)
-                            {
-                                emitSimpleType(elementType);
-                                m_writer->emit("(0)");
-                            }
-                            else
-                            {
-                                m_writer->emit("0");
-                            }
-                        }
-                        m_writer->emit(")");
-                    }
-                }
-                break;
-
-            case 'a':
-                {
-                    // We have an operation that needs to lower to either
-                    // `atomic*` or `imageAtomic*` for GLSL, depending on
-                    // whether its first operand is a subscript into an
-                    // array. This `$a` is the first `a` in `atomic`,
-                    // so we will replace it accordingly.
-                    //
-                    // TODO: This distinction should be made earlier,
-                    // with the front-end picking the right overload
-                    // based on the "address space" of the argument.
-
-                    Index argIndex = 0;
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-
-                    auto arg = args[argIndex].get();
-                    if(arg->op == kIROp_ImageSubscript)
-                    {
-                        m_writer->emit("imageA");
-                    }
-                    else
-                    {
-                        m_writer->emit("a");
-                    }
-                }
-                break;
-
-            case 'A':
-                {
-                    // We have an operand that represents the destination
-                    // of an atomic operation in GLSL, and it should
-                    // be lowered based on whether it is an ordinary l-value,
-                    // or an image subscript. In the image subscript case
-                    // this operand will turn into multiple arguments
-                    // to the `imageAtomic*` function.
-                    //
-
-                    Index argIndex = 0;
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-
-                    auto arg = args[argIndex].get();
-                    if(arg->op == kIROp_ImageSubscript)
-                    {
-                        if(getSourceLanguage() == SourceLanguage::GLSL)
-                        {
-                            // TODO: we don't handle the multisample
-                            // case correctly here, where the last
-                            // component of the image coordinate needs
-                            // to be broken out into its own argument.
-                            //
-                            m_writer->emit("(");
-                            emitOperand(arg->getOperand(0), getInfo(EmitOp::General));
-                            m_writer->emit("), ");
-
-                            // The coordinate argument will have been computed
-                            // as a `vector<uint, N>` because that is how the
-                            // HLSL image subscript operations are defined.
-                            // In contrast, the GLSL `imageAtomic*` operations
-                            // expect `vector<int, N>` coordinates, so we
-                            // will hackily insert the conversion here as
-                            // part of the intrinsic op.
-                            //
-                            auto coords = arg->getOperand(1);
-                            auto coordsType = coords->getDataType();
-
-                            auto coordsVecType = as<IRVectorType>(coordsType);
-                            IRIntegerValue elementCount = 1;
-                            if(coordsVecType)
-                            {
-                                coordsType = coordsVecType->getElementType();
-                                elementCount = getIntVal(coordsVecType->getElementCount());
-                            }
-
-                            SLANG_ASSERT(coordsType->op == kIROp_UIntType);
-
-                            if (elementCount > 1)
-                            {
-                                m_writer->emit("ivec");
-                                m_writer->emit(elementCount);
-                            }
-                            else
-                            {
-                                m_writer->emit("int");
-                            }
-
-                            m_writer->emit("(");
-                            emitOperand(arg->getOperand(1), getInfo(EmitOp::General));
-                            m_writer->emit(")");
-                        }
-                        else
-                        {
-                            m_writer->emit("(");
-                            emitOperand(arg, getInfo(EmitOp::General));
-                            m_writer->emit(")");
-                        }
-                    }
-                    else
-                    {
-                        m_writer->emit("(");
-                        emitOperand(arg, getInfo(EmitOp::General));
-                        m_writer->emit(")");
-                    }
-                }
-                break;
-
-            // We will use the `$X` case as a prefix for
-            // special logic needed when cross-compiling ray-tracing
-            // shaders.
-            case 'X':
-                {
-                    SLANG_RELEASE_ASSERT(*cursor);
-                    switch(*cursor++)
-                    {
-                    case 'P':
-                        {
-                            // The `$XP` case handles looking up
-                            // the associated `location` for a variable
-                            // used as the argument ray payload at a
-                            // trace call site.
-
-                            Index argIndex = 0;
-                            SLANG_RELEASE_ASSERT(argCount > argIndex);
-                            auto arg = args[argIndex].get();
-                            auto argLoad = as<IRLoad>(arg);
-                            SLANG_RELEASE_ASSERT(argLoad);
-                            auto argVar = argLoad->getOperand(0);
-                            m_writer->emit(getRayPayloadLocation(argVar));
-                        }
-                        break;
-
-                    case 'C':
-                        {
-                            // The `$XC` case handles looking up
-                            // the associated `location` for a variable
-                            // used as the argument callable payload at a
-                            // call site.
-
-                        Index argIndex = 0;
-                            SLANG_RELEASE_ASSERT(argCount > argIndex);
-                            auto arg = args[argIndex].get();
-                            auto argLoad = as<IRLoad>(arg);
-                            SLANG_RELEASE_ASSERT(argLoad);
-                            auto argVar = argLoad->getOperand(0);
-                            m_writer->emit(getCallablePayloadLocation(argVar));
-                        }
-                        break;
-
-                    default:
-                        SLANG_RELEASE_ASSERT(false);
-                        break;
-                    }
-                }
-                break;
-
-            case 'P':
-                // Type-based prefix as used for CUDA and C++ targets
-                {
-                    Index argIndex = 0;
-                    SLANG_RELEASE_ASSERT(argCount > argIndex);
-                    auto arg = args[argIndex].get();
-                    auto argType = arg->getDataType();
-
-                    const char* str = "";
-                    switch(argType->op)
-                    {
-                    #define CASE(OP, STR) \
-                    case kIROp_##OP: str = #STR; break
-
-                    CASE(Int8Type,      I8);
-                    CASE(Int16Type,     I16);
-                    CASE(IntType,       I32);
-                    CASE(Int64Type,     I64);
-                    CASE(UInt8Type,     U8);
-                    CASE(UInt16Type,    U16);
-                    CASE(UIntType,      U32);
-                    CASE(UInt64Type,    U64);
-                    CASE(HalfType,      F16);
-                    CASE(FloatType,     F32);
-                    CASE(DoubleType,    F64);
-
-                    #undef CASE
-
-                    default:
-                        SLANG_UNEXPECTED("unexpected type in intrinsic definition");
-                        break;
-                    }
-                    m_writer->emit(str);
-                }
-                break;
-
-            default:
-                SLANG_UNEXPECTED("bad format in intrinsic definition");
-                break;
-            }
-        }
-
-        // Close any remaining open parens
-        for (; openParenCount > 0; --openParenCount)
-        {
-            m_writer->emit(")");
-        }
+        IntrinsicExpandContext context(this);
+        context.emit(inst, args, argCount, name);
     }
 }
 
@@ -1970,7 +1503,7 @@ void CLikeSourceEmitter::defaultEmitInstExpr(IRInst* inst, const EmitOpInfo& inO
 {
     EmitOpInfo outerPrec = inOuterPrec;
     bool needClose = false;
-    switch(inst->op)
+    switch(inst->getOp())
     {
     case kIROp_GlobalHashedStringLiterals:
         /* Don't need to to output anything for this instruction - it's used for reflecting string literals that
@@ -2084,7 +1617,7 @@ void CLikeSourceEmitter::defaultEmitInstExpr(IRInst* inst, const EmitOpInfo& inO
     case kIROp_Geq:
     case kIROp_Leq:
     {
-        const auto emitOp = getEmitOpForOp(inst->op);
+        const auto emitOp = getEmitOpForOp(inst->getOp());
 
         auto prec = getInfo(emitOp);
         needClose = maybeEmitParens(outerPrec, prec);
@@ -2112,7 +1645,7 @@ void CLikeSourceEmitter::defaultEmitInstExpr(IRInst* inst, const EmitOpInfo& inO
     case kIROp_Or:
     case kIROp_Mul:
     {
-        const auto emitOp = getEmitOpForOp(inst->op);
+        const auto emitOp = getEmitOpForOp(inst->getOp());
         const auto info = getInfo(emitOp);
 
         needClose = maybeEmitParens(outerPrec, info);
@@ -2130,12 +1663,12 @@ void CLikeSourceEmitter::defaultEmitInstExpr(IRInst* inst, const EmitOpInfo& inO
     {        
         IRInst* operand = inst->getOperand(0);
 
-        const auto emitOp = getEmitOpForOp(inst->op);
+        const auto emitOp = getEmitOpForOp(inst->getOp());
         const auto prec = getInfo(emitOp);
 
         needClose = maybeEmitParens(outerPrec, prec);
 
-        switch (inst->op)
+        switch (inst->getOp())
         {
             case kIROp_BitNot:
             {
@@ -2211,7 +1744,7 @@ void CLikeSourceEmitter::defaultEmitInstExpr(IRInst* inst, const EmitOpInfo& inO
         }
         else
         {
-            if (inst->op == kIROp_getElementPtr && doesTargetSupportPtrTypes())
+            if (inst->getOp() == kIROp_getElementPtr && doesTargetSupportPtrTypes())
             {
                 const auto info = getInfo(EmitOp::Prefix);
                 needClose = maybeEmitParens(outerPrec, info);
@@ -2251,7 +1784,7 @@ void CLikeSourceEmitter::defaultEmitInstExpr(IRInst* inst, const EmitOpInfo& inO
             for (Index ee = 0; ee < elementCount; ++ee)
             {
                 IRInst* irElementIndex = ii->getElementIndex(ee);
-                SLANG_RELEASE_ASSERT(irElementIndex->op == kIROp_IntLit);
+                SLANG_RELEASE_ASSERT(irElementIndex->getOp() == kIROp_IntLit);
                 IRConstant* irConst = (IRConstant*)irElementIndex;
 
                 UInt elementIndex = (UInt)irConst->value.intVal;
@@ -2453,9 +1986,18 @@ void CLikeSourceEmitter::_emitInst(IRInst* inst)
         return;
     }
 
-    m_writer->advanceToSourceLocation(inst->sourceLoc);
+    // Specially handle params. The issue here is around PHI nodes, and that they do not
+    // have source loc information, by default, but we don't want to force outputting a #line.
+    if (inst->getOp() == kIROp_Param)
+    {
+        m_writer->advanceToSourceLocationIfValid(inst->sourceLoc);
+    }
+    else
+    {
+         m_writer->advanceToSourceLocation(inst->sourceLoc);
+    }
 
-    switch(inst->op)
+    switch(inst->getOp())
     {
     default:
         emitInstResultDecl(inst);
@@ -2524,7 +2066,7 @@ void CLikeSourceEmitter::_emitInst(IRInst* inst)
             for (UInt ee = 0; ee < elementCount; ++ee)
             {
                 IRInst* irElementIndex = ii->getElementIndex(ee);
-                SLANG_RELEASE_ASSERT(irElementIndex->op == kIROp_IntLit);
+                SLANG_RELEASE_ASSERT(irElementIndex->getOp() == kIROp_IntLit);
                 IRConstant* irConst = (IRConstant*)irElementIndex;
 
                 UInt elementIndex = (UInt)irConst->value.intVal;
@@ -2555,7 +2097,7 @@ void CLikeSourceEmitter::_emitInst(IRInst* inst)
             for (UInt ee = 0; ee < elementCount; ++ee)
             {
                 IRInst* irElementIndex = ii->getElementIndex(ee);
-                SLANG_RELEASE_ASSERT(irElementIndex->op == kIROp_IntLit);
+                SLANG_RELEASE_ASSERT(irElementIndex->getOp() == kIROp_IntLit);
                 IRConstant* irConst = (IRConstant*)irElementIndex;
 
                 UInt elementIndex = (UInt)irConst->value.intVal;
@@ -2865,7 +2407,7 @@ void CLikeSourceEmitter::emitRegion(Region* inRegion)
                 // them into the current block.
                 //
                 m_writer->advanceToSourceLocation(terminator->sourceLoc);
-                switch(terminator->op)
+                switch(terminator->getOp())
                 {
                 default:
                     // Don't do anything with the terminator, and assume
@@ -3161,6 +2703,7 @@ void CLikeSourceEmitter::emitSimpleFuncImpl(IRFunc* func)
     auto name = getName(func);
 
     emitFuncDecorations(func);
+
     emitType(resultType, name);
     emitSimpleFuncParamsImpl(func);
     emitSemantics(func);
@@ -3365,6 +2908,9 @@ void CLikeSourceEmitter::emitStruct(IRStructType* structType)
     }
 
     m_writer->emit("struct ");
+
+    emitPostKeywordTypeAttributes(structType);
+
     m_writer->emit(getName(structType));
     m_writer->emit("\n{\n");
     m_writer->indent();
@@ -3695,7 +3241,7 @@ void CLikeSourceEmitter::emitGlobalInstImpl(IRInst* inst)
 {
     m_writer->advanceToSourceLocation(inst->sourceLoc);
 
-    switch(inst->op)
+    switch(inst->getOp())
     {
     case kIROp_GlobalHashedStringLiterals:
         /* Don't need to to output anything for this instruction - it's used for reflecting string literals that
@@ -3768,7 +3314,7 @@ void CLikeSourceEmitter::ensureInstOperandsRec(ComputeEmitActionsContext* ctx, I
 
     UInt operandCount = inst->operandCount;
     auto requiredLevel = EmitAction::Definition;
-    if (inst->op == kIROp_InterfaceType)
+    if (inst->getOp() == kIROp_InterfaceType)
         requiredLevel = EmitAction::ForwardDeclaration;
 
     for(UInt ii = 0; ii < operandCount; ++ii)
@@ -3794,7 +3340,7 @@ void CLikeSourceEmitter::ensureInstOperandsRec(ComputeEmitActionsContext* ctx, I
 void CLikeSourceEmitter::ensureGlobalInst(ComputeEmitActionsContext* ctx, IRInst* inst, EmitAction::Level requiredLevel)
 {
     // Skip certain instructions that don't affect output.
-    switch(inst->op)
+    switch(inst->getOp())
     {
     case kIROp_Generic:
         return;
@@ -3837,7 +3383,7 @@ void CLikeSourceEmitter::ensureGlobalInst(ComputeEmitActionsContext* ctx, IRInst
     ctx->mapInstToLevel[inst] = requiredLevel;
 
     // Skip instructions that don't correspond to an independent entity in output.
-    switch (inst->op)
+    switch (inst->getOp())
     {
     case kIROp_InterfaceRequirementEntry:
         return;

@@ -1,6 +1,8 @@
 // win-window.cpp
 #include "../window.h"
 
+#include "core/slang-smart-pointer.h"
+
 #include <stdio.h>
 
 #ifdef _MSC_VER
@@ -64,7 +66,7 @@ private:
     }
 };
 
-struct ApplicationContext
+struct ApplicationContext : public Slang::RefObject
 {
     HINSTANCE instance;
     int showCommand = SW_SHOWDEFAULT;
@@ -291,6 +293,12 @@ Window* createWindow(WindowDesc const& desc)
 
     window->handle = windowHandle;
     return window;
+}
+
+void destroyWindow(Window* window)
+{
+    DestroyWindow(window->handle);
+    delete window;
 }
 
 void showWindow(Window* window)

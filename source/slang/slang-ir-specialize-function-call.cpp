@@ -211,7 +211,7 @@ struct FunctionParameterSpecializationContext
             // of the indexing operation is also
             // suitable for specialization.
             //
-            if( arg->op == kIROp_getElement || arg->op == kIROp_Load )
+            if( arg->getOp() == kIROp_getElement || arg->getOp() == kIROp_Load )
             {
                 auto base = arg->getOperand(0);
 
@@ -493,7 +493,7 @@ struct FunctionParameterSpecializationContext
             //
             ioInfo.key.vals.add(oldGlobalParam);
         }
-        else if( oldArg->op == kIROp_getElement )
+        else if( oldArg->getOp() == kIROp_getElement )
         {
             // This is the case where the `oldArg` is
             // in the form `oldBase[oldIndex]`
@@ -519,7 +519,7 @@ struct FunctionParameterSpecializationContext
             //
             ioInfo.newArgs.add(oldIndex);
         }
-        else if (oldArg->op == kIROp_Load)
+        else if (oldArg->getOp() == kIROp_Load)
         {
             auto oldBase = oldArg->getOperand(0);
             getCallInfoForArg(ioInfo, oldBase);
@@ -614,7 +614,7 @@ struct FunctionParameterSpecializationContext
             //
             return globalParam;
         }
-        else if( oldArg->op == kIROp_getElement )
+        else if( oldArg->getOp() == kIROp_getElement )
         {
             // This is the case where the argument is
             // in the form `oldBase[oldIndex]`.
@@ -677,7 +677,7 @@ struct FunctionParameterSpecializationContext
 
             return newVal;
         }
-        else if (oldArg->op == kIROp_Load)
+        else if (oldArg->getOp() == kIROp_Load)
         {
             return getSpecializedValueForArg(ioInfo, oldArg->getOperand(0));
         }
@@ -761,6 +761,36 @@ struct FunctionParameterSpecializationContext
             builder->sharedBuilder,
             oldFunc,
             newFunc);
+
+        // If we have added an Linkage decoration, we want to remove and destroy it,
+        // because the linkage should only be on the original function and
+        // not on the "torn off" copies made in this function.
+        //
+        // It *could* be argued that we don't want to duplicate the decoration instructions
+        // to begin with, just to throw them away. That may be true, but it's simpler to just remove
+        // them than filter out in cloning.
+
+        {
+            auto decorationList = newFunc->getDecorations();
+
+            const auto end = decorationList.end();
+            auto cur = decorationList.begin();
+
+            while(cur != end)
+            {
+                IRDecoration* decoration = *cur;
+
+                // We step before before the test/destroying to ensure cur is not pointing
+                // to a potentially destroyed instruction
+                ++cur;
+
+                if (as<IRLinkageDecoration>(decoration))
+                {
+                    decoration->removeAndDeallocate();
+                }
+            }
+        }
+
 
         // We are almost done at this point, except that `newFunc`
         // is lacking its parameters, as well as any of the body

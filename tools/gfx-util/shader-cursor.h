@@ -1,7 +1,6 @@
 #pragma once
 
-#include "tools/gfx/render.h"
-#include "core/slang-basic.h"
+#include "slang-gfx.h"
 
 namespace gfx
 {
@@ -25,7 +24,7 @@ namespace gfx
 ///
 struct ShaderCursor
 {
-    ShaderObject* m_baseObject = nullptr;
+    IShaderObject* m_baseObject = nullptr;
     slang::TypeLayoutReflection* m_typeLayout = nullptr;
     ShaderOffset m_offset;
 
@@ -43,7 +42,7 @@ struct ShaderCursor
 
     Result getDereferenced(ShaderCursor& outCursor) const;
 
-    ShaderCursor getDereferenced()
+    ShaderCursor getDereferenced() const
     {
         ShaderCursor result;
         getDereferenced(result);
@@ -54,34 +53,20 @@ struct ShaderCursor
     /// points at.
     ///
     /// If the operation succeeds, then the field cursor is written to `outCursor`.
-    Result getField(Slang::UnownedStringSlice const& name, ShaderCursor& outCursor);
+    Result getField(const char* nameBegin, const char* nameEnd, ShaderCursor& outCursor) const;
 
-    ShaderCursor getField(Slang::UnownedStringSlice const& name)
+    ShaderCursor getField(const char* name) const
     {
         ShaderCursor cursor;
-        getField(name, cursor);
+        getField(name, nullptr, cursor);
         return cursor;
     }
 
-    ShaderCursor getField(Slang::String const& name) { return getField(name.getUnownedSlice()); }
+    ShaderCursor getElement(SlangInt index) const;
 
-    ShaderCursor getElement(Slang::Index index);
+    static Result followPath(const char* path, ShaderCursor& ioCursor);
 
-    static Result followPath(Slang::UnownedStringSlice const& path, ShaderCursor& ioCursor);
-
-    static Result followPath(Slang::String const& path, ShaderCursor& ioCursor)
-    {
-        return followPath(path.getUnownedSlice(), ioCursor);
-    }
-
-    ShaderCursor getPath(Slang::UnownedStringSlice const& path)
-    {
-        ShaderCursor result(*this);
-        followPath(path, result);
-        return result;
-    }
-
-    ShaderCursor getPath(Slang::String const& path)
+    ShaderCursor getPath(const char* path) const
     {
         ShaderCursor result(*this);
         followPath(path, result);
@@ -90,34 +75,50 @@ struct ShaderCursor
 
     ShaderCursor() {}
 
-    ShaderCursor(ShaderObject* object)
+    ShaderCursor(IShaderObject* object)
         : m_baseObject(object)
         , m_typeLayout(object->getElementTypeLayout())
     {}
 
-    SlangResult setData(void const* data, size_t size)
+    SlangResult setData(void const* data, size_t size) const
     {
         return m_baseObject->setData(m_offset, data, size);
     }
 
-    SlangResult setObject(ShaderObject* object)
+    SlangResult setObject(IShaderObject* object) const
     {
         return m_baseObject->setObject(m_offset, object);
     }
 
-    SlangResult setResource(ResourceView* resourceView)
+    SlangResult setResource(IResourceView* resourceView) const
     {
         return m_baseObject->setResource(m_offset, resourceView);
     }
 
-    SlangResult setSampler(SamplerState* sampler)
+    SlangResult setSampler(ISamplerState* sampler) const
     {
         return m_baseObject->setSampler(m_offset, sampler);
     }
 
-    SlangResult setCombinedTextureSampler(ResourceView* textureView, SamplerState* sampler)
+    SlangResult setCombinedTextureSampler(IResourceView* textureView, ISamplerState* sampler) const
     {
         return m_baseObject->setCombinedTextureSampler(m_offset, textureView, sampler);
+    }
+
+        /// Produce a cursor to the field with the given `name`.
+        ///
+        /// This is a convenience wrapper around `getField()`.
+    ShaderCursor operator[](const char* name) const
+    {
+        return getField(name);
+    }
+
+        /// Produce a cursor to the element or field with the given `index`.
+        ///
+        /// This is a convenience wrapper around `getElement()`.
+    ShaderCursor operator[](SlangInt index) const
+    {
+        return getElement(index);
     }
 };
 }

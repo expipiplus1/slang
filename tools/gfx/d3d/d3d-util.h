@@ -6,11 +6,11 @@
 #include "slang-com-helper.h"
 
 #include "slang-com-ptr.h"
-#include "core/slang-list.h"
+#include "core/slang-basic.h"
 
 #include "../flag-combiner.h"
 
-#include "../render.h"
+#include "slang-gfx.h"
 
 #include <D3Dcommon.h>
 #include <DXGIFormat.h>

@@ -19,9 +19,10 @@ using Slang::ComPtr;
 // this layer is *not* required or assumed when using the Slang language,
 // compiler, and API.
 //
-#include "gfx/render.h"
-#include "gfx/d3d11/render-d3d11.h"
+#include "slang-gfx.h"
 #include "tools/graphics-app-framework/window.h"
+#include "source/core/slang-basic.h"
+
 using namespace gfx;
 
 // In order to display a shader toy effect using rasterization-based shader
@@ -88,54 +89,17 @@ void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 // The main interesting part of the host application code is where we
 // load, compile, inspect, and compose the Slang shader code.
 //
-Result loadShaderProgram(gfx::IRenderer* renderer, RefPtr<gfx::ShaderProgram>& outShaderProgram)
+Result loadShaderProgram(gfx::IRenderer* renderer, ComPtr<gfx::IShaderProgram>& outShaderProgram)
 {
-    // The first step in interacting with the Slang API is to create a "global session,"
-    // which represents an instance of the Slang API loaded from the library.
-    //
-    ComPtr<slang::IGlobalSession> slangGlobalSession;
-    SLANG_RETURN_ON_FAIL(slang_createGlobalSession(SLANG_API_VERSION, slangGlobalSession.writeRef()));
-
-    // Next, we need to create a compilation session (`slang::ISession`) that will provide
+    // We need to obatin a compilation session (`slang::ISession`) that will provide
     // a scope to all the compilation and loading of code we do.
     //
-    // In an application like this, which doesn't make use of preprocessor-based specialization,
-    // we can create a single session and use it for the duration of the application.
-    // One important service the session provides is re-use of modules that have already
-    // been compiled, so that if two Slang files `import` the same module, the compiler
-    // will only load and check that module once.
-    //
-    // When creating a session we need to tell it what code generation targets we may
-    // want code generated for. It is valid to have zero or more targets, but many
-    // applications will only want one, corresponding to the graphics API they plan to use.
-    // This application is currently hard-coded to use D3D11, so we set up for compilation
-    // to DX bytecode.
-    //
-    // Note: the `TargetDesc` can also be used to set things like optimization settings
-    // for each target, but this application doesn't care to set any of that stuff.
-    //
-    slang::TargetDesc targetDesc = {};
-    targetDesc.format = SLANG_DXBC;
-    targetDesc.profile = spFindProfile(slangGlobalSession, "sm_4_0");
-
-    // The session can be set up with a few other options, notably:
-    //
-    // * Any search paths that should be used when resolving `import` or `#include` directives.
-    //
-    // * Any preprocessor macros to pre-define when reading in files.
-    //
-    // This application doesn't plan to make heavy use of the preprocessor, and all its
-    // shader files are in the same directory, so we just use the default options (which
-    // will lead to the only search path being the current working directory).
-    //
-    slang::SessionDesc sessionDesc = {};
-    sessionDesc.targetCount = 1;
-    sessionDesc.targets = &targetDesc;
-
+    // Our example application uses the `gfx` graphics API abstraction layer, which already
+    // creates a Slang compilation session for us, so we just grab and use it here.
     ComPtr<slang::ISession> slangSession;
-    SLANG_RETURN_ON_FAIL(slangGlobalSession->createSession(sessionDesc, slangSession.writeRef()));
-
-    // Once the session has been created, we can start loading code into it.
+    SLANG_RETURN_ON_FAIL(renderer->getSlangSession(slangSession.writeRef()));
+    
+    // Once the session has been obtained, we can start loading code into it.
     //
     // The simplest way to load code is by calling `loadModule` with the name of a Slang
     // module. A call to `loadModule("MyStuff")` will behave more or less as if you
@@ -192,7 +156,7 @@ Result loadShaderProgram(gfx::IRenderer* renderer, RefPtr<gfx::ShaderProgram>& o
     // other pieces, and that is what we are going to do with our module
     // and entry points.
     //
-    List<slang::IComponentType*> componentTypes;
+    Slang::List<slang::IComponentType*> componentTypes;
     componentTypes.add(module);
 
     // Later on when we go to extract compiled kernel code for our vertex
@@ -266,7 +230,7 @@ Result loadShaderProgram(gfx::IRenderer* renderer, RefPtr<gfx::ShaderProgram>& o
     // Because a shader program could have zero or more specialization parameters,
     // we need to build up an array of specialization arguments.
     //
-    List<slang::SpecializationArg> specializationArgs;
+    Slang::List<slang::SpecializationArg> specializationArgs;
 
     {
         // In our case, we only have a single specialization argument we plan
@@ -344,13 +308,13 @@ Result loadShaderProgram(gfx::IRenderer* renderer, RefPtr<gfx::ShaderProgram>& o
     char const* fragmentCode = (char const*) fragmentShaderBlob->getBufferPointer();
     char const* fragmentCodeEnd = fragmentCode + fragmentShaderBlob->getBufferSize();
 
-    gfx::ShaderProgram::KernelDesc kernelDescs[] =
+    gfx::IShaderProgram::KernelDesc kernelDescs[] =
     {
         { gfx::StageType::Vertex,    vertexCode,     vertexCodeEnd },
         { gfx::StageType::Fragment,  fragmentCode,   fragmentCodeEnd },
     };
 
-    gfx::ShaderProgram::Desc programDesc;
+    gfx::IShaderProgram::Desc programDesc = {};
     programDesc.pipelineType = gfx::PipelineType::Graphics;
     programDesc.kernels = &kernelDescs[0];
     programDesc.kernelCount = 2;
@@ -367,13 +331,11 @@ int gWindowHeight = 768;
 gfx::ApplicationContext*    gAppContext;
 gfx::Window*                gWindow;
 Slang::ComPtr<gfx::IRenderer> gRenderer;
-RefPtr<gfx::BufferResource> gConstantBuffer;
-
-RefPtr<gfx::PipelineLayout> gPipelineLayout;
-RefPtr<gfx::PipelineState>  gPipelineState;
-RefPtr<gfx::DescriptorSet>  gDescriptorSet;
-
-RefPtr<gfx::BufferResource> gVertexBuffer;
+ComPtr<gfx::IBufferResource> gConstantBuffer;
+ComPtr<gfx::IPipelineLayout> gPipelineLayout;
+ComPtr<gfx::IPipelineState> gPipelineState;
+ComPtr<gfx::IDescriptorSet> gDescriptorSet;
+ComPtr<gfx::IBufferResource> gVertexBuffer;
 
 Result initialize()
 {
@@ -385,24 +347,22 @@ Result initialize()
     windowDesc.userData = this;
     gWindow = createWindow(windowDesc);
 
-    createD3D11Renderer(gRenderer.writeRef());
     IRenderer::Desc rendererDesc;
+    rendererDesc.rendererType = RendererType::DirectX11;
     rendererDesc.width = gWindowWidth;
     rendererDesc.height = gWindowHeight;
-    {
-        Result res = gRenderer->initialize(rendererDesc, getPlatformWindowHandle(gWindow));
-        if(SLANG_FAILED(res)) return res;
-    }
+    Result res = gfxCreateRenderer(&rendererDesc, getPlatformWindowHandle(gWindow), gRenderer.writeRef());
+    if(SLANG_FAILED(res)) return res;
 
     int constantBufferSize = sizeof(Uniforms);
 
-    BufferResource::Desc constantBufferDesc;
+    IBufferResource::Desc constantBufferDesc;
     constantBufferDesc.init(constantBufferSize);
-    constantBufferDesc.setDefaults(Resource::Usage::ConstantBuffer);
-    constantBufferDesc.cpuAccessFlags = Resource::AccessFlag::Write;
+    constantBufferDesc.setDefaults(IResource::Usage::ConstantBuffer);
+    constantBufferDesc.cpuAccessFlags = IResource::AccessFlag::Write;
 
     gConstantBuffer = gRenderer->createBufferResource(
-        Resource::Usage::ConstantBuffer,
+        IResource::Usage::ConstantBuffer,
         constantBufferDesc);
     if(!gConstantBuffer) return SLANG_FAIL;
 
@@ -414,33 +374,33 @@ Result initialize()
         SLANG_COUNT_OF(inputElements));
     if(!inputLayout) return SLANG_FAIL;
 
-    BufferResource::Desc vertexBufferDesc;
+    IBufferResource::Desc vertexBufferDesc;
     vertexBufferDesc.init(FullScreenTriangle::kVertexCount * sizeof(FullScreenTriangle::Vertex));
-    vertexBufferDesc.setDefaults(Resource::Usage::VertexBuffer);
+    vertexBufferDesc.setDefaults(IResource::Usage::VertexBuffer);
     gVertexBuffer = gRenderer->createBufferResource(
-        Resource::Usage::VertexBuffer,
+        IResource::Usage::VertexBuffer,
         vertexBufferDesc,
         &FullScreenTriangle::kVertices[0]);
     if(!gVertexBuffer) return SLANG_FAIL;
 
-    RefPtr<ShaderProgram> shaderProgram;
+    ComPtr<IShaderProgram> shaderProgram;
     SLANG_RETURN_ON_FAIL(loadShaderProgram(gRenderer, shaderProgram));
 
-    DescriptorSetLayout::SlotRangeDesc slotRanges[] =
+    IDescriptorSetLayout::SlotRangeDesc slotRanges[] =
     {
-        DescriptorSetLayout::SlotRangeDesc(DescriptorSlotType::UniformBuffer),
+        IDescriptorSetLayout::SlotRangeDesc(DescriptorSlotType::UniformBuffer),
     };
-    DescriptorSetLayout::Desc descriptorSetLayoutDesc;
+    IDescriptorSetLayout::Desc descriptorSetLayoutDesc;
     descriptorSetLayoutDesc.slotRangeCount = 1;
     descriptorSetLayoutDesc.slotRanges = &slotRanges[0];
     auto descriptorSetLayout = gRenderer->createDescriptorSetLayout(descriptorSetLayoutDesc);
     if(!descriptorSetLayout) return SLANG_FAIL;
 
-    PipelineLayout::DescriptorSetDesc descriptorSets[] =
+    IPipelineLayout::DescriptorSetDesc descriptorSets[] =
     {
-        PipelineLayout::DescriptorSetDesc( descriptorSetLayout ),
+        IPipelineLayout::DescriptorSetDesc( descriptorSetLayout ),
     };
-    PipelineLayout::Desc pipelineLayoutDesc;
+    IPipelineLayout::Desc pipelineLayoutDesc;
     pipelineLayoutDesc.renderTargetCount = 1;
     pipelineLayoutDesc.descriptorSetCount = 1;
     pipelineLayoutDesc.descriptorSets = &descriptorSets[0];
@@ -515,7 +475,7 @@ void renderFrame()
         gRenderer->unmap(gConstantBuffer);
     }
 
-    gRenderer->setPipelineState(PipelineType::Graphics, gPipelineState);
+    gRenderer->setPipelineState(gPipelineState);
     gRenderer->setDescriptorSet(PipelineType::Graphics, gPipelineLayout, 0, gDescriptorSet);
 
     gRenderer->setVertexBuffer(0, gVertexBuffer, sizeof(FullScreenTriangle::Vertex));
@@ -526,9 +486,7 @@ void renderFrame()
     gRenderer->presentFrame();
 }
 
-void finalize()
-{
-}
+void finalize() { destroyWindow(gWindow); }
 
 void handleEvent(Event const& event)
 {
