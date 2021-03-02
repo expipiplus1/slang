@@ -514,28 +514,116 @@ public:
         setObject(ShaderOffset const& offset, IShaderObject* object)
     {
         auto layout = getLayout();
-        SLANG_ASSERT(offset.bindingRangeIndex >= 0);
-        SLANG_ASSERT(offset.bindingRangeIndex < layout->m_bindingRanges.getCount());
-        auto& bindingRange = layout->m_bindingRanges[offset.bindingRangeIndex];
+
+        auto bindingRangeIndex = offset.bindingRangeIndex;
+        SLANG_ASSERT(bindingRangeIndex >= 0);
+        SLANG_ASSERT(bindingRangeIndex < layout->m_bindingRanges.getCount());
+
+        auto& bindingRange = layout->m_bindingRanges[bindingRangeIndex];
 
         auto subObjectIndex = bindingRange.baseIndex + offset.bindingArrayIndex;
-        auto cudaObject = dynamic_cast<CUDAShaderObject*>(object);
+        auto subObject = dynamic_cast<CUDAShaderObject*>(object);
         if (subObjectIndex >= objects.getCount())
             objects.setCount(subObjectIndex + 1);
-        objects[subObjectIndex] = cudaObject;
+
+        // TODO: We should really not need to retain the objects here
+        objects[subObjectIndex] = subObject;
 
         switch( bindingRange.bindingType )
         {
         default:
-            SLANG_RETURN_ON_FAIL(setData(offset, &cudaObject->bufferResource->m_cudaMemory, sizeof(void*)));
+            SLANG_RETURN_ON_FAIL(setData(offset, &subObject->bufferResource->m_cudaMemory, sizeof(void*)));
             break;
 
+        // If the range being assigned into represents an interface/existential-type leaf field,
+        // then we need to consider how the `object` being assigned here affects specialization.
+        // We may also need to assign some data from the sub-object into the ordinary data
+        // buffer for the parent object.
+        //
         case slang::BindingType::ExistentialValue:
-            // TODO: handle the "does it fit" logic
             {
-                auto valueSize = cudaObject->m_layout->getElementTypeLayout()->getSize();
-                auto valueOffset = 16;
-                SLANG_RETURN_ON_FAIL(setDeviceData(offset.uniformOffset + valueOffset, cudaObject->getBuffer(), valueSize));
+                auto renderer = getRenderer();
+
+                ComPtr<slang::ISession> slangSession;
+                SLANG_RETURN_ON_FAIL(renderer->getSlangSession(slangSession.writeRef()));
+
+                // A leaf field of interface type is laid out inside of the parent object
+                // as a tuple of `(RTTI, WitnessTable, Payload)`. The layout of these fields
+                // is a contract between the compiler and any runtime system, so we will
+                // need to rely on details of the binary layout.
+
+                // We start by querying the layout/type of the concrete value that the application
+                // is trying to store into the field, and also the layout/type of the leaf
+                // existential-type field itself.
+                //
+                auto concreteTypeLayout = subObject->getElementTypeLayout();
+                auto concreteType = concreteTypeLayout->getType();
+                //
+                auto existentialTypeLayout = layout->getElementTypeLayout()->getBindingRangeLeafTypeLayout(bindingRangeIndex);
+                auto existentialType = existentialTypeLayout->getType();
+
+                // The first field of the tuple (offset zero) is the run-time type information (RTTI)
+                // ID for the concrete type being stored into the field.
+                //
+                // TODO: We need to be able to gather the RTTI type ID from `object` and then
+                // use `setData(offset, &TypeID, sizeof(TypeID))`.
+
+                // The second field of the tuple (offset 8) is the ID of the "witness" for the
+                // conformance of the concrete type to the interface used by this field.
+                //
+                auto witnessTableOffset = offset;
+                witnessTableOffset.uniformOffset += 8;
+                //
+                // Conformances of a type to an interface are computed and then stored by the
+                // Slang runtime, so we can look up the ID for this particular conformance (which
+                // will create it on demand).
+                //
+                // Note: If the type doesn't actually conform to the required interface for
+                // this sub-object range, then this is the point where we will detect that
+                // fact and error out.
+                //
+                uint32_t conformanceID = 0xFFFFFFFF;
+                SLANG_RETURN_ON_FAIL(slangSession->getTypeConformanceWitnessSequentialID(
+                    concreteType, existentialType, &conformanceID));
+                //
+                // Once we have the conformance ID, then we can write it into the object
+                // at the required offset.
+                //
+                SLANG_RETURN_ON_FAIL(setData(witnessTableOffset, &conformanceID, sizeof(conformanceID)));
+
+                // The third field of the tuple (offset 16) is the "payload" that is supposed to
+                // hold the data for a value of the given concrete type.
+                //
+                auto payloadOffset = offset;
+                payloadOffset.uniformOffset += 16;
+
+                // There are two cases we need to consider here for how the payload might be used:
+                //
+                // * If the concrete type of the value being bound is one that can "fit" into the
+                //   available payload space,  then it should be stored in the payload.
+                //
+                // * If the concrete type of the value cannot fit in the payload space, then it
+                //   will need to be stored somewhere else.
+                //
+                if(_doesValueFitInExistentialPayload(concreteTypeLayout, existentialTypeLayout))
+                {
+                    // If the value can fit in the payload area, then we will go ahead and copy
+                    // its bytes into that area.
+                    //
+                    auto valueSize = concreteTypeLayout->getSize();
+                    SLANG_RETURN_ON_FAIL(setDeviceData(payloadOffset.uniformOffset, subObject->getBuffer(), valueSize));
+                }
+                else
+                {
+                    // If the value cannot fit in the payload area, then we will pass a pointer
+                    // to the sub-object instead.
+                    //
+                    // Note: The Slang compiler does not currently emit code that handles the
+                    // pointer case, but that is the expected implementation for values
+                    // that do not fit into the fixed-size payload.
+                    //
+                    SLANG_RETURN_ON_FAIL(setData(payloadOffset, &subObject->bufferResource->m_cudaMemory, sizeof(void*)));
+                }
             }
             break;
         }
@@ -878,11 +966,11 @@ private:
             cuCtxDestroy(m_context);
         }
     }
-    virtual SLANG_NO_THROW SlangResult SLANG_MCALL initialize(const Desc& desc, void* inWindowHandle) override
+    virtual SLANG_NO_THROW SlangResult SLANG_MCALL initialize(const Desc& desc) override
     {
         SLANG_RETURN_ON_FAIL(slangContext.initialize(desc.slang, SLANG_PTX, "sm_5_1"));
 
-        SLANG_RETURN_ON_FAIL(RendererBase::initialize(desc, inWindowHandle));
+        SLANG_RETURN_ON_FAIL(RendererBase::initialize(desc));
 
         SLANG_RETURN_ON_FAIL(_initCuda(reportType));
 
@@ -950,6 +1038,7 @@ private:
             switch (desc.format)
             {
             case Format::R_Float32:
+            case Format::D_Float32:
                 {
                     format = CU_AD_FORMAT_FLOAT;
                     numChannels = 1;
@@ -1362,7 +1451,6 @@ private:
         ShaderObjectLayoutBase* layout,
         IShaderObject**         outObject) override
     {
-
         RefPtr<CUDAShaderObject> result = new CUDAShaderObject();
         SLANG_RETURN_ON_FAIL(result->init(this, dynamic_cast<CUDAShaderObjectLayout*>(layout)));
         *outObject = result.detach();
@@ -1560,12 +1648,39 @@ public:
         SLANG_UNUSED(color);
     }
     virtual SLANG_NO_THROW void SLANG_MCALL clearFrame() override {}
-    virtual SLANG_NO_THROW void SLANG_MCALL presentFrame() override {}
-    virtual SLANG_NO_THROW TextureResource::Desc SLANG_MCALL getSwapChainTextureDesc() override
+    virtual SLANG_NO_THROW void SLANG_MCALL beginFrame() override {}
+    virtual SLANG_NO_THROW void SLANG_MCALL endFrame() override {}
+    virtual SLANG_NO_THROW void SLANG_MCALL
+        makeSwapchainImagePresentable(ISwapchain* swapchain) override
     {
-        return TextureResource::Desc();
+        SLANG_UNUSED(swapchain);
     }
-    
+    virtual SLANG_NO_THROW Result SLANG_MCALL createSwapchain(
+        const ISwapchain::Desc& desc, WindowHandle window, ISwapchain** outSwapchain) override
+    {
+        SLANG_UNUSED(desc);
+        SLANG_UNUSED(window);
+        SLANG_UNUSED(outSwapchain);
+        return SLANG_FAIL;
+    }
+    virtual SLANG_NO_THROW Result SLANG_MCALL createFramebufferLayout(
+        const IFramebufferLayout::Desc& desc, IFramebufferLayout** outLayout) override
+    {
+        SLANG_UNUSED(desc);
+        SLANG_UNUSED(outLayout);
+        return SLANG_FAIL;
+    }
+    virtual SLANG_NO_THROW Result SLANG_MCALL
+        createFramebuffer(const IFramebuffer::Desc& desc, IFramebuffer** outFramebuffer) override
+    {
+        SLANG_UNUSED(desc);
+        SLANG_UNUSED(outFramebuffer);
+        return SLANG_FAIL;
+    }
+    virtual SLANG_NO_THROW void SLANG_MCALL setFramebuffer(IFramebuffer* frameBuffer) override
+    {
+        SLANG_UNUSED(frameBuffer);
+    }
     virtual SLANG_NO_THROW Result SLANG_MCALL
         createSamplerState(ISamplerState::Desc const& desc, ISamplerState** outSampler) override
     {
@@ -1599,9 +1714,10 @@ public:
         return SLANG_E_NOT_AVAILABLE;
     }
     virtual SLANG_NO_THROW Result SLANG_MCALL
-        createDescriptorSet(IDescriptorSetLayout* layout, IDescriptorSet** outDescriptorSet) override
+        createDescriptorSet(IDescriptorSetLayout* layout, IDescriptorSet::Flag::Enum flags, IDescriptorSet** outDescriptorSet) override
     {
         SLANG_UNUSED(layout);
+        SLANG_UNUSED(flags);
         SLANG_UNUSED(outDescriptorSet);
         return SLANG_E_NOT_AVAILABLE;
     }
@@ -1612,11 +1728,11 @@ public:
         SLANG_UNUSED(outState);
         return SLANG_E_NOT_AVAILABLE;
     }
-    virtual SLANG_NO_THROW SlangResult SLANG_MCALL captureScreenSurface(
-        void* buffer, size_t* inOutBufferSize, size_t* outRowPitch, size_t* outPixelSize) override
+    virtual SLANG_NO_THROW SlangResult SLANG_MCALL readTextureResource(
+        ITextureResource* texture, ISlangBlob** outBlob, size_t* outRowPitch, size_t* outPixelSize) override
     {
-        SLANG_UNUSED(buffer);
-        SLANG_UNUSED(inOutBufferSize);
+        SLANG_UNUSED(texture);
+        SLANG_UNUSED(outBlob);
         SLANG_UNUSED(outRowPitch);
         SLANG_UNUSED(outPixelSize);
 
@@ -1657,11 +1773,6 @@ public:
         SLANG_UNUSED(buffer);
         SLANG_UNUSED(indexFormat);
         SLANG_UNUSED(offset);
-    }
-    virtual SLANG_NO_THROW void SLANG_MCALL
-        setDepthStencilTarget(IResourceView* depthStencilView) override
-    {
-        SLANG_UNUSED(depthStencilView);
     }
     virtual SLANG_NO_THROW void SLANG_MCALL
         setViewports(UInt count, Viewport const* viewports) override
@@ -1760,18 +1871,17 @@ SlangResult CUDARootShaderObject::init(IRenderer* renderer, CUDAShaderObjectLayo
     return SLANG_OK;
 }
 
-SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer)
+SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, IRenderer** outRenderer)
 {
     RefPtr<CUDARenderer> result = new CUDARenderer();
-    SLANG_RETURN_ON_FAIL(result->initialize(*desc, windowHandle));
+    SLANG_RETURN_ON_FAIL(result->initialize(*desc));
     *outRenderer = result.detach();
     return SLANG_OK;
 }
 #else
-SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, void* windowHandle, IRenderer** outRenderer)
+SlangResult SLANG_MCALL createCUDARenderer(const IRenderer::Desc* desc, IRenderer** outRenderer)
 {
     SLANG_UNUSED(desc);
-    SLANG_UNUSED(windowHandle);
     *outRenderer = nullptr;
     return SLANG_OK;
 }
