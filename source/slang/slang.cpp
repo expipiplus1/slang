@@ -30,6 +30,8 @@
 #include "slang-serialize-ir.h"
 #include "slang-serialize-container.h"
 
+#include "slang-doc.h"
+
 #include "slang-check-impl.h"
 
 #include "../../slang-tag-version.h"
@@ -1637,6 +1639,8 @@ void FrontEndCompileRequest::parseTranslationUnit(
             }
         }
 
+
+
 #if 0
         // Test serialization
         {
@@ -1793,6 +1797,38 @@ SlangResult FrontEndCompileRequest::executeActionsInner()
     checkAllTranslationUnits();
     if (getSink()->getErrorCount() != 0)
         return SLANG_FAIL;
+
+    // After semantic checking is performed we can try and output doc information for this
+    if (shouldDocument)
+    {
+        // Not 100% clear where best to get the ASTBuilder from, but from the linkage shouldn't
+        // cause any problems with scoping
+        ASTBuilder* astBuilder = getLinkage()->getASTBuilder();
+
+        for (TranslationUnitRequest* translationUnit : translationUnits)
+        {
+            RefPtr<DocMarkup> markup(new DocMarkup);
+
+            markup->extract(translationUnit->getModuleDecl(), getSourceManager(), getSink());
+
+            // Hmm.. we can have multiple sourcefiles. So fir now we just pick the first, so as to come up with
+            // a reasonable name
+            SourceFile* sourceFile = translationUnit->getSourceFiles()[0];
+
+            // Extract to a file
+            const String& path = sourceFile->getPathInfo().foundPath;
+            if (path.getLength())
+            {
+                String fileName = Path::getFileNameWithoutExt(path);
+                fileName.append(".md");
+
+                StringBuilder buf;
+                DocumentationUtil::writeMarkdown(markup, astBuilder, buf);
+
+                File::writeAllText(fileName, buf);
+            }
+        }
+    }
 
     // Look up all the entry points that are expected,
     // and use them to populate the `program` member.
