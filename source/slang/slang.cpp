@@ -31,7 +31,7 @@
 #include "slang-serialize-container.h"
 
 #include "slang-doc-extractor.h"
-#include "slang-doc-mark-down.h"
+#include "slang-doc-markdown-writer.h"
 
 #include "slang-check-impl.h"
 
@@ -245,7 +245,7 @@ SlangResult Session::checkPassThroughSupport(SlangPassThrough inPassThrough)
     return checkExternalCompilerSupport(this, PassThroughMode(inPassThrough));
 }
 
-SlangResult Session::compileStdLib()
+SlangResult Session::compileStdLib(slang::CompileStdLibFlags compileFlags)
 {
     if (m_builtinLinkage->mapNameToLoadedModules.Count())
     {
@@ -256,6 +256,43 @@ SlangResult Session::compileStdLib()
     // TODO(JS): Could make this return a SlangResult as opposed to exception
     addBuiltinSource(coreLanguageScope, "core", getCoreLibraryCode());
     addBuiltinSource(hlslLanguageScope, "hlsl", getHLSLLibraryCode());
+
+    if (compileFlags & slang::CompileStdLibFlag::WriteDocumentation)
+    {
+        // Not 100% clear where best to get the ASTBuilder from, but from the linkage shouldn't
+        // cause any problems with scoping
+
+        ASTBuilder* astBuilder = getBuiltinLinkage()->getASTBuilder();
+        SourceManager* sourceManager = getBuiltinSourceManager();
+
+        DiagnosticSink sink(sourceManager, Lexer::sourceLocationLexer);
+
+        List<String> docStrings;
+
+        // For all the modules add their doc output to docStrings
+        for (Module* stdlibModule : stdlibModules)
+        { 
+            RefPtr<DocMarkup> markup(new DocMarkup);
+            DocMarkupExtractor::extract(stdlibModule->getModuleDecl(), sourceManager, &sink, markup);
+
+            DocMarkdownWriter writer(markup, astBuilder);
+            writer.writeAll();
+            docStrings.add(writer.getOutput());
+        }
+
+        // Combine all together in stdlib-doc.md output fiel
+        {
+            String fileName("stdlib-doc.md");
+
+            StreamWriter writer(new FileStream(fileName, FileMode::Create));
+
+            for (auto& docString : docStrings)
+            {
+                writer.Write(docString);
+            }
+        }
+    }
+
     return SLANG_OK;
 }
 
@@ -1822,7 +1859,7 @@ SlangResult FrontEndCompileRequest::executeActionsInner()
                 String fileName = Path::getFileNameWithoutExt(path);
                 fileName.append(".md");
 
-                DocMarkDownWriter writer(markup, astBuilder);
+                DocMarkdownWriter writer(markup, astBuilder);
                 writer.writeAll();
 
                 File::writeAllText(fileName, writer.getOutput());
@@ -2693,6 +2730,33 @@ SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::getEntryPointCode(
     ComPtr<ISlangBlob> blob;
     SLANG_RETURN_ON_FAIL(entryPointResult.getBlob(blob));
     *outCode = blob.detach();
+    return SLANG_OK;
+}
+
+SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::getEntryPointHostCallable(
+    int                     entryPointIndex,
+    int                     targetIndex,
+    ISlangSharedLibrary**   outSharedLibrary,
+    slang::IBlob**          outDiagnostics)
+{
+    auto linkage = getLinkage();
+    if(targetIndex < 0 || targetIndex >= linkage->targets.getCount())
+        return SLANG_E_INVALID_ARG;
+    auto target = linkage->targets[targetIndex];
+
+    auto targetProgram = getTargetProgram(target);
+
+    DiagnosticSink sink(linkage->getSourceManager(), Lexer::sourceLocationLexer);
+    auto& entryPointResult = targetProgram->getOrCreateEntryPointResult(entryPointIndex, &sink);
+    sink.getBlobIfNeeded(outDiagnostics);
+
+    if(entryPointResult.format == ResultFormat::None )
+        return SLANG_FAIL;
+
+    ComPtr<ISlangSharedLibrary> sharedLibrary;
+    SLANG_RETURN_ON_FAIL(entryPointResult.getSharedLibrary(sharedLibrary));
+
+    *outSharedLibrary = sharedLibrary.detach();
     return SLANG_OK;
 }
 
@@ -4348,7 +4412,10 @@ SlangReflection* EndToEndCompileRequest::getReflection()
 
     auto targetReq = linkage->targets[targetIndex];
     auto targetProgram = program->getTargetProgram(targetReq);
-    auto programLayout = targetProgram->getExistingLayout();
+
+
+    DiagnosticSink sink(linkage->getSourceManager(), Lexer::sourceLocationLexer);
+    auto programLayout = targetProgram->getOrCreateLayout(&sink);
 
     return (SlangReflection*)programLayout;
 }

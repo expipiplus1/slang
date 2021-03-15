@@ -109,29 +109,6 @@ public:
             }
         }
 
-        slang::TypeLayoutReflection* unwrapParameterGroups(slang::TypeLayoutReflection* typeLayout)
-        {
-            for (;;)
-            {
-                if (!typeLayout->getType())
-                {
-                    if (auto elementTypeLayout = typeLayout->getElementTypeLayout())
-                        typeLayout = elementTypeLayout;
-                }
-
-                switch (typeLayout->getKind())
-                {
-                default:
-                    return typeLayout;
-
-                case slang::TypeReflection::Kind::ConstantBuffer:
-                case slang::TypeReflection::Kind::ParameterBlock:
-                    typeLayout = typeLayout->getElementTypeLayout();
-                    continue;
-                }
-            }
-        }
-
         void _addDescriptorSets(
             slang::TypeLayoutReflection* typeLayout,
             slang::VariableLayoutReflection* varLayout = nullptr)
@@ -178,7 +155,7 @@ public:
 
         Result setElementTypeLayout(slang::TypeLayoutReflection* typeLayout)
         {
-            typeLayout = unwrapParameterGroups(typeLayout);
+            typeLayout = _unwrapParameterGroups(typeLayout);
 
             m_elementTypeLayout = typeLayout;
 
@@ -414,8 +391,8 @@ public:
 
     struct Builder : Super::Builder
     {
-        Builder(IRenderer* renderer)
-            : Super::Builder(static_cast<RendererBase*>(renderer))
+        Builder(IDevice* device)
+            : Super::Builder(static_cast<RendererBase*>(device))
         {}
 
         Result build(EntryPointLayout** outLayout)
@@ -712,18 +689,18 @@ class GraphicsCommonShaderObject : public ShaderObjectBase
 {
 public:
     static Result create(
-        IRenderer* renderer,
+        IDevice* device,
         GraphicsCommonShaderObjectLayout* layout,
         GraphicsCommonShaderObject** outShaderObject)
     {
         auto object = ComPtr<GraphicsCommonShaderObject>(new GraphicsCommonShaderObject());
-        SLANG_RETURN_ON_FAIL(object->init(renderer, layout));
+        SLANG_RETURN_ON_FAIL(object->init(device, layout));
 
         *outShaderObject = object.detach();
         return SLANG_OK;
     }
 
-    RendererBase* getRenderer() { return m_layout->getRenderer(); }
+    RendererBase* getDevice() { return m_layout->getDevice(); }
 
     SLANG_NO_THROW UInt SLANG_MCALL getEntryPointCount() SLANG_OVERRIDE { return 0; }
 
@@ -1011,7 +988,7 @@ public:
 protected:
     friend class ProgramVars;
 
-    Result init(IRenderer* renderer, GraphicsCommonShaderObjectLayout* layout)
+    Result init(IDevice* device, GraphicsCommonShaderObjectLayout* layout)
     {
         m_layout = layout;
 
@@ -1075,7 +1052,7 @@ protected:
             {
                 RefPtr<GraphicsCommonShaderObject> subObject;
                 SLANG_RETURN_ON_FAIL(
-                    GraphicsCommonShaderObject::create(renderer, subObjectLayout, subObject.writeRef()));
+                    GraphicsCommonShaderObject::create(device, subObjectLayout, subObject.writeRef()));
                 m_objects[bindingRangeInfo.baseIndex + i] = subObject;
             }
         }
@@ -1249,13 +1226,13 @@ protected:
             return SLANG_OK;
 
         // Once we have computed how large the buffer should be, we can allocate
-        // it using the existing public `IRenderer` API.
+        // it using the existing public `IDevice` API.
         //
-        IRenderer* renderer = getRenderer();
+        IDevice* device = getRenderer();
         IBufferResource::Desc bufferDesc;
         bufferDesc.init(specializedOrdinaryDataSize);
         bufferDesc.cpuAccessFlags |= IResource::AccessFlag::Write;
-        SLANG_RETURN_ON_FAIL(renderer->createBufferResource(
+        SLANG_RETURN_ON_FAIL(device->createBufferResource(
             IResource::Usage::ConstantBuffer, bufferDesc, nullptr, m_ordinaryDataBuffer.writeRef()));
 
         // Once the buffer is allocated, we can use `_writeOrdinaryData` to fill it in.
@@ -1517,10 +1494,10 @@ class EntryPointVars : public GraphicsCommonShaderObject
 
 public:
     static Result
-    create(IRenderer* renderer, EntryPointLayout* layout, EntryPointVars** outShaderObject)
+    create(IDevice* device, EntryPointLayout* layout, EntryPointVars** outShaderObject)
     {
         RefPtr<EntryPointVars> object = new EntryPointVars();
-        SLANG_RETURN_ON_FAIL(object->init(renderer, layout));
+        SLANG_RETURN_ON_FAIL(object->init(device, layout));
 
         *outShaderObject = object.detach();
         return SLANG_OK;
@@ -1529,9 +1506,9 @@ public:
     EntryPointLayout* getLayout() { return static_cast<EntryPointLayout*>(m_layout.Ptr()); }
 
 protected:
-    Result init(IRenderer* renderer, EntryPointLayout* layout)
+    Result init(IDevice* device, EntryPointLayout* layout)
     {
-        SLANG_RETURN_ON_FAIL(Super::init(renderer, layout));
+        SLANG_RETURN_ON_FAIL(Super::init(device, layout));
         return SLANG_OK;
     }
 };
@@ -1541,10 +1518,10 @@ class ProgramVars : public GraphicsCommonShaderObject
     typedef GraphicsCommonShaderObject Super;
 
 public:
-    static Result create(IRenderer* renderer, GraphicsCommonProgramLayout* layout, ProgramVars** outShaderObject)
+    static Result create(IDevice* device, GraphicsCommonProgramLayout* layout, ProgramVars** outShaderObject)
     {
         RefPtr<ProgramVars> object = new ProgramVars();
-        SLANG_RETURN_ON_FAIL(object->init(renderer, layout));
+        SLANG_RETURN_ON_FAIL(object->init(device, layout));
 
         *outShaderObject = object.detach();
         return SLANG_OK;
@@ -1616,15 +1593,15 @@ protected:
         return SLANG_OK;
     }
 
-    Result init(IRenderer* renderer, GraphicsCommonProgramLayout* layout)
+    Result init(IDevice* device, GraphicsCommonProgramLayout* layout)
     {
-        SLANG_RETURN_ON_FAIL(Super::init(renderer, layout));
+        SLANG_RETURN_ON_FAIL(Super::init(device, layout));
 
         for (auto entryPointInfo : layout->getEntryPoints())
         {
             RefPtr<EntryPointVars> entryPoint;
             SLANG_RETURN_ON_FAIL(
-                EntryPointVars::create(renderer, entryPointInfo.layout, entryPoint.writeRef()));
+                EntryPointVars::create(device, entryPointInfo.layout, entryPoint.writeRef()));
             m_entryPoints.add(entryPoint);
         }
 
