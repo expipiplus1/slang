@@ -136,6 +136,14 @@ newoption {
    allowed     = { { "true", "True"}, { "false", "False" } }
 }
 
+newoption {
+    trigger     = "enable-xlib",
+    description = "(Optional) If true build `gfx` and `platform` with xlib to support windowed apps on linux.",
+    value       = "bool",
+    default     = "true",
+    allowed     = { { "true", "True"}, { "false", "False" } }
+ }
+
 buildLocation = _OPTIONS["build-location"]
 executeBinary = (_OPTIONS["execute-binary"] == "true")
 targetDetail = _OPTIONS["target-detail"]
@@ -146,7 +154,7 @@ optixPath = _OPTIONS["optix-sdk-path"]
 enableOptix = not not (_OPTIONS["enable-optix"] == "true" or optixPath)
 enableProfile = (_OPTIONS["enable-profile"] == "true")
 enableEmbedStdLib = (_OPTIONS["enable-embed-stdlib"] == "true")
-
+enableXlib = (_OPTIONS["enable-xlib"] == "true")
 -- This is the path where nvapi is expected to be found
 
 nvapiPath = "external/nvapi"
@@ -165,6 +173,10 @@ end
 
 -- Is true when the target is really windows (ie not something on top of windows like cygwin)
 isTargetWindows = (os.target() == "windows") and not (targetDetail == "mingw" or targetDetail == "cygwin")
+
+if isTargetWindows then
+    enableXlib = false
+end
 
 -- Even if we have the nvapi path, we only want to currently enable on windows targets
 
@@ -527,6 +539,15 @@ function example(name)
     -- depends on the `core` library). We specify all of that here,
     -- rather than in each example.
     links { "slang", "core", "gfx", "gfx-util", "platform" }
+
+    if isTargetWindows then
+    else
+        if enableXlib then
+            defines { "SLANG_ENABLE_XLIB" }
+            libdirs { "/usr/X11/lib" }
+            links {"X11"}
+        end
+    end
 end
 
 --
@@ -553,26 +574,24 @@ function generatorProject(name, sourcePath)
     kind "StaticLib"
 end   
 
-if isTargetWindows then
-    --
-    -- With all of these helper routines defined, we can now define the
-    -- actual projects quite simply. For example, here is the entire
-    -- declaration of the "Hello, World" example project:
-    --
-    example "hello-world"
-    --
-    -- Note how we are calling our custom `example()` subroutine with
-    -- the same syntax sugar that Premake usually advocates for their
-    -- `project()` function. This allows us to treat `example` as
-    -- a kind of specialized "subclass" of `project`
-    --
+--
+-- With all of these helper routines defined, we can now define the
+-- actual projects quite simply. For example, here is the entire
+-- declaration of the "Hello, World" example project:
+--
+example "hello-world"
+--
+-- Note how we are calling our custom `example()` subroutine with
+-- the same syntax sugar that Premake usually advocates for their
+-- `project()` function. This allows us to treat `example` as
+-- a kind of specialized "subclass" of `project`
+--
 
-    -- Let's go ahead and set up the projects for our other example now.
-    example "gpu-printing"
-        kind "ConsoleApp"
+-- Let's go ahead and set up the projects for our other example now.
+example "gpu-printing"
+    kind "ConsoleApp"
 
-    example "shader-toy"
-end
+example "shader-toy"
 
 example "shader-object"
     kind "ConsoleApp"
@@ -749,6 +768,7 @@ tool "gfx"
     files {"slang-gfx.h"}
 
     -- Will compile across targets
+    addSourceDir "tools/gfx/cpu"
     addSourceDir "tools/gfx/nvapi"
 
     -- To special case that we may be building using cygwin on windows. If 'true windows' we build for dx12/vk and run the script
@@ -789,8 +809,14 @@ tool "gfx"
         --addSourceDir "tools/gfx/open-gl"
     else
         -- Linux like
-        --addSourceDir "tools/gfx/vulkan"
+        addSourceDir "tools/gfx/vulkan"
         --addSourceDir "tools/gfx/open-gl"
+    end
+
+    if enableXlib then
+        defines { "SLANG_ENABLE_XLIB" }
+        libdirs { "/usr/X11/lib" }
+        links {"X11"}
     end
 
     -- If NVAPI is enabled
@@ -829,17 +855,24 @@ tool "gfx-util"
 --
 tool "platform" 
     uuid "3565fe5e-4fa3-11eb-ae93-0242ac130002"
-    kind "StaticLib"
+    kind "SharedLib"
     pic "On"
-    
+    links {"core", "slang", "gfx" }
+    defines { "SLANG_PLATFORM_DYNAMIC", "SLANG_PLATFORM_DYNAMIC_EXPORT" }
     includedirs { ".", "external", "source", "external/imgui", "tools/gfx" }
-
     addSourceDir "tools/platform"
     addSourceDir "tools/platform/linux"
     addSourceDir "tools/platform/windows"
+    addSourceDir "tools/platform/placeholder"
     -- Include windowing support on Windows.
     if isTargetWindows then
         systemversion "10.0.14393.0"
+    else
+        if enableXlib then
+            defines { "SLANG_ENABLE_XLIB" }
+            libdirs { "/usr/X11/lib" }
+            links {"X11"}
+        end
     end
 
 --

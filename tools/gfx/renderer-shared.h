@@ -99,7 +99,10 @@ protected:
     Desc m_desc;
 };
 
-Result createProgramFromSlang(IRenderer* renderer, IShaderProgram::Desc const& desc, IShaderProgram** outProgram);
+Result createProgramFromSlang(
+    IDevice* device,
+    IShaderProgram::Desc const& desc,
+    IShaderProgram** outProgram);
 
 class RendererBase;
 
@@ -146,8 +149,32 @@ protected:
     slang::TypeLayoutReflection* m_elementTypeLayout = nullptr;
     ShaderComponentID m_componentID = 0;
 
+    static slang::TypeLayoutReflection* _unwrapParameterGroups(slang::TypeLayoutReflection* typeLayout)
+    {
+        for (;;)
+        {
+            if (!typeLayout->getType())
+            {
+                if (auto elementTypeLayout = typeLayout->getElementTypeLayout())
+                    typeLayout = elementTypeLayout;
+            }
+
+            switch (typeLayout->getKind())
+            {
+            default:
+                return typeLayout;
+
+            case slang::TypeReflection::Kind::ConstantBuffer:
+            case slang::TypeReflection::Kind::ParameterBlock:
+                typeLayout = typeLayout->getElementTypeLayout();
+                continue;
+            }
+        }
+    }
+
+
 public:
-    RendererBase* getRenderer() { return m_renderer; }
+    RendererBase* getDevice() { return m_renderer; }
 
     slang::TypeLayoutReflection* getElementTypeLayout()
     {
@@ -191,7 +218,7 @@ public:
     // this function will return a specialized type using the bound sub-objects' type as specialization argument.
     virtual Result getSpecializedShaderObjectType(ExtendedShaderObjectType* outType);
 
-    RendererBase* getRenderer() { return m_layout->getRenderer(); }
+    RendererBase* getRenderer() { return m_layout->getDevice(); }
 
     SLANG_NO_THROW UInt SLANG_MCALL getEntryPointCount() SLANG_OVERRIDE { return 0; }
 
@@ -369,7 +396,7 @@ protected:
 
 // Renderer implementation shared by all platforms.
 // Responsible for shader compilation, specialization and caching.
-class RendererBase : public Slang::RefObject, public IRenderer
+class RendererBase : public Slang::RefObject, public IDevice
 {
     friend class ShaderObjectBase;
 public:
@@ -379,7 +406,7 @@ public:
         const char** outFeatures, UInt bufferSize, UInt* outFeatureCount) SLANG_OVERRIDE;
     virtual SLANG_NO_THROW bool SLANG_MCALL hasFeature(const char* featureName) SLANG_OVERRIDE;
     virtual SLANG_NO_THROW Result SLANG_MCALL getSlangSession(slang::ISession** outSlangSession) SLANG_OVERRIDE;
-    IRenderer* getInterface(const Slang::Guid& guid);
+    IDevice* getInterface(const Slang::Guid& guid);
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObject(slang::TypeReflection* type, IShaderObject** outObject) SLANG_OVERRIDE;
 
