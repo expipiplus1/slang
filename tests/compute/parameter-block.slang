@@ -1,8 +1,7 @@
-//TEST(compute):COMPARE_COMPUTE:
-//TEST(compute):COMPARE_COMPUTE:-cpu
-
-//TEST_INPUT:ubuffer(data=[0 0 0 0], stride=4):out,name=block0.buffer
-//TEST_INPUT:ubuffer(data=[0 1 2 3], stride=4):name=block1.buffer
+//TEST(compute):COMPARE_COMPUTE:-cpu -shaderobj
+//TEST(compute):COMPARE_COMPUTE:-cuda -shaderobj
+//TEST(compute):COMPARE_COMPUTE:-vk -shaderobj
+//TEST(compute):COMPARE_COMPUTE:-shaderobj
 
 // Ensure that Slang `ParameterBlock` type is lowered
 // to HLSL in the fashion that we expect.
@@ -12,7 +11,10 @@ struct P
 	RWStructuredBuffer<int> buffer;
 };
 
+//TEST_INPUT: set block0 = new{ out ubuffer(data=[0 0 0 0], stride=4) }
 ParameterBlock<P> block0;
+
+//TEST_INPUT: set block1 = new{ ubuffer(data=[0 1 2 3], stride=4) }
 ParameterBlock<P> block1;
 
 [numthreads(4, 1, 1)]

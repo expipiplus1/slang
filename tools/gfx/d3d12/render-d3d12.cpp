@@ -5,8 +5,9 @@
 
 //WORKING:#include "options.h"
 #include "../renderer-shared.h"
-#include "../render-graphics-common.h"
+#include "../transient-resource-heap-base.h"
 #include "../simple-render-pass-layout.h"
+#include "../d3d/d3d-swapchain.h"
 #include "core/slang-blob.h"
 #include "core/slang-basic.h"
 
@@ -41,7 +42,6 @@ struct ID3D12GraphicsCommandList1 {};
 
 #include "resource-d3d12.h"
 #include "descriptor-heap-d3d12.h"
-#include "circular-resource-heap-d3d12.h"
 
 #include "../d3d/d3d-util.h"
 
@@ -65,13 +65,16 @@ using namespace Slang;
 
 static D3D12_RESOURCE_STATES _calcResourceState(IResource::Usage usage);
 
-class D3D12Renderer : public GraphicsAPIRenderer
+class D3D12Device : public RendererBase
 {
 public:
     // Renderer    implementation
     virtual SLANG_NO_THROW SlangResult SLANG_MCALL initialize(const Desc& desc) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL
         createCommandQueue(const ICommandQueue::Desc& desc, ICommandQueue** outQueue) override;
+    virtual SLANG_NO_THROW Result SLANG_MCALL createTransientResourceHeap(
+        const ITransientResourceHeap::Desc& desc,
+        ITransientResourceHeap** outHeap) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createSwapchain(
         const ISwapchain::Desc& desc,
         WindowHandle window,
@@ -80,7 +83,7 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureResource(
         IResource::Usage initialUsage,
         const ITextureResource::Desc& desc,
-        const ITextureResource::Data* initData,
+        const ITextureResource::SubresourceData* initData,
         ITextureResource** outResource) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferResource(
         IResource::Usage initialUsage,
@@ -112,14 +115,11 @@ public:
         UInt inputElementCount,
         IInputLayout** outLayout) override;
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL createDescriptorSetLayout(
-        const IDescriptorSetLayout::Desc& desc, IDescriptorSetLayout** outLayout) override;
-    virtual SLANG_NO_THROW Result SLANG_MCALL createPipelineLayout(
-        const IPipelineLayout::Desc& desc, IPipelineLayout** outLayout) override;
-    virtual SLANG_NO_THROW Result SLANG_MCALL createDescriptorSet(
-        IDescriptorSetLayout* layout,
-        IDescriptorSet::Flag::Enum flag,
-        IDescriptorSet** outDescriptorSet) override;
+    virtual Result createShaderObjectLayout(
+        slang::TypeLayoutReflection* typeLayout,
+        ShaderObjectLayoutBase** outLayout) override;
+    virtual Result createShaderObject(ShaderObjectLayoutBase* layout, IShaderObject** outObject)
+        override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL
         createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override;
@@ -141,14 +141,14 @@ public:
         size_t size,
         ISlangBlob** outBlob) override;
 
-    virtual SLANG_NO_THROW RendererType SLANG_MCALL getRendererType() const override
+    virtual SLANG_NO_THROW const DeviceInfo& SLANG_MCALL getDeviceInfo() const override
     {
-        return RendererType::DirectX12;
+        return m_info;
     }
 
-    ~D3D12Renderer();
+    ~D3D12Device();
 
-protected:
+public:
     
     static const Int kMaxNumRenderFrames = 4;
     static const Int kMaxNumRenderTargets = 3;
@@ -184,48 +184,10 @@ protected:
         virtual void setRootConstants(Index rootParamIndex, Index dstOffsetIn32BitValues, Index countOf32BitValues, void const* srcData) = 0;
     };
 
-    struct FrameInfo
-    {
-        FrameInfo() :m_fenceValue(0) {}
-        void reset()
-        {
-            m_commandAllocator.setNull();
-        }
-        ComPtr<ID3D12CommandAllocator> m_commandAllocator;            ///< The command allocator for this frame
-        UINT64 m_fenceValue;                                        ///< The fence value when rendering this Frame is complete
-
-        // During command submission, we need all the descriptor tables that get
-        // used to come from a single heap (for each descriptor heap type).
-        //
-        // We will thus keep a single heap of each type that we hope will hold
-        // all the descriptors that actually get needed in a frame.
-        //
-        // TODO: we need an allocation policy to reallocate and resize these
-        // if/when we run out of space during a frame.
-        //
-        D3D12DescriptorHeap m_viewHeap; ///< Cbv, Srv, Uav
-        D3D12DescriptorHeap m_samplerHeap; ///< Heap for samplers
-    };
-
-    class ShaderProgramImpl : public GraphicsCommonShaderProgram
-    {
-    public:
-        PipelineType m_pipelineType;
-        List<uint8_t> m_vertexShader;
-        List<uint8_t> m_pixelShader;
-        List<uint8_t> m_computeShader;
-    };
-
     class BufferResourceImpl: public gfx::BufferResource
     {
     public:
         typedef BufferResource Parent;
-
-        void bindConstantBufferView(D3D12CircularResourceHeap& circularHeap, int index, Submitter* submitter) const
-        {
-            // Set the constant buffer
-            submitter->setRootConstantBufferView(index, m_resource.getResource()->GetGPUVirtualAddress());
-        }
 
         BufferResourceImpl(IResource::Usage initialUsage, const Desc& desc):
             Parent(desc), m_initialUsage(initialUsage)
@@ -266,11 +228,11 @@ protected:
             return nullptr;
         }
     public:
-        D3D12HostVisibleDescriptor m_descriptor;
-        D3D12Renderer* m_renderer;
+        D3D12Descriptor m_descriptor;
+        D3D12Device* m_renderer;
         ~SamplerStateImpl()
         {
-            m_renderer->m_samplerAllocator.free(m_descriptor);
+            m_renderer->m_cpuSamplerHeap.free(m_descriptor);
         }
     };
 
@@ -286,7 +248,12 @@ protected:
         }
     public:
         RefPtr<Resource>            m_resource;
-        D3D12HostVisibleDescriptor  m_descriptor;
+        D3D12Descriptor  m_descriptor;
+        D3D12GeneralDescriptorHeap* m_allocator;
+        ~ResourceViewImpl()
+        {
+            m_allocator->free(m_descriptor);
+        }
     };
 
     class FramebufferLayoutImpl
@@ -359,195 +326,6 @@ protected:
         List<D3D12_INPUT_ELEMENT_DESC> m_elements;
         List<char> m_text;                              ///< Holds all strings to keep in scope
     };
-
-    class DescriptorSetLayoutImpl : public IDescriptorSetLayout, public RefObject
-    {
-    public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        IDescriptorSetLayout* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IDescriptorSetLayout)
-                return static_cast<IDescriptorSetLayout*>(this);
-            return nullptr;
-        }
-    public:
-        // A "descriptor set" at the level of the `Renderer` API
-        // is similar to a D3D12 "descriptor table," but the match
-        // isn't perfect for a few reasons:
-        //
-        // * Our descriptor sets can contain both resources and
-        //   samplers, while D3D12 descriptor tables are always
-        //   resource-only or sampler-only.
-        //
-        // * Our descriptor sets can include root constant ranges,
-        //   while under D3D12 a root constant range is thought
-        //   of as belonging to the root signature directly.
-        //
-        // We navigate this mismatch in our implementation with
-        // the idea that a single `Renderer`-level descriptor set
-        // maps to zero or more D3D12 root parameters, which can
-        // include:
-        //
-        // * Zero or one root parameter that is used to bind a
-        //   descriptor table of resources.
-        //
-        // * Zero or one root parameter that is used to bind a
-        //   descriptor table of samplers.
-        //
-        // * Zero or more root parameters that represent ranges
-        //   of root constants.
-        //
-        // Binding a descriptor set will band all of its associated
-        // root parameters.
-        //
-        // (Note: this representation could in theory be extended
-        // to also support root resources that are not table-bound)
-        //
-        // Each descriptor slot range in the original `Desc` maps
-        // to a single `RangeInfo` stored here, which captures
-        // derived information used when binding values into
-        // a descriptor table.
-        //
-        struct RangeInfo
-        {
-                /// The type of descriptor slot in the original `Desc`
-            DescriptorSlotType  type;
-
-                /// The number of slots in this range
-            Int                 count;
-
-                /// The start index of this range in the appropriate type-specific array.
-                ///
-                /// E.g., for a sampler slot range, this would be the start index
-                /// for the range in the descriptor table used to store all the samplers.
-            Int                 arrayIndex;
-        };
-        List<RangeInfo> m_ranges;
-
-        // We need to track additional information about
-        // root cosntant ranges that isn't captured in
-        // `RangeInfo`, so we store an additional array
-        // that just captures the root constant ranges.
-        //
-        struct RootConstantRangeInfo
-        {
-                /// The D3D12 "root parameter index" for this range
-            Int rootParamIndex;
-
-                /// The size in bytes of this range
-            Int size;
-
-                /// The byte offset of this range's data in the backing storage for a descriptor set
-            Int offset;
-        };
-        List<RootConstantRangeInfo> m_rootConstantRanges;
-
-            /// The total size (in bytes) of root constant data across all contained ranged.
-        Int                         m_rootConstantDataSize = 0;
-
-            /// The D3D12-format descriptions of the descriptor ranges in this set
-        List<D3D12_DESCRIPTOR_RANGE>    m_dxRanges;
-
-            /// The D3D12-format description of the root parameters introduced by this set
-        List<D3D12_ROOT_PARAMETER>      m_dxRootParameters;
-
-            /// How many resource slots (total) were introduced by ranges?
-        Int m_resourceCount;
-
-            /// How many sampler slots (total) were introduce by ranges?
-        Int m_samplerCount;
-    };
-
-    class PipelineLayoutImpl : public IPipelineLayout, public RefObject
-    {
-    public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        IPipelineLayout* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IPipelineLayout)
-            {
-                return static_cast<IPipelineLayout*>(this);
-            }
-            return nullptr;
-        }
-    public:
-        ComPtr<ID3D12RootSignature> m_rootSignature;
-        UInt                        m_descriptorSetCount;
-    };
-
-    class DescriptorSetImpl : public IDescriptorSet, public RefObject
-    {
-    public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        IDescriptorSet* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IDescriptorSet)
-                return static_cast<IDescriptorSet*>(this);
-            return nullptr;
-        }
-    public:
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            setConstantBuffer(UInt range, UInt index, IBufferResource* buffer) override;
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            setResource(UInt range, UInt index, IResourceView* view) override;
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            setSampler(UInt range, UInt index, ISamplerState* sampler) override;
-        virtual SLANG_NO_THROW void SLANG_MCALL setCombinedTextureSampler(
-            UInt range,
-            UInt index,
-            IResourceView*   textureView,
-            ISamplerState*   sampler) override;
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            setRootConstants(
-            UInt range,
-            UInt offset,
-            UInt size,
-            void const* data) override;
-
-        D3D12Renderer*           m_renderer = nullptr;          ///< Weak pointer - must be because if set on Renderer, will have a circular reference
-        RefPtr<DescriptorSetLayoutImpl> m_layout;
-
-        D3D12HostVisibleDescriptorAllocator*        m_resourceHeap = nullptr;
-        D3D12HostVisibleDescriptorAllocator*        m_samplerHeap = nullptr;
-
-        Int                         m_resourceTable = 0;
-        Int                         m_samplerTable = 0;
-
-        // The following arrays are used to retain the relevant
-        // objects so that they will not be released while this
-        // descriptor-set is still alive.
-        //
-        // For the `m_resourceObjects` array, the values are either
-        // the relevant `ResourceViewImpl` for SRV/UAV slots, or
-        // a `BufferResourceImpl` for a CBV slot.
-        //
-        List<RefPtr<RefObject>>         m_resourceObjects;
-        List<RefPtr<SamplerStateImpl>>  m_samplerObjects;
-
-            /// Backing storage for root constant ranges in this descriptor set.
-        List<char>                      m_rootConstantData;
-
-        ~DescriptorSetImpl()
-        {
-            if (m_layout->m_resourceCount)
-                m_resourceHeap->free((int)m_resourceTable, (int)m_layout->m_resourceCount);
-            if (m_layout->m_samplerCount)
-                m_samplerHeap->free((int)m_samplerTable, (int)m_layout->m_samplerCount);
-        }
-    };
-
-    D3D12HostVisibleDescriptorAllocator m_rtvAllocator;
-    D3D12HostVisibleDescriptorAllocator m_dsvAllocator;
-
-    D3D12HostVisibleDescriptorAllocator m_viewAllocator;
-    D3D12HostVisibleDescriptorAllocator m_samplerAllocator;
-
-    // Space in the GPU-visible heaps is precious, so we will also keep
-    // around CPU-visible heaps for storing descriptors in a format
-    // that is ready for copying into the GPU-visible heaps as needed.
-    //
-    D3D12HostVisibleDescriptorAllocator m_cpuViewHeap; ///< Cbv, Srv, Uav
-    D3D12HostVisibleDescriptorAllocator m_cpuSamplerHeap; ///< Heap for samplers
 
     class PipelineStateImpl : public PipelineStateBase
     {
@@ -638,6 +416,23 @@ protected:
         ID3D12GraphicsCommandList* m_commandList;
     };
 
+    static void _initBufferResourceDesc(size_t bufferSize, D3D12_RESOURCE_DESC& out)
+    {
+        out = {};
+
+        out.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        out.Alignment = 0;
+        out.Width = bufferSize;
+        out.Height = 1;
+        out.DepthOrArraySize = 1;
+        out.MipLevels = 1;
+        out.Format = DXGI_FORMAT_UNKNOWN;
+        out.SampleDesc.Count = 1;
+        out.SampleDesc.Quality = 0;
+        out.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        out.Flags = D3D12_RESOURCE_FLAG_NONE;
+    }
+
     static Result _uploadBufferData(
         ID3D12GraphicsCommandList* cmdList,
         BufferResourceImpl* buffer,
@@ -652,7 +447,7 @@ protected:
         void* uploadData;
         SLANG_RETURN_ON_FAIL(buffer->m_uploadResource.getResource()->Map(
             0, &readRange, reinterpret_cast<void**>(&uploadData)));
-        memcpy(uploadData, data, size);
+        memcpy((uint8_t*)uploadData + offset, data, size);
         buffer->m_uploadResource.getResource()->Unmap(0, &readRange);
         {
             D3D12BarrierSubmitter submitter(cmdList);
@@ -673,77 +468,2005 @@ protected:
         return SLANG_OK;
     }
     
-    // Use a circular buffer of execution frames to manage in-flight GPU command buffers.
-    // Each call to `executeCommandLists` advances the frame by 1.
-    // If we run out of avaialble frames, wait for the earliest submitted frame to finish.
-    struct ExecutionFrameResources
+    class TransientResourceHeapImpl
+        : public TransientResourceHeapBase<D3D12Device, BufferResourceImpl>
     {
+    private:
+        typedef TransientResourceHeapBase<D3D12Device, BufferResourceImpl> Super;
+    public:
         ComPtr<ID3D12CommandAllocator> m_commandAllocator;
-        List<ComPtr<ID3D12GraphicsCommandList>> m_commandListPool;
+        List<ComPtr<ID3D12GraphicsCommandList>> m_d3dCommandListPool;
+        List<ComPtr<ICommandBuffer>> m_commandBufferPool;
         uint32_t m_commandListAllocId = 0;
-        HANDLE fenceEvent;
+        // Wait values for each command queue.
+        struct QueueWaitInfo
+        {
+            uint64_t waitValue;
+            HANDLE fenceEvent;
+        };
+        ShortList<QueueWaitInfo, 4> m_waitInfos;
 
+        QueueWaitInfo& getQueueWaitInfo(uint32_t queueIndex)
+        {
+            if (queueIndex < (uint32_t)m_waitInfos.getCount())
+            {
+                return m_waitInfos[queueIndex];
+            }
+            auto oldCount = m_waitInfos.getCount();
+            m_waitInfos.setCount(queueIndex + 1);
+            for (auto i = oldCount; i < m_waitInfos.getCount(); i++)
+            {
+                m_waitInfos[i].waitValue = 0;
+                m_waitInfos[i].fenceEvent = CreateEventEx(
+                    nullptr,
+                    false,
+                    CREATE_EVENT_INITIAL_SET | CREATE_EVENT_MANUAL_RESET,
+                    EVENT_ALL_ACCESS);
+            }
+            return m_waitInfos[queueIndex];
+        }
         // During command submission, we need all the descriptor tables that get
         // used to come from a single heap (for each descriptor heap type).
         //
         // We will thus keep a single heap of each type that we hope will hold
         // all the descriptors that actually get needed in a frame.
-        //
-        // TODO: we need an allocation policy to reallocate and resize these
-        // if/when we run out of space during a frame.
         D3D12DescriptorHeap m_viewHeap; // Cbv, Srv, Uav
         D3D12DescriptorHeap m_samplerHeap; // Heap for samplers
 
-        ~ExecutionFrameResources() { CloseHandle(fenceEvent); }
-        Result init(ID3D12Device* device, uint32_t viewHeapSize, uint32_t samplerHeapSize)
+        ~TransientResourceHeapImpl()
         {
-            SLANG_RETURN_ON_FAIL(device->CreateCommandAllocator(
+            synchronizeAndReset();
+            for (auto& waitInfo : m_waitInfos)
+                CloseHandle(waitInfo.fenceEvent);
+        }
+
+        Result init(
+            const ITransientResourceHeap::Desc& desc,
+            D3D12Device* device,
+            uint32_t viewHeapSize,
+            uint32_t samplerHeapSize)
+        {
+            Super::init(desc, device);
+            auto d3dDevice = device->m_device;
+            SLANG_RETURN_ON_FAIL(d3dDevice->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(m_commandAllocator.writeRef())));
-            fenceEvent = CreateEventEx(
-                nullptr,
-                false,
-                CREATE_EVENT_INITIAL_SET | CREATE_EVENT_MANUAL_RESET,
-                EVENT_ALL_ACCESS);
+            
             SLANG_RETURN_ON_FAIL(m_viewHeap.init(
-                device,
+                d3dDevice,
                 viewHeapSize,
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                 D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE));
             SLANG_RETURN_ON_FAIL(m_samplerHeap.init(
-                device,
+                d3dDevice,
                 samplerHeapSize,
                 D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
                 D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE));
+
+            if (desc.constantBufferSize != 0)
+            {
+                ComPtr<IBufferResource> bufferResourcePtr;
+                IBufferResource::Desc bufferDesc;
+                bufferDesc.init(desc.constantBufferSize);
+                bufferDesc.cpuAccessFlags |= IResource::AccessFlag::Write;
+                SLANG_RETURN_ON_FAIL(device->createBufferResource(
+                    IResource::Usage::ConstantBuffer,
+                    bufferDesc,
+                    nullptr,
+                    bufferResourcePtr.writeRef()));
+                m_constantBuffers.add(static_cast<BufferResourceImpl*>(bufferResourcePtr.get()));
+            }
             return SLANG_OK;
         }
-        void reset()
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            createCommandBuffer(ICommandBuffer** outCommandBuffer) override;
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL synchronizeAndReset() override;
+    };
+
+    class CommandBufferImpl;
+
+    class PipelineCommandEncoder
+    {
+    public:
+        bool m_isOpen = false;
+        bool m_bindingDirty = true;
+        CommandBufferImpl* m_commandBuffer;
+        TransientResourceHeapImpl* m_transientHeap;
+        D3D12Device* m_renderer;
+        ID3D12Device* m_device;
+        ID3D12GraphicsCommandList* m_d3dCmdList;
+        ID3D12GraphicsCommandList* m_preCmdList = nullptr;
+
+        RefPtr<PipelineStateImpl> m_currentPipeline;
+
+        static int getBindPointIndex(PipelineType type)
         {
-            WaitForSingleObject(fenceEvent, INFINITE);
-            m_viewHeap.deallocateAll();
-            m_samplerHeap.deallocateAll();
-            m_commandListAllocId = 0;
-            m_commandAllocator->Reset();
-            for (auto cmdBuffer : m_commandListPool)
-                cmdBuffer->Reset(m_commandAllocator, nullptr);
-        }
-        ComPtr<ID3D12GraphicsCommandList> createCommandList(ID3D12Device* device)
-        {
-            if (m_commandListAllocId == m_commandListPool.getCount())
+            switch (type)
             {
-                ComPtr<ID3D12GraphicsCommandList> cmdList;
-                device->CreateCommandList(
-                    0,
-                    D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    m_commandAllocator,
-                    nullptr,
-                    IID_PPV_ARGS(cmdList.writeRef()));
-                m_commandListPool.add(cmdList);
+            case PipelineType::Graphics:
+                return 0;
+            case PipelineType::Compute:
+                return 1;
+            case PipelineType::RayTracing:
+                return 2;
+            default:
+                assert(!"unknown pipeline type.");
+                return -1;
             }
-            assert((Index)m_commandListAllocId < m_commandListPool.getCount());
-            auto& result = m_commandListPool[m_commandListAllocId];
-            ++m_commandListAllocId;
-            return result;
         }
+
+        void init(CommandBufferImpl* commandBuffer)
+        {
+            m_commandBuffer = commandBuffer;
+            m_d3dCmdList = m_commandBuffer->m_cmdList;
+            m_renderer = commandBuffer->m_renderer;
+            m_transientHeap = commandBuffer->m_transientHeap;
+        }
+
+        void endEncodingImpl() { m_isOpen = false; }
+
+        Result bindPipelineImpl(IPipelineState* pipelineState, IShaderObject** outRootObject)
+        {
+            m_currentPipeline = static_cast<PipelineStateImpl*>(pipelineState);
+            auto rootObject = &m_commandBuffer->m_rootShaderObject;
+            SLANG_RETURN_ON_FAIL(rootObject->reset(
+                m_renderer,
+                m_currentPipeline->getProgram<ShaderProgramImpl>()->m_rootObjectLayout,
+                m_commandBuffer->m_transientHeap));
+            *outRootObject = rootObject;
+            m_bindingDirty = true;
+            return SLANG_OK;
+        }
+
+        Result _bindRenderState(Submitter* submitter);
+    };
+
+    struct DescriptorTable
+    {
+        DescriptorHeapReference heap;
+        uint32_t table;
+    };
+
+    struct BindingOffset
+    {
+        int32_t resource;
+        int32_t sampler;
+    };
+
+    struct RootBindingState
+    {
+        TransientResourceHeapImpl* transientHeap;
+        D3D12Device* device;
+        ArrayView<DescriptorTable> descriptorTables;
+        BindingOffset offset;
+        uint32_t rootParamIndex; // The root parameter index of this object.
+        uint32_t futureRootParamOffset; // The starting offset of additional sub-object descriptor tables.
+    };
+
+    struct DescriptorSetInfo
+    {
+        uint32_t resourceDescriptorCount = 0;
+        uint32_t samplerDescriptorCount = 0;
+    };
+
+    struct BindingLocation
+    {
+        int32_t index;
+        BindingOffset offsetInDescriptorTable;
+    };
+
+    // Provides information on how binding ranges are stored in descriptor tables for
+    // a shader object.
+    // We allocate one CPU descriptor table for each descriptor heap type for the shader
+    // object. In `ShaderObjectLayoutImpl`, we store the offset into the descriptor tables
+    // for each binding, so we know where to write the descriptor when the user sets
+    // a resource or sampler binding.
+    class ShaderObjectLayoutImpl : public ShaderObjectLayoutBase
+    {
+    public:
+        struct BindingRangeInfo
+        {
+            slang::BindingType bindingType;
+            uint32_t count;
+            uint32_t spaceIndex;
+            uint32_t flatResourceOffset; // Offset in flattend array of resource binding slots.
+            BindingLocation binding;
+
+            // Returns true if this binding range consumes a specialization argument slot.
+            bool isSpecializationArg() const
+            {
+                return bindingType == slang::BindingType::ExistentialValue;
+            }
+        };
+        struct SubObjectRangeInfo
+        {
+            RefPtr<ShaderObjectLayoutImpl> layout;
+            Index bindingRangeIndex;
+            slang::BindingType bindingType;
+
+            // The offset for the constant buffer descriptor if this
+            // sub-object is referenced as a `ConstantBuffer<T>`.
+            // For a `ParameterBlock` binding range, this is always 0 since
+            // parameter blocks start in a fresh descriptor table.
+            BindingOffset descriptorOffset;
+        };
+
+        struct Builder
+        {
+        public:
+            Builder(RendererBase* renderer)
+                : m_renderer(renderer)
+            {}
+
+            RendererBase* m_renderer;
+            slang::TypeLayoutReflection* m_elementTypeLayout;
+            List<BindingRangeInfo> m_bindingRanges;
+            List<SubObjectRangeInfo> m_subObjectRanges;
+            DescriptorSetInfo m_descriptorSetInfo;
+            uint32_t m_subObjectCount = 0;
+            uint32_t m_flatResourceCount = 0;
+
+            void addBindingRangesOfType(slang::TypeLayoutReflection* typeLayout)
+            {
+                SlangInt bindingRangeCount = typeLayout->getBindingRangeCount();
+
+                // Reserve CBV slot for the implicit constant buffer if the type contains
+                // ordinary uniform data fields.
+                if (typeLayout->getSize(slang::ParameterCategory::Uniform) != 0)
+                {
+                    m_descriptorSetInfo.resourceDescriptorCount = 1;
+                }
+
+                for (SlangInt r = 0; r < bindingRangeCount; ++r)
+                {
+                    slang::BindingType slangBindingType = typeLayout->getBindingRangeType(r);
+                    uint32_t count = (uint32_t)typeLayout->getBindingRangeBindingCount(r);
+                    slang::TypeLayoutReflection* slangLeafTypeLayout =
+                        typeLayout->getBindingRangeLeafTypeLayout(r);
+                    BindingRangeInfo bindingRangeInfo = {};
+                    bindingRangeInfo.bindingType = slangBindingType;
+                    bindingRangeInfo.count = count;
+                    bindingRangeInfo.flatResourceOffset = m_flatResourceCount;
+                    bindingRangeInfo.spaceIndex =
+                        (uint32_t)typeLayout->getBindingRangeDescriptorSetIndex(r);
+
+                    switch (slangBindingType)
+                    {
+                    case slang::BindingType::ConstantBuffer:
+                    case slang::BindingType::ParameterBlock:
+                    case slang::BindingType::ExistentialValue:
+                        bindingRangeInfo.binding.index = m_subObjectCount;
+                        m_subObjectCount += count;
+                        break;
+
+                    case slang::BindingType::Sampler:
+                        bindingRangeInfo.binding.offsetInDescriptorTable.sampler =
+                            m_descriptorSetInfo.samplerDescriptorCount;
+                        m_descriptorSetInfo.samplerDescriptorCount += count;
+                        break;
+
+                    case slang::BindingType::CombinedTextureSampler:
+                        bindingRangeInfo.binding.offsetInDescriptorTable.sampler =
+                            m_descriptorSetInfo.samplerDescriptorCount;
+                        bindingRangeInfo.binding.offsetInDescriptorTable.resource =
+                            m_descriptorSetInfo.resourceDescriptorCount;
+                        m_descriptorSetInfo.samplerDescriptorCount += count;
+                        m_descriptorSetInfo.resourceDescriptorCount += count;
+                        m_flatResourceCount += count;
+                        break;
+
+                    case slang::BindingType::MutableRawBuffer:
+                    case slang::BindingType::MutableTexture:
+                    case slang::BindingType::MutableTypedBuffer:
+                        bindingRangeInfo.binding.offsetInDescriptorTable.resource =
+                            m_descriptorSetInfo.resourceDescriptorCount;
+                        m_descriptorSetInfo.resourceDescriptorCount += count;
+                        m_flatResourceCount += count;
+                        break;
+
+                    case slang::BindingType::VaryingInput:
+                    case slang::BindingType::VaryingOutput:
+                        break;
+
+                    default:
+                        bindingRangeInfo.binding.offsetInDescriptorTable.resource =
+                            m_descriptorSetInfo.resourceDescriptorCount;
+                        m_descriptorSetInfo.resourceDescriptorCount += count;
+                        m_flatResourceCount += count;
+                        break;
+                    }
+                    m_bindingRanges.add(bindingRangeInfo);
+                }
+            }
+
+            Result setElementTypeLayout(slang::TypeLayoutReflection* typeLayout)
+            {
+                typeLayout = _unwrapParameterGroups(typeLayout);
+
+                m_elementTypeLayout = typeLayout;
+
+                // Compute the binding ranges that are used to store
+                // the logical contents of the object in memory.
+
+                addBindingRangesOfType(typeLayout);
+
+                SlangInt subObjectRangeCount = typeLayout->getSubObjectRangeCount();
+                for (SlangInt r = 0; r < subObjectRangeCount; ++r)
+                {
+                    SlangInt bindingRangeIndex = typeLayout->getSubObjectRangeBindingRangeIndex(r);
+                    auto slangBindingType = typeLayout->getBindingRangeType(bindingRangeIndex);
+                    slang::TypeLayoutReflection* slangLeafTypeLayout =
+                        typeLayout->getBindingRangeLeafTypeLayout(bindingRangeIndex);
+
+                    // A sub-object range can either represent a sub-object of a known
+                    // type, like a `ConstantBuffer<Foo>` or `ParameterBlock<Foo>`
+                    // (in which case we can pre-compute a layout to use, based on
+                    // the type `Foo`) *or* it can represent a sub-object of some
+                    // existential type (e.g., `IBar`) in which case we cannot
+                    // know the appropraite type/layout of sub-object to allocate.
+                    //
+                    RefPtr<ShaderObjectLayoutImpl> subObjectLayout;
+                    if (slangBindingType != slang::BindingType::ExistentialValue)
+                    {
+                        createForElementType(
+                            m_renderer,
+                            slangLeafTypeLayout->getElementTypeLayout(),
+                            subObjectLayout.writeRef());
+                    }
+
+                    SubObjectRangeInfo subObjectRange;
+                    subObjectRange.bindingRangeIndex = bindingRangeIndex;
+                    subObjectRange.layout = subObjectLayout;
+                    subObjectRange.bindingType = slangBindingType;
+                    subObjectRange.descriptorOffset.resource =
+                        m_descriptorSetInfo.resourceDescriptorCount;
+                    subObjectRange.descriptorOffset.sampler =
+                        m_descriptorSetInfo.samplerDescriptorCount;
+                    m_subObjectRanges.add(subObjectRange);
+                }
+
+                return SLANG_OK;
+            }
+
+            SlangResult build(ShaderObjectLayoutImpl** outLayout)
+            {
+                auto layout = RefPtr<ShaderObjectLayoutImpl>(new ShaderObjectLayoutImpl());
+                SLANG_RETURN_ON_FAIL(layout->_init(this));
+
+                *outLayout = layout.detach();
+                return SLANG_OK;
+            }
+        };
+
+        static Result createForElementType(
+            RendererBase* renderer,
+            slang::TypeLayoutReflection* elementType,
+            ShaderObjectLayoutImpl** outLayout)
+        {
+            Builder builder(renderer);
+            builder.setElementTypeLayout(elementType);
+            return builder.build(outLayout);
+        }
+
+        List<BindingRangeInfo> const& getBindingRanges() { return m_bindingRanges; }
+
+        Index getBindingRangeCount() { return m_bindingRanges.getCount(); }
+
+        BindingRangeInfo const& getBindingRange(Index index) { return m_bindingRanges[index]; }
+
+        DescriptorSetInfo getDescriptorSetInfo() { return m_descriptorSetInfo; }
+
+        slang::TypeLayoutReflection* getElementTypeLayout() { return m_elementTypeLayout; }
+
+        uint32_t getResourceCount() { return m_resourceSlotCount; }
+
+        Index getSubObjectCount() { return m_subObjectCount; }
+
+        SubObjectRangeInfo const& getSubObjectRange(Index index)
+        {
+            return m_subObjectRanges[index];
+        }
+        List<SubObjectRangeInfo> const& getSubObjectRanges() { return m_subObjectRanges; }
+
+        RendererBase* getRenderer() { return m_renderer; }
+
+        slang::TypeReflection* getType() { return m_elementTypeLayout->getType(); }
+
+    protected:
+        Result _init(Builder* builder)
+        {
+            auto renderer = builder->m_renderer;
+
+            initBase(renderer, builder->m_elementTypeLayout);
+
+            m_descriptorSetInfo = builder->m_descriptorSetInfo;
+            m_bindingRanges = _Move(builder->m_bindingRanges);
+            m_subObjectCount = builder->m_subObjectCount;
+            m_subObjectRanges = builder->m_subObjectRanges;
+            m_resourceSlotCount = builder->m_flatResourceCount;
+            return SLANG_OK;
+        }
+
+        List<BindingRangeInfo> m_bindingRanges;
+        DescriptorSetInfo m_descriptorSetInfo;
+        Index m_subObjectCount = 0;
+        List<SubObjectRangeInfo> m_subObjectRanges;
+        uint32_t m_resourceSlotCount;
+    };
+
+    class RootShaderObjectLayoutImpl : public ShaderObjectLayoutImpl
+    {
+        typedef ShaderObjectLayoutImpl Super;
+
+    public:
+        struct EntryPointInfo
+        {
+            RefPtr<ShaderObjectLayoutImpl> layout;
+        };
+
+        struct Builder : Super::Builder
+        {
+            Builder(
+                RendererBase* renderer,
+                slang::IComponentType* program,
+                slang::ProgramLayout* programLayout)
+                : Super::Builder(renderer)
+                , m_program(program)
+                , m_programLayout(programLayout)
+            {}
+
+            Result build(RootShaderObjectLayoutImpl** outLayout)
+            {
+                RefPtr<RootShaderObjectLayoutImpl> layout = new RootShaderObjectLayoutImpl();
+                SLANG_RETURN_ON_FAIL(layout->_init(this));
+
+                *outLayout = layout.detach();
+                return SLANG_OK;
+            }
+
+            void addGlobalParams(slang::VariableLayoutReflection* globalsLayout)
+            {
+                setElementTypeLayout(globalsLayout->getTypeLayout());
+            }
+
+            void addEntryPoint(SlangStage stage, ShaderObjectLayoutImpl* entryPointLayout)
+            {
+                EntryPointInfo info;
+                info.layout = entryPointLayout;
+                m_entryPoints.add(info);
+            }
+
+            slang::IComponentType* m_program;
+            slang::ProgramLayout* m_programLayout;
+            List<EntryPointInfo> m_entryPoints;
+        };
+
+        EntryPointInfo& getEntryPoint(Index index) { return m_entryPoints[index]; }
+
+        List<EntryPointInfo>& getEntryPoints() { return m_entryPoints; }
+
+        struct DescriptorSetLayout
+        {
+            List<D3D12_DESCRIPTOR_RANGE> m_resourceRanges;
+            List<D3D12_DESCRIPTOR_RANGE> m_samplerRanges;
+            uint32_t m_resourceCount = 0;
+            uint32_t m_samplerCount = 0;
+        };
+
+        struct RootSignatureDescBuilder
+        {
+            // We will use one descriptor set for the global scope and one additional
+            // descriptor set for each `ParameterBlock` binding range in the shader object
+            // hierarchy, regardless of the shader's `space` indices.
+            List<DescriptorSetLayout> m_descriptorSets;
+            List<D3D12_ROOT_PARAMETER> m_rootParameters;
+            D3D12_ROOT_SIGNATURE_DESC m_rootSignatureDesc = {};
+
+            static Result translateDescriptorRangeType(
+                slang::BindingType c,
+                D3D12_DESCRIPTOR_RANGE_TYPE* outType)
+            {
+                switch (c)
+                {
+                case slang::BindingType::ConstantBuffer:
+                    *outType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+                    return SLANG_OK;
+                case slang::BindingType::RawBuffer:
+                case slang::BindingType::Texture:
+                case slang::BindingType::TypedBuffer:
+                    *outType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                    return SLANG_OK;
+                case slang::BindingType::MutableRawBuffer:
+                case slang::BindingType::MutableTexture:
+                case slang::BindingType::MutableTypedBuffer:
+                    *outType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+                    return SLANG_OK;
+                case slang::BindingType::Sampler:
+                    *outType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                    return SLANG_OK;
+                default:
+                    return SLANG_FAIL;
+                }
+            }
+
+                /// Stores offset information to apply to the reflected register/space for a descriptor range.
+                ///
+            struct BindingRegisterOffset
+            {
+                uint32_t spaceOffset = 0; // The `space` index as specified in shader.
+
+                    /// An offset to apply for each D3D12 register class, as given
+                    /// by a `D3D12_DESCRIPTOR_RANGE_TYPE`.
+                    ///
+                    /// Note that the `D3D12_DESCRIPTOR_RANGE_TYPE` enumeration has
+                    /// values between 0 and 3, inclusive.
+                    ///
+                uint32_t offsetForRangeType[4] = {0, 0, 0, 0};
+
+                uint32_t& operator[](D3D12_DESCRIPTOR_RANGE_TYPE type)
+                {
+                    return offsetForRangeType[int(type)];
+                }
+
+                uint32_t operator[](D3D12_DESCRIPTOR_RANGE_TYPE type) const
+                {
+                    return offsetForRangeType[int(type)];
+                }
+            };
+
+                /// Add a new descriptor set to the layout being computed.
+                ///
+                /// Note that a "descriptor set" in the layout may amount to
+                /// zero, one, or two different descriptor *tables* in the
+                /// final D3D12 root signature. Each descriptor set may
+                /// contain zero or more view ranges (CBV/SRV/UAV) and zero
+                /// or more sampler ranges. It maps to a view descriptor table
+                /// if the number of view ranges is non-zero and to a sampler
+                /// descriptor table if the number of sampler ranges is non-zero.
+                ///
+            uint32_t addDescriptorSet()
+            {
+                auto result = (uint32_t) m_descriptorSets.getCount();
+                m_descriptorSets.add(DescriptorSetLayout{});
+                return result;
+            }
+
+                /// Add one descriptor range as specified in Slang reflection information to the layout.
+                ///
+                /// The layout information is taken from `typeLayout` for the descriptor
+                /// range with the given `descriptorRangeIndex` within the logical
+                /// descriptor set (reflected by Slang) with the given `logicalDescriptorSetIndex`.
+                ///
+                /// The `physicalDescriptorSetIndex` is the index in the `m_descriptorSets` array of
+                /// the descriptor set that the range should be added to.
+                ///
+                /// The `offset` encodes information about space and/or register offsets that
+                /// should be applied to descrptor ranges.
+                ///
+                /// This operation can fail if the given descriptor range encodes a range that
+                /// doesn't map to anything directly supported by D3D12. Higher-level routines
+                /// will often want to ignore such failures.
+                ///
+            Result addDescriptorRange(
+                slang::TypeLayoutReflection*    typeLayout,
+                Index                           physicalDescriptorSetIndex,
+                BindingRegisterOffset const&    offset,
+                Index                           logicalDescriptorSetIndex,
+                Index                           descriptorRangeIndex)
+            {
+                auto& descriptorSet = m_descriptorSets[physicalDescriptorSetIndex];
+
+                auto bindingType = typeLayout->getDescriptorSetDescriptorRangeType(logicalDescriptorSetIndex, descriptorRangeIndex);
+                auto count = typeLayout->getDescriptorSetDescriptorRangeDescriptorCount(logicalDescriptorSetIndex, descriptorRangeIndex);
+                auto index = typeLayout->getDescriptorSetDescriptorRangeIndexOffset(logicalDescriptorSetIndex, descriptorRangeIndex);
+                auto space = typeLayout->getDescriptorSetSpaceOffset(logicalDescriptorSetIndex);
+
+                D3D12_DESCRIPTOR_RANGE_TYPE rangeType;
+                SLANG_RETURN_ON_FAIL(translateDescriptorRangeType(bindingType, &rangeType));
+
+                D3D12_DESCRIPTOR_RANGE range = {};
+                range.RangeType = rangeType;
+                range.NumDescriptors = (UINT) count;
+                range.BaseShaderRegister = (UINT) index + offset[rangeType];
+                range.RegisterSpace = (UINT) space;
+                range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+                if (range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+                {
+                    descriptorSet.m_samplerRanges.add(range);
+                    descriptorSet.m_samplerCount += range.NumDescriptors;
+                }
+                else
+                {
+                    descriptorSet.m_resourceRanges.add(range);
+                    descriptorSet.m_resourceCount += range.NumDescriptors;
+                }
+
+                return SLANG_OK;
+            }
+
+                /// Add one binding range to the computed layout.
+                ///
+                /// The layout information is taken from `typeLayout` for the binding
+                /// range with the given `bindingRangeIndex`.
+                ///
+                /// The `physicalDescriptorSetIndex` is the index in the `m_descriptorSets` array of
+                /// the descriptor set that the range should be added to.
+                ///
+                /// The `offset` encodes information about space and/or register offsets that
+                /// should be applied to descrptor ranges.
+                ///
+                /// Note that a single binding range may encompass zero or more descriptor ranges.
+                ///
+            void addBindingRange(
+                slang::TypeLayoutReflection*    typeLayout,
+                Index                           physicalDescriptorSetIndex,
+                BindingRegisterOffset const&    offset,
+                Index                           bindingRangeIndex)
+            {
+                auto logicalDescriptorSetIndex  = typeLayout->getBindingRangeDescriptorSetIndex(bindingRangeIndex);
+                auto firstDescriptorRangeIndex  = typeLayout->getBindingRangeFirstDescriptorRangeIndex(bindingRangeIndex);
+                Index descriptorRangeCount      = typeLayout->getBindingRangeDescriptorRangeCount(bindingRangeIndex);
+                for( Index i = 0; i < descriptorRangeCount; ++i )
+                {
+                    auto descriptorRangeIndex = firstDescriptorRangeIndex + i;
+
+                    // Note: we ignore the `Result` returned by `addDescriptorRange()` because we
+                    // want to silently skip any ranges that represent kinds of bindings that
+                    // don't actually exist in D3D12.
+                    //
+                    addDescriptorRange(typeLayout, physicalDescriptorSetIndex, offset, logicalDescriptorSetIndex, descriptorRangeIndex);
+                }
+            }
+
+                /// Add binding ranges and parameter blocks to the root signature.
+                ///
+                /// The layout information is taken from `varLayout` which should
+                /// be a layout for either a program or an entry point.
+                ///
+                /// The `physicalDescriptorSetIndex` is the index in the `m_descriptorSets` array of
+                /// the descriptor set that binding ranges not belonging to nested
+                /// parameter blocks should be added to.
+                ///
+                /// This routine will use absolute offset information computed from `varLayout`
+                /// to apply appropriate space/register offsets to the bindings and parameter
+                ///  blocks inside the layout.
+                ///
+            void addBindingRangesAndParameterBlocks(
+                slang::VariableLayoutReflection*    varLayout,
+                Index                               physicalDescriptorSetIndex)
+            {
+                BindingRegisterOffset offset;
+                offset.spaceOffset                          = (UINT) varLayout->getOffset(SLANG_PARAMETER_CATEGORY_REGISTER_SPACE);
+                offset[D3D12_DESCRIPTOR_RANGE_TYPE_CBV]     = (UINT) varLayout->getOffset(SLANG_PARAMETER_CATEGORY_CONSTANT_BUFFER);
+                offset[D3D12_DESCRIPTOR_RANGE_TYPE_SRV]     = (UINT) varLayout->getOffset(SLANG_PARAMETER_CATEGORY_SHADER_RESOURCE);
+                offset[D3D12_DESCRIPTOR_RANGE_TYPE_UAV]     = (UINT) varLayout->getOffset(SLANG_PARAMETER_CATEGORY_UNORDERED_ACCESS);
+                offset[D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER] = (UINT) varLayout->getOffset(SLANG_PARAMETER_CATEGORY_SAMPLER_STATE);
+
+                addBindingRangesAndParameterBlocks(varLayout->getTypeLayout(), physicalDescriptorSetIndex, offset);
+            }
+
+                /// Add binding ranges and parameter blocks to the root signature.
+                ///
+                /// The layout information is taken from `typeLayout` which should
+                /// be a layout for either a program or an entry point.
+                ///
+                /// The `physicalDescriptorSetIndex` is the index in the `m_descriptorSets` array of
+                /// the descriptor set that binding ranges not belonging to nested
+                /// parameter blocks should be added to.
+                ///
+                /// The `offset` encodes information about space and/or register offsets that
+                /// should be applied to descrptor ranges.
+                ///
+            void addBindingRangesAndParameterBlocks(
+                slang::TypeLayoutReflection*        typeLayout,
+                Index                               physicalDescriptorSetIndex,
+                BindingRegisterOffset const&        offset)
+            {
+                // Our first task is to add the binding ranges for stuff that is
+                // directly contained in `typeLayout` rather than via sub-objects.
+                //
+                // Our goal is to have the descriptors for directly-contained views/samplers
+                // always be contiguous in CPU and GPU memory, so that we can write
+                // to them easily with a single operaiton.
+                //
+                Index bindingRangeCount = typeLayout->getBindingRangeCount();
+                for (Index bindingRangeIndex = 0; bindingRangeIndex < bindingRangeCount; bindingRangeIndex++)
+                {
+                    // We will look at the type of each binding range and intentionally
+                    // skip those that represent sub-objects.
+                    //
+                    auto bindingType = typeLayout->getBindingRangeType(bindingRangeIndex);
+                    switch(bindingType)
+                    {
+                    case slang::BindingType::ConstantBuffer:
+                    case slang::BindingType::ParameterBlock:
+                    case slang::BindingType::ExistentialValue:
+                        continue;
+
+                    default:
+                        break;
+                    }
+
+                    // For binding ranges that don't represent sub-objects, we will add
+                    // all of the descriptor ranges they encompass to the root signature.
+                    //
+                    addBindingRange(typeLayout, physicalDescriptorSetIndex, offset, bindingRangeIndex);
+                }
+
+                // Next we need to recurse on the various sub-objects that the type might contain.
+                // 
+                Index subObjectCount = typeLayout->getSubObjectRangeCount();
+                for (Index subObjectRangeIndex = 0; subObjectRangeIndex < subObjectCount; subObjectRangeIndex++)
+                {
+                    // There are a few different concerns being tackled at once here, which depend on
+                    // the type of each sub-object range.
+                    //
+                    auto bindingRangeIndex = typeLayout->getSubObjectRangeBindingRangeIndex(subObjectRangeIndex);
+                    auto bindingType = typeLayout->getBindingRangeType(bindingRangeIndex);
+                    switch (bindingType)
+                    {
+                    case slang::BindingType::ConstantBuffer:
+                        {
+                            // Constant buffer ranges (for `ConstantBuffer<ConcreteType>`) will "leak" their
+                            // binding ranges into the surrounding type, so we can add them here like any other
+                            // binding range.
+                            //
+                            // Note: It would be valid to allow `slang::BindingType::ConstantBuffer` to be handled
+                            // in the earlier loop, but that would mean that descriptor ranges coming directly
+                            // from the fields of `typeLayout` could be broken up with ranges coming from constant-buffer
+                            // sub-objects. By moving the handling of constant buffers to this later loop, we
+                            // guarantee that the descritpors used by non-sub-object binding ranges are all
+                            // contiguous.
+                            //
+                            addBindingRange(typeLayout, physicalDescriptorSetIndex, offset, bindingRangeIndex);
+                        }
+                        break;
+
+                    case slang::BindingType::ParameterBlock:
+                        {
+                            // A parameter block (`ParameterBlock<ConcreteType>`) will always map to a distinct
+                            // descriptor set, and its contained view/sampler binding ranges will be bound
+                            // through that set.
+                            //
+                            auto blockPhysicalDescriptorSetIndex = addDescriptorSet();
+
+                            // We will need to recursively add the binding ranges implied by the type of
+                            // the parameter block.
+                            //
+                            auto blockTypeLayout = typeLayout->getBindingRangeLeafTypeLayout(bindingRangeIndex);
+
+                            // One important detail is that the `blockTypeLayout` does not know the base register
+                            // space that the contents of the block should use. All descriptor ranges stored in
+                            // that layout will by default use a space offset of zero.
+                            //
+                            // We need to compute the space offset to apply when recursing into that block type
+                            // based on the binding range we are processing here.
+                            //
+                            auto blockLogicalDescriptorSetIndex = typeLayout->getBindingRangeDescriptorSetIndex(bindingRangeIndex);
+                            auto blockSpaceOffset = typeLayout->getDescriptorSetSpaceOffset(blockLogicalDescriptorSetIndex);
+
+                            // The space offset for this binding range should be added to any additional space
+                            // offset that was being passed down from above this layer.
+                            //
+                            // Any other offset information (register offsets) should be ignored at this point,
+                            // because `register` offsets from outside of the block don't affect layout within
+                            // the block.
+                            //
+                            BindingRegisterOffset blockOffset;
+                            blockOffset.spaceOffset = offset.spaceOffset + (uint32_t) blockSpaceOffset;
+
+                            // Once we have all the details worked out, we can write the binding ranges for the
+                            // block's type into the newly-allocated descriptor set.
+                            //
+                            // Note: there is an important subtlety going on here. We are passing in the type
+                            // `blockTypeLayout` which corresponds to `ParameterBlock<ConcreteType>` and *not* to
+                            // `ConcreteType` alone. Because of that detail, the binding/descriptor ranges will
+                            // include any "default constant buffer" range that needed to be allocated based
+                            // on `ConcreteType`.
+                            //
+                            // TODO: validate that this logic is right.
+                            //
+                            addBindingRangesAndParameterBlocks(blockTypeLayout, blockPhysicalDescriptorSetIndex, blockOffset);
+                        }
+                        break;
+
+                    case slang::BindingType::ExistentialValue:
+                        // TODO: Need to handle this case here.
+                        break;
+
+                    default:
+                        break;
+                    }
+                }
+            }
+
+            D3D12_ROOT_SIGNATURE_DESC& build(
+                List<D3D12Device::DescriptorSetInfo>& outRootDescriptorSetInfos)
+            {
+                for (Index i = 0; i < m_descriptorSets.getCount(); i++)
+                {
+                    auto& descriptorSet = m_descriptorSets[i];
+                    D3D12Device::DescriptorSetInfo setInfo;
+                    setInfo.resourceDescriptorCount = descriptorSet.m_resourceCount;
+                    setInfo.samplerDescriptorCount = descriptorSet.m_samplerCount;
+                    outRootDescriptorSetInfos.add(setInfo);
+                    if (descriptorSet.m_resourceRanges.getCount())
+                    {
+                        D3D12_ROOT_PARAMETER rootParam = {};
+                        rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                        rootParam.DescriptorTable.NumDescriptorRanges =
+                            (UINT)descriptorSet.m_resourceRanges.getCount();
+                        rootParam.DescriptorTable.pDescriptorRanges =
+                            descriptorSet.m_resourceRanges.getBuffer();
+                        m_rootParameters.add(rootParam);
+                    }
+                    if (descriptorSet.m_samplerRanges.getCount())
+                    {
+                        D3D12_ROOT_PARAMETER rootParam = {};
+                        rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                        rootParam.DescriptorTable.NumDescriptorRanges =
+                            (UINT)descriptorSet.m_samplerRanges.getCount();
+                        rootParam.DescriptorTable.pDescriptorRanges =
+                            descriptorSet.m_samplerRanges.getBuffer();
+                        m_rootParameters.add(rootParam);
+                    }
+                }
+
+                m_rootSignatureDesc.NumParameters = UINT(m_rootParameters.getCount());
+                m_rootSignatureDesc.pParameters = m_rootParameters.getBuffer();
+
+                // TODO: static samplers should be reasonably easy to support...
+                m_rootSignatureDesc.NumStaticSamplers = 0;
+                m_rootSignatureDesc.pStaticSamplers = nullptr;
+
+                // TODO: only set this flag if needed (requires creating root
+                // signature at same time as pipeline state...).
+                //
+                m_rootSignatureDesc.Flags =
+                    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+                return m_rootSignatureDesc;
+            }
+        };
+
+        static Result createRootSignatureFromSlang(
+            D3D12Device* device,
+            slang::IComponentType* program,
+            ID3D12RootSignature** outRootSignature,
+            List<DescriptorSetInfo>& outRootDescriptorSetInfos)
+        {
+            // We are going to build up the root signature by adding
+            // binding/descritpor ranges and nested parameter blocks
+            // based on the computed layout information for `program`.
+            //
+            RootSignatureDescBuilder builder;
+            auto layout = program->getLayout();
+
+            // The layout information computed by Slang breaks up shader
+            // parameters into what we can think of as "logical" descriptor
+            // sets based on whether or not parameters have the same `space`.
+            //
+            // We want to basically ignore that decomposition and generate a
+            // single descriptor set to hold all top-level parameters, and only
+            // generate distinct descriptor sets when the shader has opted in
+            // via explicit parameter blocks.
+            //
+            // To achieve this goal, we will manually allocate a default descriptor
+            // set for root parameters in our signature, and then recursively
+            // add all the binding/descriptor ranges implied by the global-scope
+            // parameters.
+            //
+            auto rootDescriptorSetIndex = builder.addDescriptorSet();
+            builder.addBindingRangesAndParameterBlocks(layout->getGlobalParamsVarLayout(), rootDescriptorSetIndex);
+
+            for (SlangUInt i = 0; i < layout->getEntryPointCount(); i++)
+            {
+                // Entry-point parameters should also be added to the default root
+                // descriptor set.
+                //
+                // We add the parameters using the "variable layout" for the entry point
+                // and not just its type layout, to ensure that any offset information is
+                // applied correctly to the `register` and `space` information for entry-point
+                // parameters.
+                //
+                // Note: When we start to support DXR we will need to handle entry-point parameters
+                // differently because they will need to map to local root signatures rather than
+                // being included in the global root signature as is being done here.
+                //
+                auto entryPoint = layout->getEntryPointByIndex(i);
+                builder.addBindingRangesAndParameterBlocks(entryPoint->getVarLayout(), rootDescriptorSetIndex);
+            }
+
+            auto& rootSignatureDesc = builder.build(outRootDescriptorSetInfos);
+
+            ComPtr<ID3DBlob> signature;
+            ComPtr<ID3DBlob> error;
+            if (SLANG_FAILED(device->m_D3D12SerializeRootSignature(
+                    &rootSignatureDesc,
+                    D3D_ROOT_SIGNATURE_VERSION_1,
+                    signature.writeRef(),
+                    error.writeRef())))
+            {
+                fprintf(stderr, "error: D3D12SerializeRootSignature failed");
+                if (error)
+                {
+                    fprintf(stderr, ": %s\n", (const char*)error->GetBufferPointer());
+                }
+                return SLANG_FAIL;
+            }
+
+            SLANG_RETURN_ON_FAIL(device->m_device->CreateRootSignature(
+                0,
+                signature->GetBufferPointer(),
+                signature->GetBufferSize(),
+                IID_PPV_ARGS(outRootSignature)));
+            return SLANG_OK;
+        }
+
+        static Result create(
+            D3D12Device* device,
+            slang::IComponentType* program,
+            slang::ProgramLayout* programLayout,
+            RootShaderObjectLayoutImpl** outLayout)
+        {
+            RootShaderObjectLayoutImpl::Builder builder(device, program, programLayout);
+            builder.addGlobalParams(programLayout->getGlobalParamsVarLayout());
+
+            SlangInt entryPointCount = programLayout->getEntryPointCount();
+            for (SlangInt e = 0; e < entryPointCount; ++e)
+            {
+                auto slangEntryPoint = programLayout->getEntryPointByIndex(e);
+                RefPtr<ShaderObjectLayoutImpl> entryPointLayout;
+                SLANG_RETURN_ON_FAIL(ShaderObjectLayoutImpl::createForElementType(
+                    device, slangEntryPoint->getTypeLayout(), entryPointLayout.writeRef()));
+                builder.addEntryPoint(slangEntryPoint->getStage(), entryPointLayout);
+            }
+
+            SLANG_RETURN_ON_FAIL(builder.build(outLayout));
+
+            if (program->getSpecializationParamCount() == 0)
+            {
+                // For root object, we would like know the union of all binding slots
+                // including all sub-objects in the shader-object hierarchy, so at
+                // parameter binding time we can easily know how many GPU descriptor tables
+                // to create without walking through the shader-object hierarchy again.
+                // We build out this array along with root signature construction and store
+                // it in `m_gpuDescriptorSetInfos`.
+                SLANG_RETURN_ON_FAIL(createRootSignatureFromSlang(
+                    device,
+                    program,
+                    (*outLayout)->m_rootSignature.writeRef(),
+                    (*outLayout)->m_gpuDescriptorSetInfos));
+            }
+            return SLANG_OK;
+        }
+
+        slang::IComponentType* getSlangProgram() const { return m_program; }
+        slang::ProgramLayout* getSlangProgramLayout() const { return m_programLayout; }
+
+    protected:
+        Result _init(Builder* builder)
+        {
+            auto renderer = builder->m_renderer;
+
+            SLANG_RETURN_ON_FAIL(Super::_init(builder));
+
+            m_program = builder->m_program;
+            m_programLayout = builder->m_programLayout;
+            m_entryPoints = builder->m_entryPoints;
+            return SLANG_OK;
+        }
+
+        ComPtr<slang::IComponentType> m_program;
+        slang::ProgramLayout* m_programLayout = nullptr;
+
+        List<EntryPointInfo> m_entryPoints;
+
+    public:
+        ComPtr<ID3D12RootSignature> m_rootSignature;
+        List<DescriptorSetInfo> m_gpuDescriptorSetInfos;
+    };
+
+    class ShaderProgramImpl : public ShaderProgramBase
+    {
+    public:
+        PipelineType m_pipelineType;
+        List<uint8_t> m_vertexShader;
+        List<uint8_t> m_pixelShader;
+        List<uint8_t> m_computeShader;
+        RefPtr<RootShaderObjectLayoutImpl> m_rootObjectLayout;
+    };
+
+    class ShaderObjectImpl : public ShaderObjectBase
+    {
+    public:
+        static Result create(
+            D3D12Device* device,
+            ShaderObjectLayoutImpl* layout,
+            ShaderObjectImpl** outShaderObject)
+        {
+            auto object = ComPtr<ShaderObjectImpl>(new ShaderObjectImpl());
+            SLANG_RETURN_ON_FAIL(
+                object->init(device, layout, &device->m_cpuViewHeap, &device->m_cpuSamplerHeap));
+
+            *outShaderObject = object.detach();
+            return SLANG_OK;
+        }
+
+        ~ShaderObjectImpl()
+        {
+            auto layoutImpl = static_cast<ShaderObjectLayoutImpl*>(m_layout.Ptr());
+            if (m_descriptorSet.m_resourceCount)
+            {
+                m_resourceHeap.freeIfSupported(
+                    m_descriptorSet.m_resourceTable, m_descriptorSet.m_resourceCount);
+            }
+            if (m_descriptorSet.m_samplerCount)
+            {
+                m_samplerHeap.freeIfSupported(
+                    m_descriptorSet.m_samplerTable, m_descriptorSet.m_samplerCount);
+            }
+        }
+
+        RendererBase* getDevice() { return m_layout->getDevice(); }
+
+        SLANG_NO_THROW UInt SLANG_MCALL getEntryPointCount() SLANG_OVERRIDE { return 0; }
+
+        SLANG_NO_THROW Result SLANG_MCALL getEntryPoint(UInt index, IShaderObject** outEntryPoint)
+            SLANG_OVERRIDE
+        {
+            *outEntryPoint = nullptr;
+            return SLANG_OK;
+        }
+
+        ShaderObjectLayoutImpl* getLayout()
+        {
+            return static_cast<ShaderObjectLayoutImpl*>(m_layout.Ptr());
+        }
+
+        SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL getElementTypeLayout()
+            SLANG_OVERRIDE
+        {
+            return m_layout->getElementTypeLayout();
+        }
+
+        SLANG_NO_THROW Result SLANG_MCALL
+            setData(ShaderOffset const& inOffset, void const* data, size_t inSize) SLANG_OVERRIDE
+        {
+            Index offset = inOffset.uniformOffset;
+            Index size = inSize;
+
+            char* dest = m_ordinaryData.getBuffer();
+            Index availableSize = m_ordinaryData.getCount();
+
+            // TODO: We really should bounds-check access rather than silently ignoring sets
+            // that are too large, but we have several test cases that set more data than
+            // an object actually stores on several targets...
+            //
+            if (offset < 0)
+            {
+                size += offset;
+                offset = 0;
+            }
+            if ((offset + size) >= availableSize)
+            {
+                size = availableSize - offset;
+            }
+
+            memcpy(dest + offset, data, size);
+
+            return SLANG_OK;
+        }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            setObject(ShaderOffset const& offset, IShaderObject* object) SLANG_OVERRIDE
+        {
+            if (offset.bindingRangeIndex < 0)
+                return SLANG_E_INVALID_ARG;
+            auto layout = getLayout();
+            if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
+                return SLANG_E_INVALID_ARG;
+
+            auto subObject = static_cast<ShaderObjectImpl*>(object);
+
+            auto bindingRangeIndex = offset.bindingRangeIndex;
+            auto& bindingRange = layout->getBindingRange(bindingRangeIndex);
+
+            m_objects[bindingRange.binding.index + offset.bindingArrayIndex] = subObject;
+
+            // If the range being assigned into represents an interface/existential-type leaf field,
+            // then we need to consider how the `object` being assigned here affects specialization.
+            // We may also need to assign some data from the sub-object into the ordinary data
+            // buffer for the parent object.
+            //
+            if (bindingRange.bindingType == slang::BindingType::ExistentialValue)
+            {
+                // A leaf field of interface type is laid out inside of the parent object
+                // as a tuple of `(RTTI, WitnessTable, Payload)`. The layout of these fields
+                // is a contract between the compiler and any runtime system, so we will
+                // need to rely on details of the binary layout.
+
+                // We start by querying the layout/type of the concrete value that the application
+                // is trying to store into the field, and also the layout/type of the leaf
+                // existential-type field itself.
+                //
+                auto concreteTypeLayout = subObject->getElementTypeLayout();
+                auto concreteType = concreteTypeLayout->getType();
+                //
+                auto existentialTypeLayout =
+                    layout->getElementTypeLayout()->getBindingRangeLeafTypeLayout(
+                        bindingRangeIndex);
+                auto existentialType = existentialTypeLayout->getType();
+
+                // The first field of the tuple (offset zero) is the run-time type information
+                // (RTTI) ID for the concrete type being stored into the field.
+                //
+                // TODO: We need to be able to gather the RTTI type ID from `object` and then
+                // use `setData(offset, &TypeID, sizeof(TypeID))`.
+
+                // The second field of the tuple (offset 8) is the ID of the "witness" for the
+                // conformance of the concrete type to the interface used by this field.
+                //
+                auto witnessTableOffset = offset;
+                witnessTableOffset.uniformOffset += 8;
+                //
+                // Conformances of a type to an interface are computed and then stored by the
+                // Slang runtime, so we can look up the ID for this particular conformance (which
+                // will create it on demand).
+                //
+                ComPtr<slang::ISession> slangSession;
+                SLANG_RETURN_ON_FAIL(getRenderer()->getSlangSession(slangSession.writeRef()));
+                //
+                // Note: If the type doesn't actually conform to the required interface for
+                // this sub-object range, then this is the point where we will detect that
+                // fact and error out.
+                //
+                uint32_t conformanceID = 0xFFFFFFFF;
+                SLANG_RETURN_ON_FAIL(slangSession->getTypeConformanceWitnessSequentialID(
+                    concreteType, existentialType, &conformanceID));
+                //
+                // Once we have the conformance ID, then we can write it into the object
+                // at the required offset.
+                //
+                SLANG_RETURN_ON_FAIL(
+                    setData(witnessTableOffset, &conformanceID, sizeof(conformanceID)));
+
+                // The third field of the tuple (offset 16) is the "payload" that is supposed to
+                // hold the data for a value of the given concrete type.
+                //
+                auto payloadOffset = offset;
+                payloadOffset.uniformOffset += 16;
+
+                // There are two cases we need to consider here for how the payload might be used:
+                //
+                // * If the concrete type of the value being bound is one that can "fit" into the
+                //   available payload space,  then it should be stored in the payload.
+                //
+                // * If the concrete type of the value cannot fit in the payload space, then it
+                //   will need to be stored somewhere else.
+                //
+                if (_doesValueFitInExistentialPayload(concreteTypeLayout, existentialTypeLayout))
+                {
+                    // If the value can fit in the payload area, then we will go ahead and copy
+                    // its bytes into that area.
+                    //
+                    setData(
+                        payloadOffset,
+                        subObject->m_ordinaryData.getBuffer(),
+                        subObject->m_ordinaryData.getCount());
+                }
+                else
+                {
+                    // If the value does *not *fit in the payload area, then there is nothing
+                    // we can do at this point (beyond saving a reference to the sub-object, which
+                    // was handled above).
+                    //
+                    // Once all the sub-objects have been set into the parent object, we can
+                    // compute a specialized layout for it, and that specialized layout can tell
+                    // us where the data for these sub-objects has been laid out.
+                    return SLANG_E_NOT_IMPLEMENTED;
+                }
+            }
+            return SLANG_OK;
+        }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            getObject(ShaderOffset const& offset, IShaderObject** outObject) SLANG_OVERRIDE
+        {
+            SLANG_ASSERT(outObject);
+            if (offset.bindingRangeIndex < 0)
+                return SLANG_E_INVALID_ARG;
+            auto layout = getLayout();
+            if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
+                return SLANG_E_INVALID_ARG;
+            auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
+
+            auto object = m_objects[bindingRange.binding.index + offset.bindingArrayIndex].Ptr();
+            object->addRef();
+            *outObject = object;
+            return SLANG_OK;
+        }
+
+        SLANG_NO_THROW Result SLANG_MCALL
+            setResource(ShaderOffset const& offset, IResourceView* resourceView) SLANG_OVERRIDE
+        {
+            if (offset.bindingRangeIndex < 0)
+                return SLANG_E_INVALID_ARG;
+            auto layout = getLayout();
+            if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
+                return SLANG_E_INVALID_ARG;
+
+            auto resourceViewImpl = static_cast<ResourceViewImpl*>(resourceView);
+
+            auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
+            auto descriptorSlotIndex = bindingRange.binding.offsetInDescriptorTable.resource +
+                                       (int32_t)offset.bindingArrayIndex;
+            // Hold a reference to the resource to prevent its destruction.
+            m_boundResources[bindingRange.flatResourceOffset + offset.bindingArrayIndex] =
+                resourceViewImpl->m_resource;
+            ID3D12Device* d3dDevice = static_cast<D3D12Device*>(getDevice())->m_device;
+            d3dDevice->CopyDescriptorsSimple(
+                1,
+                m_resourceHeap.getCpuHandle(
+                    m_descriptorSet.m_resourceTable +
+                    bindingRange.binding.offsetInDescriptorTable.resource +
+                    (int32_t)offset.bindingArrayIndex),
+                resourceViewImpl->m_descriptor.cpuHandle,
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            return SLANG_OK;
+        }
+
+        SLANG_NO_THROW Result SLANG_MCALL
+            setSampler(ShaderOffset const& offset, ISamplerState* sampler) SLANG_OVERRIDE
+        {
+            if (offset.bindingRangeIndex < 0)
+                return SLANG_E_INVALID_ARG;
+            auto layout = getLayout();
+            if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
+                return SLANG_E_INVALID_ARG;
+            auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
+            auto samplerImpl = static_cast<SamplerStateImpl*>(sampler);
+            ID3D12Device* d3dDevice = static_cast<D3D12Device*>(getDevice())->m_device;
+            d3dDevice->CopyDescriptorsSimple(
+                1,
+                m_samplerHeap.getCpuHandle(
+                    m_descriptorSet.m_samplerTable +
+                    bindingRange.binding.offsetInDescriptorTable.sampler +
+                    (int32_t)offset.bindingArrayIndex),
+                samplerImpl->m_descriptor.cpuHandle,
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+            return SLANG_OK;
+        }
+
+        SLANG_NO_THROW Result SLANG_MCALL setCombinedTextureSampler(
+            ShaderOffset const& offset,
+            IResourceView* textureView,
+            ISamplerState* sampler) SLANG_OVERRIDE
+        {
+            if (offset.bindingRangeIndex < 0)
+                return SLANG_E_INVALID_ARG;
+            auto layout = getLayout();
+            if (offset.bindingRangeIndex >= layout->getBindingRangeCount())
+                return SLANG_E_INVALID_ARG;
+            auto& bindingRange = layout->getBindingRange(offset.bindingRangeIndex);
+            auto resourceViewImpl = static_cast<ResourceViewImpl*>(textureView);
+            ID3D12Device* d3dDevice = static_cast<D3D12Device*>(getDevice())->m_device;
+            d3dDevice->CopyDescriptorsSimple(
+                1,
+                m_resourceHeap.getCpuHandle(
+                    m_descriptorSet.m_resourceTable +
+                    bindingRange.binding.offsetInDescriptorTable.resource +
+                    (int32_t)offset.bindingArrayIndex),
+                resourceViewImpl->m_descriptor.cpuHandle,
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            auto samplerImpl = static_cast<SamplerStateImpl*>(sampler);
+            d3dDevice->CopyDescriptorsSimple(
+                1,
+                m_samplerHeap.getCpuHandle(
+                    m_descriptorSet.m_samplerTable +
+                    bindingRange.binding.offsetInDescriptorTable.sampler +
+                    (int32_t)offset.bindingArrayIndex),
+                samplerImpl->m_descriptor.cpuHandle,
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+            return SLANG_OK;
+        }
+
+    public:
+        // Appends all types that are used to specialize the element type of this shader object in
+        // `args` list.
+        virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
+        {
+            auto& subObjectRanges = getLayout()->getSubObjectRanges();
+            // The following logic is built on the assumption that all fields that involve
+            // existential types (and therefore require specialization) will results in a sub-object
+            // range in the type layout. This allows us to simply scan the sub-object ranges to find
+            // out all specialization arguments.
+            Index subObjectRangeCount = subObjectRanges.getCount();
+            for (Index subObjectRangeIndex = 0; subObjectRangeIndex < subObjectRangeCount;
+                 subObjectRangeIndex++)
+            {
+                auto const& subObjectRange = subObjectRanges[subObjectRangeIndex];
+                auto const& bindingRange =
+                    getLayout()->getBindingRange(subObjectRange.bindingRangeIndex);
+
+                Index count = bindingRange.count;
+                SLANG_ASSERT(count == 1);
+
+                Index subObjectIndexInRange = 0;
+                auto subObject = m_objects[bindingRange.binding.index + subObjectIndexInRange];
+
+                switch (bindingRange.bindingType)
+                {
+                case slang::BindingType::ExistentialValue:
+                    {
+                        // A binding type of `ExistentialValue` means the sub-object represents a
+                        // interface-typed field. In this case the specialization argument for this
+                        // field is the actual specialized type of the bound shader object. If the
+                        // shader object's type is an ordinary type without existential fields, then
+                        // the type argument will simply be the ordinary type. But if the sub
+                        // object's type is itself a specialized type, we need to make sure to use
+                        // that type as the specialization argument.
+
+                        ExtendedShaderObjectType specializedSubObjType;
+                        SLANG_RETURN_ON_FAIL(
+                            subObject->getSpecializedShaderObjectType(&specializedSubObjType));
+                        args.add(specializedSubObjType);
+                        break;
+                    }
+                case slang::BindingType::ParameterBlock:
+                case slang::BindingType::ConstantBuffer:
+                    // Currently we only handle the case where the field's type is
+                    // `ParameterBlock<SomeStruct>` or `ConstantBuffer<SomeStruct>`, where
+                    // `SomeStruct` is a struct type (not directly an interface type). In this case,
+                    // we just recursively collect the specialization arguments from the bound sub
+                    // object.
+                    SLANG_RETURN_ON_FAIL(subObject->collectSpecializationArgs(args));
+                    // TODO: we need to handle the case where the field is of the form
+                    // `ParameterBlock<IFoo>`. We should treat this case the same way as the
+                    // `ExistentialValue` case here, but currently we lack a mechanism to
+                    // distinguish the two scenarios.
+                    break;
+                }
+                // TODO: need to handle another case where specialization happens on resources
+                // fields e.g. `StructuredBuffer<IFoo>`.
+            }
+            return SLANG_OK;
+        }
+
+    protected:
+        Result init(
+            D3D12Device* device,
+            ShaderObjectLayoutImpl* layout,
+            DescriptorHeapReference viewHeap,
+            DescriptorHeapReference samplerHeap)
+        {
+            m_layout = layout;
+
+            m_upToDateConstantBufferHeapVersion = 0;
+
+            // If the layout tells us that there is any uniform data,
+            // then we will allocate a CPU memory buffer to hold that data
+            // while it is being set from the host.
+            //
+            // Once the user is done setting the parameters/fields of this
+            // shader object, we will produce a GPU-memory version of the
+            // uniform data (which includes values from this object and
+            // any existential-type sub-objects).
+            //
+            size_t uniformSize = layout->getElementTypeLayout()->getSize();
+            if (uniformSize)
+            {
+                m_ordinaryData.setCount(uniformSize);
+                memset(m_ordinaryData.getBuffer(), 0, uniformSize);
+            }
+
+            // Allocate descriptor tables for this shader object.
+            m_resourceHeap = viewHeap;
+            m_samplerHeap = samplerHeap;
+            auto descSetInfo = layout->getDescriptorSetInfo();
+            m_descriptorSet.m_resourceCount = descSetInfo.resourceDescriptorCount;
+            if (descSetInfo.resourceDescriptorCount)
+            {
+                m_descriptorSet.m_resourceTable =
+                    viewHeap.allocate(descSetInfo.resourceDescriptorCount);
+            }
+            m_descriptorSet.m_samplerCount = descSetInfo.samplerDescriptorCount;
+            if (descSetInfo.samplerDescriptorCount)
+            {
+                m_descriptorSet.m_samplerTable =
+                    samplerHeap.allocate(descSetInfo.samplerDescriptorCount);
+            }
+
+            m_boundResources.setCount(layout->getResourceCount());
+
+            // If the layout specifies that we have any sub-objects, then
+            // we need to size the array to account for them.
+            //
+            Index subObjectCount = layout->getSubObjectCount();
+            m_objects.setCount(subObjectCount);
+
+            for (auto subObjectRangeInfo : layout->getSubObjectRanges())
+            {
+                auto subObjectLayout = subObjectRangeInfo.layout;
+
+                // In the case where the sub-object range represents an
+                // existential-type leaf field (e.g., an `IBar`), we
+                // cannot pre-allocate the object(s) to go into that
+                // range, since we can't possibly know what to allocate
+                // at this point.
+                //
+                if (!subObjectLayout)
+                    continue;
+                //
+                // Otherwise, we will allocate a sub-object to fill
+                // in each entry in this range, based on the layout
+                // information we already have.
+
+                auto& bindingRangeInfo =
+                    layout->getBindingRange(subObjectRangeInfo.bindingRangeIndex);
+                for (uint32_t i = 0; i < bindingRangeInfo.count; ++i)
+                {
+                    RefPtr<ShaderObjectImpl> subObject;
+                    SLANG_RETURN_ON_FAIL(
+                        ShaderObjectImpl::create(device, subObjectLayout, subObject.writeRef()));
+                    m_objects[bindingRangeInfo.binding.index + i] = subObject;
+                }
+            }
+
+            return SLANG_OK;
+        }
+
+        /// Write the uniform/ordinary data of this object into the given `dest` buffer at the given
+        /// `offset`
+        Result _writeOrdinaryData(
+            PipelineCommandEncoder* encoder,
+            BufferResourceImpl* buffer,
+            size_t offset,
+            size_t destSize,
+            ShaderObjectLayoutImpl* specializedLayout)
+        {
+            auto src = m_ordinaryData.getBuffer();
+            auto srcSize = size_t(m_ordinaryData.getCount());
+
+            SLANG_ASSERT(srcSize <= destSize);
+
+            _uploadBufferData(encoder->m_d3dCmdList, buffer, offset, srcSize, src);
+
+            // In the case where this object has any sub-objects of
+            // existential/interface type, we need to recurse on those objects
+            // that need to write their state into an appropriate "pending" allocation.
+            //
+            // Note: Any values that could fit into the "payload" included
+            // in the existential-type field itself will have already been
+            // written as part of `setObject()`. This loop only needs to handle
+            // those sub-objects that do not "fit."
+            //
+            // An implementers looking at this code might wonder if things could be changed
+            // so that *all* writes related to sub-objects for interface-type fields could
+            // be handled in this one location, rather than having some in `setObject()` and
+            // others handled here.
+            //
+            Index subObjectRangeCounter = 0;
+            for (auto const& subObjectRangeInfo : specializedLayout->getSubObjectRanges())
+            {
+                Index subObjectRangeIndex = subObjectRangeCounter++;
+                auto const& bindingRangeInfo =
+                    specializedLayout->getBindingRange(subObjectRangeInfo.bindingRangeIndex);
+
+                // We only need to handle sub-object ranges for interface/existential-type fields,
+                // because fields of constant-buffer or parameter-block type are responsible for
+                // the ordinary/uniform data of their own existential/interface-type sub-objects.
+                //
+                if (bindingRangeInfo.bindingType != slang::BindingType::ExistentialValue)
+                    continue;
+
+                // Each sub-object range represents a single "leaf" field, but might be nested
+                // under zero or more outer arrays, such that the number of existential values
+                // in the same range can be one or more.
+                //
+                auto count = bindingRangeInfo.count;
+
+                // We are not concerned with the case where the existential value(s) in the range
+                // git into the payload part of the leaf field.
+                //
+                // In the case where the value didn't fit, the Slang layout strategy would have
+                // considered the requirements of the value as a "pending" allocation, and would
+                // allocate storage for the ordinary/uniform part of that pending allocation inside
+                // of the parent object's type layout.
+                //
+                // Here we assume that the Slang reflection API can provide us with a single byte
+                // offset and stride for the location of the pending data allocation in the
+                // specialized type layout, which will store the values for this sub-object range.
+                //
+                // TODO: The reflection API functions we are assuming here haven't been implemented
+                // yet, so the functions being called here are stubs.
+                //
+                // TODO: It might not be that a single sub-object range can reliably map to a single
+                // contiguous array with a single stride; we need to carefully consider what the
+                // layout logic does for complex cases with multiple layers of nested arrays and
+                // structures.
+                //
+                size_t subObjectRangePendingDataOffset =
+                    _getSubObjectRangePendingDataOffset(specializedLayout, subObjectRangeIndex);
+                size_t subObjectRangePendingDataStride =
+                    _getSubObjectRangePendingDataStride(specializedLayout, subObjectRangeIndex);
+
+                // If the range doesn't actually need/use the "pending" allocation at all, then
+                // we need to detect that case and skip such ranges.
+                //
+                // TODO: This should probably be handled on a per-object basis by caching a "does it
+                // fit?" bit as part of the information for bound sub-objects, given that we already
+                // compute the "does it fit?" status as part of `setObject()`.
+                //
+                if (subObjectRangePendingDataOffset == 0)
+                    continue;
+
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    auto subObject = m_objects[bindingRangeInfo.binding.index + i];
+
+                    RefPtr<ShaderObjectLayoutImpl> subObjectLayout;
+                    SLANG_RETURN_ON_FAIL(
+                        subObject->getSpecializedLayout(subObjectLayout.writeRef()));
+
+                    auto subObjectOffset =
+                        subObjectRangePendingDataOffset + i * subObjectRangePendingDataStride;
+
+                    subObject->_writeOrdinaryData(
+                        encoder,
+                        buffer,
+                        offset + subObjectOffset,
+                        destSize - subObjectOffset,
+                        subObjectLayout);
+                }
+            }
+
+            return SLANG_OK;
+        }
+
+        // As discussed in `_writeOrdinaryData()`, these methods are just stubs waiting for
+        // the "flat" Slang refelction information to provide access to the relevant data.
+        //
+        size_t _getSubObjectRangePendingDataOffset(
+            ShaderObjectLayoutImpl* specializedLayout,
+            Index subObjectRangeIndex)
+        {
+            return 0;
+        }
+        size_t _getSubObjectRangePendingDataStride(
+            ShaderObjectLayoutImpl* specializedLayout,
+            Index subObjectRangeIndex)
+        {
+            return 0;
+        }
+
+        /// Ensure that the `m_ordinaryDataBuffer` has been created, if it is needed
+        Result _ensureOrdinaryDataBufferCreatedIfNeeded(PipelineCommandEncoder* encoder)
+        {
+            // If we have already created a buffer to hold ordinary data, then we should
+            // simply re-use that buffer rather than re-create it.
+            //
+            // TODO: Simply re-using the buffer without any kind of validation checks
+            // means that we are assuming that users cannot or will not perform any `set`
+            // operations on a shader object once an operation has requested this buffer
+            // be created. We need to enforce that rule if we want to rely on it.
+            //
+            if (m_upToDateConstantBufferHeapVersion ==
+                encoder->m_commandBuffer->m_transientHeap->getVersion())
+            {
+                return SLANG_OK;
+            }
+
+            // Computing the size of the ordinary data buffer is *not* just as simple
+            // as using the size of the `m_ordinayData` array that we store. The reason
+            // for the added complexity is that interface-type fields may lead to the
+            // storage being specialized such that it needs extra appended data to
+            // store the concrete values that logically belong in those interface-type
+            // fields but wouldn't fit in the fixed-size allocation we gave them.
+            //
+            // TODO: We need to actually implement that logic by using reflection
+            // data computed for the specialized type of this shader object.
+            // For now we just make the simple assumption described above despite
+            // knowing that it is false.
+            //
+            RefPtr<ShaderObjectLayoutImpl> specializedLayout;
+            SLANG_RETURN_ON_FAIL(getSpecializedLayout(specializedLayout.writeRef()));
+
+            m_constantBufferSize = specializedLayout->getElementTypeLayout()->getSize();
+            if (m_constantBufferSize == 0)
+            {
+                m_upToDateConstantBufferHeapVersion =
+                    encoder->m_commandBuffer->m_transientHeap->getVersion();
+                return SLANG_OK;
+            }
+
+            // Once we have computed how large the buffer should be, we can allocate
+            // it from the transient resource heap.
+            //
+            auto alignedConstantBufferSize = D3DUtil::calcAligned(m_constantBufferSize, 256);
+            SLANG_RETURN_ON_FAIL(encoder->m_commandBuffer->m_transientHeap->allocateConstantBuffer(
+                alignedConstantBufferSize, m_constantBufferWeakPtr, m_constantBufferOffset));
+
+            // Once the buffer is allocated, we can use `_writeOrdinaryData` to fill it in.
+            //
+            // Note that `_writeOrdinaryData` is potentially recursive in the case
+            // where this object contains interface/existential-type fields, so we
+            // don't need or want to inline it into this call site.
+            //
+            SLANG_RETURN_ON_FAIL(_writeOrdinaryData(
+                encoder,
+                static_cast<BufferResourceImpl*>(m_constantBufferWeakPtr),
+                m_constantBufferOffset,
+                m_constantBufferSize,
+                specializedLayout));
+
+            // Update version tracker so that we don't redundantly alloc and fill in
+            // constant buffers for the same transient heap.
+            m_upToDateConstantBufferHeapVersion =
+                encoder->m_commandBuffer->m_transientHeap->getVersion();
+
+            {
+                // We also create and store a descriptor for our root constant buffer
+                // into the descriptor table allocation that was reserved for them.
+                //
+                // We always know that the ordinary data buffer will be the first descriptor
+                // in the table of resource views.
+                //
+                auto descriptorTable = m_descriptorSet.m_resourceTable;
+                D3D12_CONSTANT_BUFFER_VIEW_DESC viewDesc = {};
+                viewDesc.BufferLocation = static_cast<BufferResourceImpl*>(m_constantBufferWeakPtr)
+                                              ->m_resource.getResource()
+                                              ->GetGPUVirtualAddress() +
+                                          m_constantBufferOffset;
+                viewDesc.SizeInBytes = (UINT)alignedConstantBufferSize;
+                encoder->m_device->CreateConstantBufferView(
+                    &viewDesc, m_resourceHeap.getCpuHandle(descriptorTable));
+            }
+
+            return SLANG_OK;
+        }
+
+    public:
+        Result bindObject(PipelineCommandEncoder* encoder, RootBindingState* bindingState)
+        {
+            ShaderObjectLayoutImpl* layout = getLayout();
+            SLANG_RETURN_ON_FAIL(_ensureOrdinaryDataBufferCreatedIfNeeded(encoder));
+            uint32_t descTableIndex = bindingState->rootParamIndex;
+            auto& descSet = m_descriptorSet;
+            if (descSet.m_resourceCount)
+            {
+                auto gpuDescriptorTable = bindingState->descriptorTables[descTableIndex];
+                auto& gpuHeap = gpuDescriptorTable.heap;
+                auto& cpuHeap = m_resourceHeap;
+                auto cpuDescriptorTable = descSet.m_resourceTable;
+
+                bindingState->device->m_device->CopyDescriptorsSimple(
+                    UINT(descSet.m_resourceCount),
+                    gpuHeap.getCpuHandle(
+                        gpuDescriptorTable.table + bindingState->offset.resource),
+                    cpuHeap.getCpuHandle(cpuDescriptorTable),
+                    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                bindingState->offset.resource += descSet.m_resourceCount;
+                descTableIndex++;
+            }
+            if (descSet.m_samplerCount)
+            {
+                auto gpuDescriptorTable = bindingState->descriptorTables[descTableIndex];
+                auto& gpuHeap = gpuDescriptorTable.heap;
+                auto& cpuHeap = m_samplerHeap;
+                auto cpuDescriptorTable = (int)descSet.m_samplerTable;
+
+                bindingState->device->m_device->CopyDescriptorsSimple(
+                    UINT(descSet.m_samplerCount),
+                    gpuHeap.getCpuHandle(
+                        gpuDescriptorTable.table + bindingState->offset.sampler),
+                    cpuHeap.getCpuHandle(cpuDescriptorTable),
+                    D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+                bindingState->offset.sampler += descSet.m_samplerCount;
+                descTableIndex++;
+            }
+            bindingState->futureRootParamOffset =
+                Math::Max(descTableIndex, bindingState->futureRootParamOffset);
+            auto& subObjectRanges = layout->getSubObjectRanges();
+            for (Index i = 0; i < subObjectRanges.getCount(); i++)
+            {
+                auto bindingRange =
+                    layout->getBindingRange(layout->getSubObjectRange(i).bindingRangeIndex);
+                switch (layout->getSubObjectRange(i).bindingType)
+                {
+                case slang::BindingType::ParameterBlock:
+                    {
+                        auto baseIndex = bindingRange.binding.index;
+                        for (uint32_t j = 0; j < bindingRange.count; j++)
+                        {
+                            auto newBindingState = *bindingState;
+                            newBindingState.offset.resource = 0;
+                            newBindingState.offset.sampler = 0;
+                            newBindingState.rootParamIndex = bindingState->futureRootParamOffset;
+                            newBindingState.futureRootParamOffset = newBindingState.rootParamIndex;
+                            m_objects[baseIndex + j]->bindObject(encoder, &newBindingState);
+                            bindingState->futureRootParamOffset =
+                                newBindingState.futureRootParamOffset;
+                        }
+                    }
+                    break;
+                case slang::BindingType::ConstantBuffer:
+                    {
+                        auto baseIndex = bindingRange.binding.index;
+                        for (uint32_t j = 0; j < bindingRange.count; j++)
+                        {
+                            m_objects[baseIndex + j]->bindObject(encoder, bindingState);
+                        }
+                    }
+                    break;
+                case slang::BindingType::ExistentialValue:
+                    // If the existential object contains only ordinary data fields,
+                    // the data is already written into m_ordinaryDataBuffer during `setObject`,
+                    // so we don't need to do anything here.
+                    // If the existential object has resource fields, this is the time to set
+                    // those fields as in the "pendingLayout" section.
+                    // TODO: implement resource fields binding for inline existential values.
+                default:
+                    break;
+                }
+            }
+            return SLANG_OK;
+        }
+
+        /// Any "ordinary" / uniform data for this object
+        List<char> m_ordinaryData;
+
+        List<RefPtr<ShaderObjectImpl>> m_objects;
+
+        // The resource and sampler heaps used to allocate the descriptor tables.
+        DescriptorHeapReference m_resourceHeap;
+        DescriptorHeapReference m_samplerHeap;
+
+        struct DescriptorSet
+        {
+            int32_t m_resourceTable = 0;
+            int32_t m_samplerTable = 0;
+            uint32_t m_resourceCount = 0;
+            uint32_t m_samplerCount = 0;
+        };
+        DescriptorSet m_descriptorSet;
+
+        ShortList<RefPtr<Resource>, 8> m_boundResources;
+
+        /// A constant buffer used to stored ordinary data for this object
+        /// and existential-type sub-objects.
+        ///
+        /// Allocated from transient heap on demand with `_createOrdinaryDataBufferIfNeeded()`
+        IBufferResource* m_constantBufferWeakPtr = nullptr;
+        size_t m_constantBufferOffset = 0;
+        size_t m_constantBufferSize = 0;
+
+        /// The version number of the transient resource heap that contains up-to-date
+        /// constant buffer content for this shader object. If this is equal to the version number
+        /// of currently active transient heap, then the current set-up of constant buffer contents
+        /// as defined by the above `m_constantBuffer*` fields is valid and up-to-date so we can
+        /// use them directly.
+        uint64_t m_upToDateConstantBufferHeapVersion;
+
+        /// Get the layout of this shader object with specialization arguments considered
+        ///
+        /// This operation should only be called after the shader object has been
+        /// fully filled in and finalized.
+        ///
+        Result getSpecializedLayout(ShaderObjectLayoutImpl** outLayout)
+        {
+            if (!m_specializedLayout)
+            {
+                SLANG_RETURN_ON_FAIL(_createSpecializedLayout(m_specializedLayout.writeRef()));
+            }
+            *outLayout = RefPtr<ShaderObjectLayoutImpl>(m_specializedLayout).detach();
+            return SLANG_OK;
+        }
+
+        /// Create the layout for this shader object with specialization arguments considered
+        ///
+        /// This operation is virtual so that it can be customized by `RootShaderObject`.
+        ///
+        virtual Result _createSpecializedLayout(ShaderObjectLayoutImpl** outLayout)
+        {
+            ExtendedShaderObjectType extendedType;
+            SLANG_RETURN_ON_FAIL(getSpecializedShaderObjectType(&extendedType));
+
+            auto renderer = getRenderer();
+            RefPtr<ShaderObjectLayoutBase> layout;
+            SLANG_RETURN_ON_FAIL(
+                renderer->getShaderObjectLayout(extendedType.slangType, layout.writeRef()));
+
+            *outLayout = static_cast<ShaderObjectLayoutImpl*>(layout.detach());
+            return SLANG_OK;
+        }
+
+        RefPtr<ShaderObjectLayoutImpl> m_specializedLayout;
+    };
+
+    class RootShaderObjectImpl : public ShaderObjectImpl
+    {
+        typedef ShaderObjectImpl Super;
+
+    public:
+        // Override default reference counting behavior to disable lifetime management.
+        // Root objects are managed by command buffer and does not need to be freed by the user.
+        SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+        SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
+    public:
+        RootShaderObjectLayoutImpl* getLayout()
+        {
+            return static_cast<RootShaderObjectLayoutImpl*>(m_layout.Ptr());
+        }
+
+        UInt SLANG_MCALL getEntryPointCount() SLANG_OVERRIDE
+        {
+            return (UInt)m_entryPoints.getCount();
+        }
+        SlangResult SLANG_MCALL getEntryPoint(UInt index, IShaderObject** outEntryPoint)
+            SLANG_OVERRIDE
+        {
+            *outEntryPoint = m_entryPoints[index];
+            m_entryPoints[index]->addRef();
+            return SLANG_OK;
+        }
+
+        virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
+        {
+            SLANG_RETURN_ON_FAIL(ShaderObjectImpl::collectSpecializationArgs(args));
+            for (auto& entryPoint : m_entryPoints)
+            {
+                SLANG_RETURN_ON_FAIL(entryPoint->collectSpecializationArgs(args));
+            }
+            return SLANG_OK;
+        }
+
+    public:
+        Result bindObject(PipelineCommandEncoder* encoder, RootBindingState* bindingState)
+        {
+            SLANG_RETURN_ON_FAIL(Super::bindObject(encoder, bindingState));
+
+            auto entryPointCount = m_entryPoints.getCount();
+            for (Index i = 0; i < entryPointCount; ++i)
+            {
+                auto entryPoint = m_entryPoints[i];
+                SLANG_RETURN_ON_FAIL(entryPoint->bindObject(encoder, bindingState));
+            }
+
+            return SLANG_OK;
+        }
+
+    public:
+
+        Result init(D3D12Device* device)
+        {
+            SLANG_RETURN_ON_FAIL(m_cpuViewHeap.init(
+                device->m_device,
+                64,
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                D3D12_DESCRIPTOR_HEAP_FLAG_NONE));
+            SLANG_RETURN_ON_FAIL(m_cpuSamplerHeap.init(
+                device->m_device,
+                8,
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                D3D12_DESCRIPTOR_HEAP_FLAG_NONE));
+            return SLANG_OK;
+        }
+
+        Result reset(
+            D3D12Device* device,
+            RootShaderObjectLayoutImpl* layout,
+            TransientResourceHeapImpl* heap)
+        {
+            m_cpuViewHeap.deallocateAll();
+            m_cpuSamplerHeap.deallocateAll();
+            SLANG_RETURN_ON_FAIL(Super::init(device, layout, &m_cpuViewHeap, &m_cpuSamplerHeap));
+            m_specializedLayout = nullptr;
+            m_entryPoints.clear();
+            for (auto entryPointInfo : layout->getEntryPoints())
+            {
+                RefPtr<ShaderObjectImpl> entryPoint;
+                SLANG_RETURN_ON_FAIL(
+                    ShaderObjectImpl::create(device, entryPointInfo.layout, entryPoint.writeRef()));
+                m_entryPoints.add(entryPoint);
+            }
+            return SLANG_OK;
+        }
+
+    protected:
+        Result _createSpecializedLayout(ShaderObjectLayoutImpl** outLayout) SLANG_OVERRIDE
+        {
+            ExtendedShaderObjectTypeList specializationArgs;
+            SLANG_RETURN_ON_FAIL(collectSpecializationArgs(specializationArgs));
+
+            // Note: There is an important policy decision being made here that we need
+            // to approach carefully.
+            //
+            // We are doing two different things that affect the layout of a program:
+            //
+            // 1. We are *composing* one or more pieces of code (notably the shared global/module
+            //    stuff and the per-entry-point stuff).
+            //
+            // 2. We are *specializing* code that includes generic/existential parameters
+            //    to concrete types/values.
+            //
+            // We need to decide the relative *order* of these two steps, because of how it impacts
+            // layout. The layout for `specialize(compose(A,B), X, Y)` is potentially different
+            // form that of `compose(specialize(A,X), speciealize(B,Y))`, even when both are
+            // semantically equivalent programs.
+            //
+            // Right now we are using the first option: we are first generating a full composition
+            // of all the code we plan to use (global scope plus all entry points), and then
+            // specializing it to the concatenated specialization argumenst for all of that.
+            //
+            // In some cases, though, this model isn't appropriate. For example, when dealing with
+            // ray-tracing shaders and local root signatures, we really want the parameters of each
+            // entry point (actually, each entry-point *group*) to be allocated distinct storage,
+            // which really means we want to compute something like:
+            //
+            //      SpecializedGlobals = specialize(compose(ModuleA, ModuleB, ...), X, Y, ...)
+            //
+            //      SpecializedEP1 = compose(SpecializedGlobals, specialize(EntryPoint1, T, U, ...))
+            //      SpecializedEP2 = compose(SpecializedGlobals, specialize(EntryPoint2, A, B, ...))
+            //
+            // Note how in this case all entry points agree on the layout for the shared/common
+            // parmaeters, but their layouts are also independent of one another.
+            //
+            // Furthermore, in this example, loading another entry point into the system would not
+            // rquire re-computing the layouts (or generated kernel code) for any of the entry
+            // points that had already been loaded (in contrast to a compose-then-specialize
+            // approach).
+            //
+            ComPtr<slang::IComponentType> specializedComponentType;
+            ComPtr<slang::IBlob> diagnosticBlob;
+            auto result = getLayout()->getSlangProgram()->specialize(
+                specializationArgs.components.getArrayView().getBuffer(),
+                specializationArgs.getCount(),
+                specializedComponentType.writeRef(),
+                diagnosticBlob.writeRef());
+
+            // TODO: print diagnostic message via debug output interface.
+
+            if (result != SLANG_OK)
+                return result;
+
+            auto slangSpecializedLayout = specializedComponentType->getLayout();
+            RefPtr<RootShaderObjectLayoutImpl> specializedLayout;
+            RootShaderObjectLayoutImpl::create(
+                static_cast<D3D12Device*>(getRenderer()),
+                specializedComponentType,
+                slangSpecializedLayout,
+                specializedLayout.writeRef());
+
+            // Note: Computing the layout for the specialized program will have also computed
+            // the layouts for the entry points, and we really need to attach that information
+            // to them so that they don't go and try to compute their own specializations.
+            //
+            // TODO: Well, if we move to the specialization model described above then maybe
+            // we *will* want entry points to do their own specialization work...
+            //
+            auto entryPointCount = m_entryPoints.getCount();
+            for (Index i = 0; i < entryPointCount; ++i)
+            {
+                auto entryPointInfo = specializedLayout->getEntryPoint(i);
+                auto entryPointVars = m_entryPoints[i];
+
+                entryPointVars->m_specializedLayout = entryPointInfo.layout;
+            }
+
+            *outLayout = specializedLayout.detach();
+            return SLANG_OK;
+        }
+
+        List<RefPtr<ShaderObjectImpl>> m_entryPoints;
+
+    public:
+        // Descriptor heaps for the root object. Resets with the life cycle of each root shader
+        // object use.
+        D3D12DescriptorHeap m_cpuViewHeap;
+        D3D12DescriptorHeap m_cpuSamplerHeap;
     };
 
     class CommandBufferImpl
@@ -760,108 +2483,26 @@ protected:
         }
     public:
         ComPtr<ID3D12GraphicsCommandList> m_cmdList;
-        ExecutionFrameResources* m_frame;
-        D3D12Renderer* m_renderer;
-        void init(D3D12Renderer* renderer, ExecutionFrameResources* frame)
+        TransientResourceHeapImpl* m_transientHeap;
+        D3D12Device* m_renderer;
+        RootShaderObjectImpl m_rootShaderObject;
+
+        void init(
+            D3D12Device* renderer,
+            ID3D12GraphicsCommandList* d3dCommandList,
+            TransientResourceHeapImpl* transientHeap)
         {
-            m_frame = frame;
+            m_transientHeap = transientHeap;
             m_renderer = renderer;
-            m_cmdList = m_frame->createCommandList(renderer->m_device);
+            m_cmdList = d3dCommandList;
+
+            ID3D12DescriptorHeap* heaps[] = {
+                m_transientHeap->m_viewHeap.getHeap(),
+                m_transientHeap->m_samplerHeap.getHeap(),
+            };
+            m_cmdList->SetDescriptorHeaps(SLANG_COUNT_OF(heaps), heaps);
+            m_rootShaderObject.init(renderer);
         }
-        class PipelineCommandEncoder : public GraphicsComputeCommandEncoderBase
-        {
-        public:
-            bool m_isOpen = false;
-            CommandBufferImpl* m_commandBuffer;
-            ExecutionFrameResources* m_frame;
-            ID3D12Device* m_device;
-            ID3D12GraphicsCommandList* m_d3dCmdList;
-            ID3D12GraphicsCommandList* m_preCmdList = nullptr;
-
-            ID3D12PipelineState* m_boundPipelines[3] = {};
-            RefPtr<DescriptorSetImpl> m_boundDescriptorSets[int(PipelineType::CountOf)]
-                                                           [kMaxDescriptorSetCount];
-            static int getBindPointIndex(PipelineType type)
-            {
-                switch (type)
-                {
-                case PipelineType::Graphics:
-                    return 0;
-                case PipelineType::Compute:
-                    return 1;
-                case PipelineType::RayTracing:
-                    return 2;
-                default:
-                    assert(!"unknown pipeline type.");
-                    return -1;
-                }
-            }
-
-            RefPtr<PipelineLayoutImpl> m_currentPipelineLayout;
-
-            void init(CommandBufferImpl* commandBuffer)
-            {
-                m_commandBuffer = commandBuffer;
-                m_rendererBase = static_cast<RendererBase*>(commandBuffer->m_renderer);
-                m_d3dCmdList = m_commandBuffer->m_cmdList;
-            }
-
-            void endEncodingImpl()
-            {
-                m_isOpen = false;
-                for (int i = 0; i < int(PipelineType::CountOf); i++)
-                {
-                    for (auto& descSet : m_boundDescriptorSets[i])
-                    {
-                        descSet = nullptr;
-                    }
-                }
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSetImpl(
-                PipelineType pipelineType,
-                IPipelineLayout* layout,
-                UInt index,
-                IDescriptorSet* descriptorSet) override
-            {
-                // In D3D12, unlike Vulkan, binding a root signature invalidates *all* descriptor
-                // table
-                // bindings (rather than preserving those that are part of the longest common prefix
-                // between the old and new layout).
-                //
-                // In order to accomodate having descriptor-set bindings that persist across changes
-                // in pipeline state (which may also change pipeline layout), we will shadow the
-                // descriptor-set bindings and only flush them on-demand at draw tiume once the
-                // final pipline layout is known.
-                //
-
-                auto descriptorSetImpl = (DescriptorSetImpl*)descriptorSet;
-                m_boundDescriptorSets[int(pipelineType)][index] = descriptorSetImpl;
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL uploadBufferDataImpl(
-                IBufferResource* buffer,
-                size_t offset,
-                size_t size,
-                void* data) override
-            {
-                _uploadBufferData(
-                    m_commandBuffer->m_cmdList,
-                    static_cast<BufferResourceImpl*>(buffer),
-                    offset,
-                    size,
-                    data);
-            }
-
-            void setPipelineStateImpl(IPipelineState* state)
-            {
-                m_currentPipeline = static_cast<PipelineStateImpl*>(state);
-            }
-
-            Result _bindRenderState(
-                PipelineStateImpl* pipelineStateImpl,
-                Submitter* submitter);
-        };
 
         class RenderCommandEncoderImpl
             : public IRenderCommandEncoder
@@ -900,28 +2541,25 @@ protected:
             D3D12_PRIMITIVE_TOPOLOGY m_primitiveTopology;
 
             void init(
-                D3D12Renderer* renderer,
-                ExecutionFrameResources* frame,
+                D3D12Device* renderer,
+                TransientResourceHeapImpl* transientHeap,
                 CommandBufferImpl* cmdBuffer,
                 RenderPassLayoutImpl* renderPass,
                 FramebufferImpl* framebuffer)
             {
-                m_commandBuffer = cmdBuffer;
-                m_d3dCmdList = cmdBuffer->m_cmdList;
+                PipelineCommandEncoder::init(cmdBuffer);
                 m_preCmdList = nullptr;
                 m_device = renderer->m_device;
-                m_rendererBase = renderer;
                 m_renderPass = renderPass;
                 m_framebuffer = framebuffer;
-                m_frame = frame;
+                m_transientHeap = transientHeap;
                 m_boundVertexBuffers.clear();
                 m_boundIndexBuffer = nullptr;
                 m_primitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
                 m_primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
                 m_boundIndexFormat = DXGI_FORMAT_UNKNOWN;
                 m_boundIndexOffset = 0;
-                for (auto& boundPipeline : m_boundPipelines)
-                    boundPipeline = nullptr;
+                m_currentPipeline = nullptr;
 
                 // Set render target states.
                 m_d3dCmdList->OMSetRenderTargets(
@@ -1016,23 +2654,11 @@ protected:
                     }
                 }
             }
-            
-            virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
-            {
-                setPipelineStateImpl(state);
-            }
-            virtual SLANG_NO_THROW void SLANG_MCALL
-                bindRootShaderObject(IShaderObject* object) override
-            {
-                bindRootShaderObjectImpl(PipelineType::Graphics, object);
-            }
 
-            virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSet(
-                IPipelineLayout* layout,
-                UInt index,
-                IDescriptorSet* descriptorSet) override
+            virtual SLANG_NO_THROW Result SLANG_MCALL
+                bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
             {
-                setDescriptorSetImpl(PipelineType::Graphics, layout, index, descriptorSet);
+                return bindPipelineImpl(state, outRootObject);
             }
 
             virtual SLANG_NO_THROW void SLANG_MCALL
@@ -1147,7 +2773,10 @@ protected:
                 // Submit - setting for graphics
                 {
                     GraphicsSubmitter submitter(m_d3dCmdList);
-                    _bindRenderState(static_cast<PipelineStateImpl*>(pipelineState), &submitter);
+                    if(SLANG_FAILED(_bindRenderState(&submitter)))
+                    {
+                        assert(!"Failed to bind render state");
+                    }
                 }
 
                 m_d3dCmdList->IASetPrimitiveTopology(m_primitiveTopology);
@@ -1236,6 +2865,7 @@ protected:
                             m_renderPass->m_depthStencilAccess.finalState),
                         submitter);
                 }
+                m_framebuffer = nullptr;
             }
 
             virtual SLANG_NO_THROW void SLANG_MCALL
@@ -1253,7 +2883,7 @@ protected:
         {
             m_renderCommandEncoder.init(
                 m_renderer,
-                m_frame,
+                m_transientHeap,
                 this,
                 static_cast<RenderPassLayoutImpl*>(renderPass),
                 static_cast<FramebufferImpl*>(framebuffer));
@@ -1286,48 +2916,33 @@ protected:
                 PipelineCommandEncoder::endEncodingImpl();
             }
             void init(
-                D3D12Renderer* renderer,
-                ExecutionFrameResources* frame,
+                D3D12Device* renderer,
+                TransientResourceHeapImpl* transientHeap,
                 CommandBufferImpl* cmdBuffer)
             {
-                m_rendererBase = renderer;
-                m_commandBuffer = cmdBuffer;
-                m_d3dCmdList = cmdBuffer->m_cmdList;
+                PipelineCommandEncoder::init(cmdBuffer);
                 m_preCmdList = nullptr;
                 m_device = renderer->m_device;
-                m_frame = frame;
-                for (auto& boundPipeline : m_boundPipelines)
-                    boundPipeline = nullptr;
+                m_transientHeap = transientHeap;
+                m_currentPipeline = nullptr;
             }
 
-            virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
+            virtual SLANG_NO_THROW Result SLANG_MCALL
+                bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
             {
-                setPipelineStateImpl(state);
-            }
-            virtual SLANG_NO_THROW void SLANG_MCALL
-                bindRootShaderObject(IShaderObject* object) override
-            {
-                bindRootShaderObjectImpl(PipelineType::Compute, object);
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSet(
-                IPipelineLayout* layout,
-                UInt index,
-                IDescriptorSet* descriptorSet) override
-            {
-                setDescriptorSetImpl(PipelineType::Compute, layout, index, descriptorSet);
+                return bindPipelineImpl(state, outRootObject);
             }
 
             virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
             {
-                auto pipelineStateImpl = static_cast<PipelineStateImpl*>(m_currentPipeline.Ptr());
-
                 // Submit binding for compute
                 {
                     ComputeSubmitter submitter(m_d3dCmdList);
-                    _bindRenderState(pipelineStateImpl, &submitter);
+                    if(SLANG_FAILED(_bindRenderState(&submitter)))
+                    {
+                        assert(!"Failed to bind render state");
+                    }
                 }
-
                 m_d3dCmdList->Dispatch(x, y, z);
             }
         };
@@ -1336,7 +2951,7 @@ protected:
         virtual SLANG_NO_THROW void SLANG_MCALL
             encodeComputeCommands(IComputeCommandEncoder** outEncoder) override
         {
-            m_computeCommandEncoder.init(m_renderer, m_frame, this);
+            m_computeCommandEncoder.init(m_renderer, m_transientHeap, this);
             *outEncoder = &m_computeCommandEncoder;
         }
 
@@ -1360,7 +2975,7 @@ protected:
 
         public:
             CommandBufferImpl* m_commandBuffer;
-            void init(D3D12Renderer* renderer, CommandBufferImpl* commandBuffer)
+            void init(D3D12Device* renderer, CommandBufferImpl* commandBuffer)
             {
                 m_commandBuffer = commandBuffer;
             }
@@ -1371,11 +2986,15 @@ protected:
                 size_t srcOffset,
                 size_t size) override
             {
-                SLANG_UNUSED(dst);
-                SLANG_UNUSED(srcOffset);
-                SLANG_UNUSED(src);
-                SLANG_UNUSED(dstOffset);
-                SLANG_UNUSED(size);
+                auto dstBuffer = static_cast<BufferResourceImpl*>(dst);
+                auto srcBuffer = static_cast<BufferResourceImpl*>(src);
+
+                m_commandBuffer->m_cmdList->CopyBufferRegion(
+                    dstBuffer->m_resource.getResource(),
+                    dstOffset,
+                    srcBuffer->m_resource.getResource(),
+                    srcOffset,
+                    size);
             }
             virtual SLANG_NO_THROW void SLANG_MCALL uploadBufferData(
                 IBufferResource* dst,
@@ -1419,53 +3038,20 @@ protected:
         }
 
     public:
-        struct CommandBufferPool
-        {
-            List<RefPtr<CommandBufferImpl>> pool;
-            uint32_t allocIndex = 0;
-            RefPtr<CommandBufferImpl> allocCommandBuffer(D3D12Renderer* renderer, ExecutionFrameResources* frame)
-            {
-                if ((Index)allocIndex < pool.getCount())
-                {
-                    RefPtr<CommandBufferImpl> result = pool[allocIndex];
-                    result->init(renderer, frame);
-                    allocIndex++;
-                    return result;
-                }
-                RefPtr<CommandBufferImpl> cmdBuffer = new CommandBufferImpl();
-                cmdBuffer->init(renderer, frame);
-                pool.add(cmdBuffer);
-                return cmdBuffer;
-            }
-            void reset()
-            {
-                allocIndex = 0;
-            }
-        };
-        List<CommandBufferPool> m_commandBufferPools;
-        List<ExecutionFrameResources> m_frames;
-        uint32_t m_frameIndex = 0;
-        D3D12Renderer* m_renderer;
+        D3D12Device* m_renderer;
         ComPtr<ID3D12Device> m_device;
         ComPtr<ID3D12CommandQueue> m_d3dQueue;
         ComPtr<ID3D12Fence> m_fence;
         uint64_t m_fenceValue = 0;
         HANDLE globalWaitHandle;
         Desc m_desc;
-        Result init(
-            D3D12Renderer* renderer,
-            uint32_t frameCount,
-            uint32_t viewHeapSize,
-            uint32_t samplerHeapSize)
+        uint32_t m_queueIndex = 0;
+        
+        Result init(D3D12Device* device, uint32_t queueIndex)
         {
-            m_renderer = renderer;
-            m_device = renderer->m_device;
-            m_frames.setCount(frameCount);
-            m_commandBufferPools.setCount(frameCount);
-            for (uint32_t i = 0; i < frameCount; i++)
-            {
-                SLANG_RETURN_ON_FAIL(m_frames[i].init(m_device, viewHeapSize, samplerHeapSize));
-            }
+            m_queueIndex = queueIndex;
+            m_renderer = device;
+            m_device = device->m_device;
             D3D12_COMMAND_QUEUE_DESC queueDesc = {};
             queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
             SLANG_RETURN_ON_FAIL(m_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(m_d3dQueue.writeRef())));
@@ -1482,19 +3068,11 @@ protected:
         {
             wait();
             CloseHandle(globalWaitHandle);
+            m_renderer->m_queueIndexAllocator.free((int)m_queueIndex, 1);
         }
         virtual SLANG_NO_THROW const Desc& SLANG_MCALL getDesc() override
         {
             return m_desc;
-        }
-        virtual SLANG_NO_THROW Result SLANG_MCALL
-            createCommandBuffer(ICommandBuffer** outCommandBuffer) override
-        {
-            RefPtr<CommandBufferImpl> result =
-                m_commandBufferPools[m_frameIndex].allocCommandBuffer(
-                    m_renderer, &m_frames[m_frameIndex]);
-            *outCommandBuffer = result.detach();
-            return SLANG_OK;
         }
         
         virtual SLANG_NO_THROW void SLANG_MCALL
@@ -1508,21 +3086,21 @@ protected:
             }
             m_d3dQueue->ExecuteCommandLists((UINT)count, commandLists.getArrayView().getBuffer());
 
-            auto& frame = m_frames[m_frameIndex];
             m_fenceValue++;
-            m_d3dQueue->Signal(m_fence, m_fenceValue);
-            ResetEvent(frame.fenceEvent);
-            ResetEvent(globalWaitHandle);
-            m_fence->SetEventOnCompletion(m_fenceValue, frame.fenceEvent);
-            swapExecutionFrame();
-        }
 
-        void swapExecutionFrame()
-        {
-            m_frameIndex = (m_frameIndex + 1) % m_frames.getCount();
-            auto& frame = m_frames[m_frameIndex];
-            frame.reset();
-            m_commandBufferPools[m_frameIndex].reset();
+            for (uint32_t i = 0; i < count; i++)
+            {
+                if (i > 0 && commandBuffers[i] == commandBuffers[i - 1])
+                    continue;
+                auto cmdImpl = static_cast<CommandBufferImpl*>(commandBuffers[i]);
+                auto transientHeap = cmdImpl->m_transientHeap;
+                auto& waitInfo = transientHeap->getQueueWaitInfo(m_queueIndex);
+                waitInfo.waitValue = m_fenceValue;
+                ResetEvent(waitInfo.fenceEvent);
+                m_fence->SetEventOnCompletion(m_fenceValue, waitInfo.fenceEvent);
+            }
+            m_d3dQueue->Signal(m_fence, m_fenceValue);
+            ResetEvent(globalWaitHandle);
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL wait() override
@@ -1535,151 +3113,88 @@ protected:
         }
     };
 
-    class SwapchainImpl
-        : public ISwapchain
-        , public RefObject
+    class SwapchainImpl : public D3DSwapchainBase
     {
     public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        ISwapchain* getInterface(const Guid& guid)
+        ComPtr<ID3D12CommandQueue> m_queue;
+        ComPtr<IDXGIFactory> m_dxgiFactory;
+        ComPtr<IDXGISwapChain3> m_swapChain3;
+        ComPtr<ID3D12Fence> m_fence;
+        ShortList<HANDLE, kMaxNumRenderFrames> m_frameEvents;
+        uint64_t fenceValue = 0;
+        Result init(
+            D3D12Device* renderer,
+            const ISwapchain::Desc& swapchainDesc,
+            WindowHandle window)
         {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ISwapchain)
-                return static_cast<ISwapchain*>(this);
-            return nullptr;
+            m_queue = static_cast<CommandQueueImpl*>(swapchainDesc.queue)->m_d3dQueue;
+            m_dxgiFactory = renderer->m_deviceInfo.m_dxgiFactory;
+            SLANG_RETURN_ON_FAIL(
+                D3DSwapchainBase::init(swapchainDesc, window, DXGI_SWAP_EFFECT_FLIP_DISCARD));
+            renderer->m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_fence.writeRef()));
+
+            SLANG_RETURN_ON_FAIL(m_swapChain->QueryInterface(m_swapChain3.writeRef()));
+            for (uint32_t i = 0; i < swapchainDesc.imageCount; i++)
+            {
+                m_frameEvents.add(CreateEventEx(
+                    nullptr,
+                    false,
+                    CREATE_EVENT_INITIAL_SET | CREATE_EVENT_MANUAL_RESET,
+                    EVENT_ALL_ACCESS));
+            }
+            return SLANG_OK;
         }
 
-    public:
-        Result init(D3D12Renderer* renderer, const ISwapchain::Desc& desc, WindowHandle window)
+        virtual void createSwapchainBufferImages() override
         {
-            // Return fail on non-supported platforms.
-            switch (window.type)
-            {
-            case WindowHandle::Type::Win32Handle:
-                break;
-            default:
-                return SLANG_FAIL;
-            }
-
-            m_renderer = renderer;
-            m_desc = desc;
-            m_queue = static_cast<CommandQueueImpl*>(desc.queue);
-
-            // Describe the swap chain.
-            DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
-            swapChainDesc.BufferCount = desc.imageCount;
-            swapChainDesc.BufferDesc.Width = desc.width;
-            swapChainDesc.BufferDesc.Height = desc.height;
-            swapChainDesc.BufferDesc.Format = D3DUtil::getMapFormat(desc.format);
-            swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-            swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-            swapChainDesc.OutputWindow = (HWND)window.handleValues[0];
-            swapChainDesc.SampleDesc.Count = 1;
-            swapChainDesc.Windowed = TRUE;
-
-            if (!desc.enableVSync)
-            {
-                swapChainDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-            }
-
-            // Swap chain needs the queue so that it can force a flush on it.
-            ComPtr<IDXGISwapChain> swapChain;
-            SLANG_RETURN_ON_FAIL(m_renderer->m_deviceInfo.m_dxgiFactory->CreateSwapChain(
-                m_queue->m_d3dQueue, &swapChainDesc, swapChain.writeRef()));
-            SLANG_RETURN_ON_FAIL(swapChain->QueryInterface(m_swapChain.writeRef()));
-
-            if (!desc.enableVSync)
-            {
-                m_swapChainWaitableObject = m_swapChain->GetFrameLatencyWaitableObject();
-
-                int maxLatency = desc.imageCount - 2;
-
-                // Make sure the maximum latency is in the range required by dx12 runtime
-                maxLatency = (maxLatency < 1) ? 1 : maxLatency;
-                maxLatency = (maxLatency > DXGI_MAX_SWAP_CHAIN_BUFFERS)
-                                 ? DXGI_MAX_SWAP_CHAIN_BUFFERS
-                                 : maxLatency;
-
-                m_swapChain->SetMaximumFrameLatency(maxLatency);
-            }
-
-            // This sample does not support fullscreen transitions.
-            SLANG_RETURN_ON_FAIL(m_renderer->m_deviceInfo.m_dxgiFactory->MakeWindowAssociation(
-                (HWND)window.handleValues[0], DXGI_MWA_NO_ALT_ENTER));
-
-            m_renderTargetIndex = m_swapChain->GetCurrentBackBufferIndex();
-
-            for (uint32_t i = 0; i < desc.imageCount; i++)
+            m_images.clear();
+            
+            for (uint32_t i = 0; i < m_desc.imageCount; i++)
             {
                 ComPtr<ID3D12Resource> d3dResource;
                 m_swapChain->GetBuffer(i, IID_PPV_ARGS(d3dResource.writeRef()));
                 ITextureResource::Desc imageDesc = {};
                 imageDesc.setDefaults(IResource::Usage::RenderTarget);
                 imageDesc.init2D(
-                    IResource::Type::Texture2D, desc.format, desc.width, desc.height, 0);
+                    IResource::Type::Texture2D, m_desc.format, m_desc.width, m_desc.height, 0);
                 RefPtr<TextureResourceImpl> image = new TextureResourceImpl(imageDesc);
                 image->m_resource.setResource(d3dResource.get());
                 image->m_defaultState = D3D12_RESOURCE_STATE_PRESENT;
-                m_images.add(image);
+                ComPtr<ITextureResource> imageResourcePtr;
+                imageResourcePtr = image.Ptr();
+                m_images.add(imageResourcePtr);
             }
+            for (auto evt : m_frameEvents)
+                SetEvent(evt);
+        }
+        virtual IDXGIFactory* getDXGIFactory() override { return m_dxgiFactory; }
+        virtual IUnknown* getOwningDevice() override { return m_queue; }
+        virtual SLANG_NO_THROW int SLANG_MCALL acquireNextImage() override
+        {
+            auto result = (int)m_swapChain3->GetCurrentBackBufferIndex();
+            WaitForSingleObject(m_frameEvents[result], INFINITE);
+            ResetEvent(m_frameEvents[result]);
+            return result;
+        }
+        virtual SLANG_NO_THROW Result SLANG_MCALL present() override
+        {
+            SLANG_RETURN_ON_FAIL(D3DSwapchainBase::present());
+            fenceValue++;
+            m_fence->SetEventOnCompletion(fenceValue, m_frameEvents[m_swapChain3->GetCurrentBackBufferIndex()]);
+            m_queue->Signal(m_fence, fenceValue);
             return SLANG_OK;
         }
-        virtual SLANG_NO_THROW const Desc& SLANG_MCALL getDesc() override { return m_desc; }
-        virtual SLANG_NO_THROW Result
-            getImage(uint32_t index, ITextureResource** outResource) override
-        {
-            m_images[index]->addRef();
-            *outResource = m_images[index].Ptr();
-            return SLANG_OK;
-        }
-        virtual SLANG_NO_THROW Result present() override
-        {
-            if (m_swapChainWaitableObject)
-            {
-                // check if now is good time to present
-                // This doesn't wait - because the wait time is 0. If it returns WAIT_TIMEOUT it
-                // means that no frame is waiting to be be displayed so there is no point doing a
-                // present.
-                const bool shouldPresent =
-                    (WaitForSingleObjectEx(m_swapChainWaitableObject, 0, TRUE) != WAIT_TIMEOUT);
-                if (shouldPresent)
-                {
-                    m_swapChain->Present(0, 0);
-                }
-            }
-            else
-            {
-                if (SLANG_FAILED(m_swapChain->Present(1, 0)))
-                {
-                    return SLANG_FAIL;
-                }
-            }
-            // Update the render target index.
-            m_renderTargetIndex = m_swapChain->GetCurrentBackBufferIndex();
-            return SLANG_OK;
-        }
-
-        virtual SLANG_NO_THROW uint32_t acquireNextImage() override
-        {
-            return m_renderTargetIndex;
-        }
-
-    public:
-        D3D12Renderer* m_renderer = nullptr;
-        ISwapchain::Desc m_desc;
-        HANDLE m_swapChainWaitableObject = nullptr;
-        ComPtr<IDXGISwapChain3> m_swapChain;
-        RefPtr<CommandQueueImpl> m_queue;
-        uint32_t m_renderTargetIndex;
-        ShortList<RefPtr<TextureResourceImpl>> m_images;
     };
 
     static PROC loadProc(HMODULE module, char const* name);
 
-    Result createCommandQueueImpl(
-        uint32_t frameCount,
-        uint32_t viewHeapSize,
-        uint32_t samplerHeapSize,
-        CommandQueueImpl** outQueue);
+    Result createCommandQueueImpl(CommandQueueImpl** outQueue);
+
+    Result createTransientResourceHeapImpl(
+        size_t constantBufferSize,
+        uint32_t viewDescriptors,
+        uint32_t samplerDescriptors,
+        TransientResourceHeapImpl** outHeap);
 
     Result createBuffer(
         const D3D12_RESOURCE_DESC& resourceDesc,
@@ -1702,7 +3217,6 @@ protected:
         D3D_FEATURE_LEVEL featureLevel,
         DeviceInfo& outDeviceInfo);
 
-    
     struct ResourceCommandRecordInfo
     {
         ComPtr<ICommandBuffer> commandBuffer;
@@ -1711,7 +3225,7 @@ protected:
     ResourceCommandRecordInfo encodeResourceCommands()
     {
         ResourceCommandRecordInfo info;
-        m_resourceCommandQueue->createCommandBuffer(info.commandBuffer.writeRef());
+        m_resourceCommandTransientHeap->createCommandBuffer(info.commandBuffer.writeRef());
         info.d3dCommandList = static_cast<CommandBufferImpl*>(info.commandBuffer.get())->m_cmdList;
         return info;
     }
@@ -1719,10 +3233,15 @@ protected:
     {
         info.commandBuffer->close();
         m_resourceCommandQueue->executeCommandBuffer(info.commandBuffer);
-        m_resourceCommandQueue->wait();
+        m_resourceCommandTransientHeap->synchronizeAndReset();
     }
 
+    // D3D12Device members.
+
     Desc m_desc;
+
+    gfx::DeviceInfo m_info;
+    String m_adapterName;
 
     bool m_isInitialized = false;
 
@@ -1731,7 +3250,19 @@ protected:
     DeviceInfo m_deviceInfo;
     ID3D12Device* m_device = nullptr;
 
+    VirtualObjectPool m_queueIndexAllocator;
+
     RefPtr<CommandQueueImpl> m_resourceCommandQueue;
+    RefPtr<TransientResourceHeapImpl> m_resourceCommandTransientHeap;
+
+    D3D12GeneralDescriptorHeap m_rtvAllocator;
+    D3D12GeneralDescriptorHeap m_dsvAllocator;
+    // Space in the GPU-visible heaps is precious, so we will also keep
+    // around CPU-visible heaps for storing descriptors in a format
+    // that is ready for copying into the GPU-visible heaps as needed.
+    //
+    D3D12GeneralDescriptorHeap m_cpuViewHeap; ///< Cbv, Srv, Uav
+    D3D12GeneralDescriptorHeap m_cpuSamplerHeap; ///< Heap for samplers
 
     // Dll entry points
     PFN_D3D12_GET_DEBUG_INTERFACE m_D3D12GetDebugInterface = nullptr;
@@ -1741,118 +3272,142 @@ protected:
     bool m_nvapi = false;
 };
 
-
-Result D3D12Renderer::CommandBufferImpl::PipelineCommandEncoder::_bindRenderState(
-    PipelineStateImpl* pipelineStateImpl,
-    Submitter* submitter)
+SLANG_NO_THROW Result SLANG_MCALL D3D12Device::TransientResourceHeapImpl::synchronizeAndReset()
 {
-    auto commandList = m_commandBuffer->m_cmdList;
-    // TODO: we should only set some of this state as needed...
-
-    auto pipelineTypeIndex = (int)pipelineStateImpl->desc.type;
-    auto pipelineLayout = static_cast<PipelineLayoutImpl*>(pipelineStateImpl->m_pipelineLayout.get());
-
-    submitter->setRootSignature(pipelineLayout->m_rootSignature);
-    commandList->SetPipelineState(pipelineStateImpl->m_pipelineState);
-
-    ID3D12DescriptorHeap* heaps[] = {
-        m_frame->m_viewHeap.getHeap(),
-        m_frame->m_samplerHeap.getHeap(),
-    };
-    commandList->SetDescriptorHeaps(SLANG_COUNT_OF(heaps), heaps);
-
-    // We need to copy descriptors over from the descriptor sets
-    // (where they are stored in CPU-visible heaps) to the GPU-visible
-    // heaps so that they can be accessed by shader code.
-
-    Int descriptorSetCount = pipelineLayout->m_descriptorSetCount;
-    Int rootParameterIndex = 0;
-    for (Int dd = 0; dd < descriptorSetCount; ++dd)
+    Array<HANDLE, 16> waitHandles;
+    for (auto& waitInfo : m_waitInfos)
     {
-        auto descriptorSet = m_boundDescriptorSets[pipelineTypeIndex][dd];
-        auto descriptorSetLayout = descriptorSet->m_layout;
-
-        // TODO: require that `descriptorSetLayout` is compatible with
-        // `pipelineLayout->descriptorSetlayouts[dd]`.
-
-        {
-            if (auto descriptorCount = descriptorSetLayout->m_resourceCount)
-            {
-                auto& gpuHeap = m_frame->m_viewHeap;
-                auto gpuDescriptorTable = gpuHeap.allocate(int(descriptorCount));
-
-                auto& cpuHeap = *descriptorSet->m_resourceHeap;
-                auto cpuDescriptorTable = descriptorSet->m_resourceTable;
-
-                m_device->CopyDescriptorsSimple(
-                    UINT(descriptorCount),
-                    gpuHeap.getCpuHandle(gpuDescriptorTable),
-                    cpuHeap.getCpuHandle(int(cpuDescriptorTable)),
-                    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-                submitter->setRootDescriptorTable(
-                    int(rootParameterIndex++), gpuHeap.getGpuHandle(gpuDescriptorTable));
-            }
-        }
-        {
-            if (auto descriptorCount = descriptorSetLayout->m_samplerCount)
-            {
-                auto& gpuHeap = m_frame->m_samplerHeap;
-                auto gpuDescriptorTable = gpuHeap.allocate(int(descriptorCount));
-
-                auto& cpuHeap = *descriptorSet->m_samplerHeap;
-                auto cpuDescriptorTable = descriptorSet->m_samplerTable;
-
-                m_device->CopyDescriptorsSimple(
-                    UINT(descriptorCount),
-                    gpuHeap.getCpuHandle(gpuDescriptorTable),
-                    cpuHeap.getCpuHandle(int(cpuDescriptorTable)),
-                    D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-
-                submitter->setRootDescriptorTable(
-                    int(rootParameterIndex++), gpuHeap.getGpuHandle(gpuDescriptorTable));
-            }
-        }
-        if (auto rootConstantRangeCount = descriptorSetLayout->m_rootConstantRanges.getCount())
-        {
-            auto srcData = descriptorSet->m_rootConstantData.getBuffer();
-
-            for (auto& rootConstantRangeInfo : descriptorSetLayout->m_rootConstantRanges)
-            {
-                auto countOf32bitValues = rootConstantRangeInfo.size / sizeof(uint32_t);
-                submitter->setRootConstants(
-                    rootConstantRangeInfo.rootParamIndex,
-                    0,
-                    countOf32bitValues,
-                    srcData + rootConstantRangeInfo.offset);
-            }
-        }
+        if (waitInfo.waitValue != 0)
+            waitHandles.add(waitInfo.fenceEvent);
     }
-
+    WaitForMultipleObjects((DWORD)waitHandles.getCount(), waitHandles.getBuffer(), TRUE, INFINITE);
+    m_viewHeap.deallocateAll();
+    m_samplerHeap.deallocateAll();
+    m_commandListAllocId = 0;
+    SLANG_RETURN_ON_FAIL(m_commandAllocator->Reset());
+    Super::reset();
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createCommandQueueImpl(
-    uint32_t frameCount,
-    uint32_t viewHeapSize,
-    uint32_t samplerHeapSize,
-    D3D12Renderer::CommandQueueImpl** outQueue)
+Result D3D12Device::TransientResourceHeapImpl::createCommandBuffer(ICommandBuffer** outCmdBuffer)
 {
-    RefPtr<D3D12Renderer::CommandQueueImpl> queue = new D3D12Renderer::CommandQueueImpl();
-    SLANG_RETURN_ON_FAIL(queue->init(this, frameCount, viewHeapSize, samplerHeapSize));
+    if ((Index)m_commandListAllocId < m_commandBufferPool.getCount())
+    {
+        auto result = static_cast<D3D12Device::CommandBufferImpl*>(
+            m_commandBufferPool[m_commandListAllocId].get());
+        m_d3dCommandListPool[m_commandListAllocId]->Reset(m_commandAllocator, nullptr);
+        result->init(m_device, m_d3dCommandListPool[m_commandListAllocId], this);
+        ++m_commandListAllocId;
+        result->addRef();
+        *outCmdBuffer = result;
+        return SLANG_OK;
+    }
+    ComPtr<ID3D12GraphicsCommandList> cmdList;
+    m_device->m_device->CreateCommandList(
+        0,
+        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        m_commandAllocator,
+        nullptr,
+        IID_PPV_ARGS(cmdList.writeRef()));
+
+    m_d3dCommandListPool.add(cmdList);
+    RefPtr<CommandBufferImpl> cmdBuffer = new CommandBufferImpl();
+    cmdBuffer->init(m_device, cmdList, this);
+    ComPtr<ICommandBuffer> cmdBufferPtr;
+    *cmdBufferPtr.writeRef() = cmdBuffer.detach();
+    m_commandBufferPool.add(cmdBufferPtr);
+    ++m_commandListAllocId;
+    *outCmdBuffer = cmdBufferPtr.detach();
+    return SLANG_OK;
+}
+
+Result D3D12Device::PipelineCommandEncoder::_bindRenderState(Submitter* submitter)
+{
+    RefPtr<PipelineStateBase> newPipeline;
+    RootShaderObjectImpl* rootObjectImpl = &m_commandBuffer->m_rootShaderObject;
+    m_renderer->maybeSpecializePipeline(m_currentPipeline, rootObjectImpl, newPipeline);
+    PipelineStateImpl* newPipelineImpl = static_cast<PipelineStateImpl*>(newPipeline.Ptr());
+    auto commandList = m_d3dCmdList;
+    auto pipelineTypeIndex = (int)newPipelineImpl->desc.type;
+    auto programImpl = static_cast<ShaderProgramImpl*>(newPipelineImpl->m_program.get());
+    commandList->SetPipelineState(newPipelineImpl->m_pipelineState);
+    submitter->setRootSignature(programImpl->m_rootObjectLayout->m_rootSignature);
+    RefPtr<ShaderObjectLayoutImpl> specializedRootLayout;
+    SLANG_RETURN_ON_FAIL(rootObjectImpl->getSpecializedLayout(specializedRootLayout.writeRef()));
+    RootShaderObjectLayoutImpl* rootLayoutImpl =
+        static_cast<RootShaderObjectLayoutImpl*>(specializedRootLayout.Ptr());
+
+    ShortList<DescriptorTable> descriptorTables;       
+    auto descSetInfo = rootLayoutImpl->getDescriptorSetInfo();
+    auto heap = m_commandBuffer->m_transientHeap;
+    for (auto& descSet : rootLayoutImpl->m_gpuDescriptorSetInfos)
+    {
+        if (descSet.resourceDescriptorCount)
+        {
+            DescriptorTable table;
+            table.heap = &heap->m_viewHeap;
+            table.table = heap->m_viewHeap.allocate((int)descSet.resourceDescriptorCount);
+            descriptorTables.add(table);
+        }
+        if (descSet.samplerDescriptorCount)
+        {
+            DescriptorTable table;
+            table.heap = &heap->m_samplerHeap;
+            table.table = heap->m_samplerHeap.allocate((int)descSet.samplerDescriptorCount);
+            descriptorTables.add(table);
+        }
+    }
+    RootBindingState bindState = {};
+    bindState.device = m_renderer;
+    bindState.transientHeap = m_transientHeap;
+    auto descTablesView = descriptorTables.getArrayView();
+    bindState.descriptorTables = descTablesView.arrayView;
+    SLANG_RETURN_ON_FAIL(rootObjectImpl->bindObject(this, &bindState));
+    
+    for (Index i = 0; i < descriptorTables.getCount(); i++)
+    {
+        submitter->setRootDescriptorTable(
+            (int)i, descriptorTables[i].heap.getGpuHandle(descriptorTables[i].table));
+    }
+    return SLANG_OK;
+}
+
+Result D3D12Device::createTransientResourceHeapImpl(
+    size_t constantBufferSize,
+    uint32_t viewDescriptors,
+    uint32_t samplerDescriptors,
+    TransientResourceHeapImpl** outHeap)
+{
+    RefPtr<TransientResourceHeapImpl> result = new TransientResourceHeapImpl();
+    ITransientResourceHeap::Desc desc = {};
+    desc.constantBufferSize = constantBufferSize;
+    SLANG_RETURN_ON_FAIL(result->init(desc, this, viewDescriptors, samplerDescriptors));
+    *outHeap = result.detach();
+    return SLANG_OK;
+}
+
+Result D3D12Device::createCommandQueueImpl(D3D12Device::CommandQueueImpl** outQueue)
+{
+    int queueIndex = m_queueIndexAllocator.alloc(1);
+    // If we run out of queue index space, then the user is requesting too many queues.
+    if (queueIndex == -1)
+        return SLANG_FAIL;
+
+    RefPtr<D3D12Device::CommandQueueImpl> queue = new D3D12Device::CommandQueueImpl();
+    SLANG_RETURN_ON_FAIL(queue->init(this, (uint32_t)queueIndex));
     *outQueue = queue.detach();
     return SLANG_OK;
 }
 
-SlangResult SLANG_MCALL createD3D12Renderer(const IRenderer::Desc* desc, IRenderer** outRenderer)
+SlangResult SLANG_MCALL createD3D12Device(const IDevice::Desc* desc, IDevice** outDevice)
 {
-    RefPtr<D3D12Renderer> result = new D3D12Renderer();
+    RefPtr<D3D12Device> result = new D3D12Device();
     SLANG_RETURN_ON_FAIL(result->initialize(*desc));
-    *outRenderer = result.detach();
+    *outDevice = result.detach();
     return SLANG_OK;
 }
 
-/* static */PROC D3D12Renderer::loadProc(HMODULE module, char const* name)
+/* static */PROC D3D12Device::loadProc(HMODULE module, char const* name)
 {
     PROC proc = ::GetProcAddress(module, name);
     if (!proc)
@@ -1863,7 +3418,7 @@ SlangResult SLANG_MCALL createD3D12Renderer(const IRenderer::Desc* desc, IRender
     return proc;
 }
 
-D3D12Renderer::~D3D12Renderer()
+D3D12Device::~D3D12Device()
 {
 }
 
@@ -1932,24 +3487,7 @@ static void _initSrvDesc(IResource::Type resourceType, const ITextureResource::D
     }
 }
 
-static void _initBufferResourceDesc(size_t bufferSize, D3D12_RESOURCE_DESC& out)
-{
-    out = {};
-
-    out.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    out.Alignment = 0;
-    out.Width = bufferSize;
-    out.Height = 1;
-    out.DepthOrArraySize = 1;
-    out.MipLevels = 1;
-    out.Format = DXGI_FORMAT_UNKNOWN;
-    out.SampleDesc.Count = 1;
-    out.SampleDesc.Quality = 0;
-    out.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    out.Flags = D3D12_RESOURCE_FLAG_NONE;
-}
-
-Result D3D12Renderer::createBuffer(const D3D12_RESOURCE_DESC& resourceDesc, const void* srcData, size_t srcDataSize, D3D12Resource& uploadResource, D3D12_RESOURCE_STATES finalState, D3D12Resource& resourceOut)
+Result D3D12Device::createBuffer(const D3D12_RESOURCE_DESC& resourceDesc, const void* srcData, size_t srcDataSize, D3D12Resource& uploadResource, D3D12_RESOURCE_STATES finalState, D3D12Resource& resourceOut)
 {
    const  size_t bufferSize = size_t(resourceDesc.Width);
 
@@ -2001,7 +3539,7 @@ Result D3D12Renderer::createBuffer(const D3D12_RESOURCE_DESC& resourceDesc, cons
     return SLANG_OK;
 }
 
-Result D3D12Renderer::captureTextureToSurface(
+Result D3D12Device::captureTextureToSurface(
     D3D12Resource& resource,
     ResourceState state,
     ISlangBlob** outBlob,
@@ -2097,7 +3635,7 @@ Result D3D12Renderer::captureTextureToSurface(
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!! Renderer interface !!!!!!!!!!!!!!!!!!!!!!!!!!
 
-Result D3D12Renderer::_createDevice(DeviceCheckFlags deviceCheckFlags, const UnownedStringSlice& nameMatch, D3D_FEATURE_LEVEL featureLevel, DeviceInfo& outDeviceInfo)
+Result D3D12Device::_createDevice(DeviceCheckFlags deviceCheckFlags, const UnownedStringSlice& nameMatch, D3D_FEATURE_LEVEL featureLevel, DeviceInfo& outDeviceInfo)
 {
     outDeviceInfo.clear();
 
@@ -2203,11 +3741,25 @@ static bool _isSupportedNVAPIOp(ID3D12Device* dev, uint32_t op)
 #endif
 }
 
-Result D3D12Renderer::initialize(const Desc& desc)
+Result D3D12Device::initialize(const Desc& desc)
 {
     SLANG_RETURN_ON_FAIL(slangContext.initialize(desc.slang, SLANG_DXBC, "sm_5_1"));
 
-    SLANG_RETURN_ON_FAIL(GraphicsAPIRenderer::initialize(desc));
+    SLANG_RETURN_ON_FAIL(RendererBase::initialize(desc));
+
+    // Initialize queue index allocator.
+    // Support max 32 queues.
+    m_queueIndexAllocator.initPool(32);
+
+    // Initialize DeviceInfo
+    {
+        m_info.deviceType = DeviceType::DirectX12;
+        m_info.bindingStyle = BindingStyle::DirectX;
+        m_info.projectionStyle = ProjectionStyle::DirectX;
+        m_info.apiName = "Direct3D 12";
+        static const float kIdentity[] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        ::memcpy(m_info.identityProjectionMatrix, kIdentity, sizeof(kIdentity));
+    }
 
     // Rather than statically link against D3D, we load it dynamically.
 
@@ -2352,29 +3904,52 @@ Result D3D12Renderer::initialize(const Desc& desc)
     m_desc = desc;
 
     // Create a command queue for internal resource transfer operations.
-    SLANG_RETURN_ON_FAIL(createCommandQueueImpl(1, 32, 4, m_resourceCommandQueue.writeRef()));
+    SLANG_RETURN_ON_FAIL(createCommandQueueImpl(m_resourceCommandQueue.writeRef()));
+    SLANG_RETURN_ON_FAIL(createTransientResourceHeapImpl(0, 8, 4, m_resourceCommandTransientHeap.writeRef()));
 
-    SLANG_RETURN_ON_FAIL(m_cpuViewHeap.init   (m_device, 1024, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
-    SLANG_RETURN_ON_FAIL(m_cpuSamplerHeap.init(m_device, 64,   D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER));
+    SLANG_RETURN_ON_FAIL(m_cpuViewHeap.init(
+        m_device, 8192, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE));
+    SLANG_RETURN_ON_FAIL(m_cpuSamplerHeap.init(
+        m_device, 1024, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_DESCRIPTOR_HEAP_FLAG_NONE));
 
-    SLANG_RETURN_ON_FAIL(m_rtvAllocator.init    (m_device, 16, D3D12_DESCRIPTOR_HEAP_TYPE_RTV));
-    SLANG_RETURN_ON_FAIL(m_dsvAllocator.init    (m_device, 16, D3D12_DESCRIPTOR_HEAP_TYPE_DSV));
-    SLANG_RETURN_ON_FAIL(m_viewAllocator.init   (m_device, 64, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
-    SLANG_RETURN_ON_FAIL(m_samplerAllocator.init(m_device, 16, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER));
+    SLANG_RETURN_ON_FAIL(m_rtvAllocator.init(
+        m_device, 16, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE));
+    SLANG_RETURN_ON_FAIL(m_dsvAllocator.init(
+        m_device, 16, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE));
+
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (m_deviceInfo.m_adapter)
+    {
+        DXGI_ADAPTER_DESC adapterDesc;
+        m_deviceInfo.m_adapter->GetDesc(&adapterDesc);
+        m_adapterName = String::fromWString(adapterDesc.Description);
+        m_info.adapterName = m_adapterName.begin();
+    }
 
     m_isInitialized = true;
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createCommandQueue(const ICommandQueue::Desc& desc, ICommandQueue** outQueue)
+Result D3D12Device::createTransientResourceHeap(
+    const ITransientResourceHeap::Desc& desc,
+    ITransientResourceHeap** outHeap)
+{
+    RefPtr<TransientResourceHeapImpl> heap;
+    SLANG_RETURN_ON_FAIL(
+        createTransientResourceHeapImpl(desc.constantBufferSize, 8192, 1024, heap.writeRef()));
+    *outHeap = heap.detach();
+    return SLANG_OK;
+}
+
+Result D3D12Device::createCommandQueue(const ICommandQueue::Desc& desc, ICommandQueue** outQueue)
 {
     RefPtr<CommandQueueImpl> queue;
-    SLANG_RETURN_ON_FAIL(createCommandQueueImpl(8, 4096, 1024, queue.writeRef()));
+    SLANG_RETURN_ON_FAIL(createCommandQueueImpl(queue.writeRef()));
     *outQueue = queue.detach();
     return SLANG_OK;
 }
 
-SLANG_NO_THROW Result SLANG_MCALL D3D12Renderer::createSwapchain(
+SLANG_NO_THROW Result SLANG_MCALL D3D12Device::createSwapchain(
     const ISwapchain::Desc& desc, WindowHandle window, ISwapchain** outSwapchain)
 {
     RefPtr<SwapchainImpl> swapchain = new SwapchainImpl();
@@ -2383,7 +3958,7 @@ SLANG_NO_THROW Result SLANG_MCALL D3D12Renderer::createSwapchain(
     return SLANG_OK;
 }
 
-SlangResult D3D12Renderer::readTextureResource(
+SlangResult D3D12Device::readTextureResource(
     ITextureResource* resource,
     ResourceState state,
     ISlangBlob** outBlob,
@@ -2416,6 +3991,8 @@ static D3D12_RESOURCE_STATES _calcResourceState(IResource::Usage usage)
         case Usage::ShaderResource:         return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         case Usage::GenericRead:            return D3D12_RESOURCE_STATE_GENERIC_READ;
+        case Usage::CopySource:             return D3D12_RESOURCE_STATE_COPY_SOURCE;
+        case Usage::CopyDest:               return D3D12_RESOURCE_STATE_COPY_DEST;
         default: return D3D12_RESOURCE_STATES(0);
     }
 }
@@ -2461,7 +4038,7 @@ static D3D12_RESOURCE_DIMENSION _calcResourceDimension(IResource::Type type)
     }
 }
 
-Result D3D12Renderer::createTextureResource(IResource::Usage initialUsage, const ITextureResource::Desc& descIn, const ITextureResource::Data* initData, ITextureResource** outResource)
+Result D3D12Device::createTextureResource(IResource::Usage initialUsage, const ITextureResource::Desc& descIn, const ITextureResource::SubresourceData* initData, ITextureResource** outResource)
 {
     // Description of uploading on Dx12
     // https://msdn.microsoft.com/en-us/library/windows/desktop/dn899215%28v=vs.85%29.aspx
@@ -2609,6 +4186,8 @@ Result D3D12Renderer::createTextureResource(IResource::Usage initialUsage, const
 
             for (int j = 0; j < numMipMaps; ++j)
             {
+                auto srcSubresource = initData[j];
+
                 const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& layout = layouts[j];
                 const D3D12_SUBRESOURCE_FOOTPRINT& footprint = layout.Footprint;
 
@@ -2616,25 +4195,34 @@ Result D3D12Renderer::createTextureResource(IResource::Usage initialUsage, const
 
                 assert(footprint.Width == mipSize.width && footprint.Height == mipSize.height && footprint.Depth == mipSize.depth);
 
-                const ptrdiff_t dstMipRowPitch = ptrdiff_t(layouts[j].Footprint.RowPitch);
-                const ptrdiff_t srcMipRowPitch = ptrdiff_t(initData->mipRowStrides[j]);
+                auto mipRowSize = mipRowSizeInBytes[j];
 
-                assert(dstMipRowPitch >= srcMipRowPitch);
+                const ptrdiff_t dstMipRowPitch = ptrdiff_t(footprint.RowPitch);
+                const ptrdiff_t srcMipRowPitch = ptrdiff_t(srcSubresource.strideY);
 
-                const uint8_t* srcRow = (const uint8_t*)initData->subResources[subResourceIndex];
-                uint8_t* dstRow = p + layouts[j].Offset;
+                const ptrdiff_t dstMipLayerPitch = ptrdiff_t(footprint.RowPitch*footprint.Height);
+                const ptrdiff_t srcMipLayerPitch = ptrdiff_t(srcSubresource.strideZ);
 
-                // Copy the depth each mip
+                // Our outer loop will copy the depth layers one at a time.
+                //
+                const uint8_t* srcLayer = (const uint8_t*) srcSubresource.data;
+                uint8_t* dstLayer = p + layouts[j].Offset;
                 for (int l = 0; l < mipSize.depth; l++)
                 {
-                    // Copy rows
+                    // Our inner loop will copy the rows one at a time.
+                    //
+                    const uint8_t* srcRow = srcLayer;
+                    uint8_t* dstRow = dstLayer;
                     for (int k = 0; k < mipSize.height; ++k)
                     {
-                        ::memcpy(dstRow, srcRow, srcMipRowPitch);
+                        ::memcpy(dstRow, srcRow, (size_t)mipRowSize);
 
                         srcRow += srcMipRowPitch;
                         dstRow += dstMipRowPitch;
                     }
+
+                    srcLayer += srcMipLayerPitch;
+                    dstLayer += dstMipLayerPitch;
                 }
 
                 //assert(srcRow == (const uint8_t*)(srcMip.getBuffer() + srcMip.getCount()));
@@ -2678,7 +4266,7 @@ Result D3D12Renderer::createTextureResource(IResource::Usage initialUsage, const
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createBufferResource(IResource::Usage initialUsage, const IBufferResource::Desc& descIn, const void* initData, IBufferResource** outResource)
+Result D3D12Device::createBufferResource(IResource::Usage initialUsage, const IBufferResource::Desc& descIn, const void* initData, IBufferResource** outResource)
 {
     BufferResource::Desc srcDesc(descIn);
     srcDesc.setDefaults(initialUsage);
@@ -2782,7 +4370,7 @@ static D3D12_COMPARISON_FUNC translateComparisonFunc(ComparisonFunc func)
     }
 }
 
-Result D3D12Renderer::createSamplerState(ISamplerState::Desc const& desc, ISamplerState** outSampler)
+Result D3D12Device::createSamplerState(ISamplerState::Desc const& desc, ISamplerState** outSampler)
 {
     D3D12_FILTER_REDUCTION_TYPE dxReduction = translateFilterReduction(desc.reductionOp);
     D3D12_FILTER dxFilter;
@@ -2814,7 +4402,7 @@ Result D3D12Renderer::createSamplerState(ISamplerState::Desc const& desc, ISampl
 
     auto samplerHeap = &m_cpuSamplerHeap;
 
-    D3D12HostVisibleDescriptor cpuDescriptor;
+    D3D12Descriptor cpuDescriptor;
     samplerHeap->allocate(&cpuDescriptor);
     m_device->CreateSampler(&dxDesc, cpuDescriptor.cpuHandle);
 
@@ -2829,7 +4417,7 @@ Result D3D12Renderer::createSamplerState(ISamplerState::Desc const& desc, ISampl
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createTextureView(ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView)
+Result D3D12Device::createTextureView(ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView)
 {
     auto resourceImpl = (TextureResourceImpl*) texture;
 
@@ -2844,6 +4432,7 @@ Result D3D12Renderer::createTextureView(ITextureResource* texture, IResourceView
     case IResourceView::Type::RenderTarget:
         {
             SLANG_RETURN_ON_FAIL(m_rtvAllocator.allocate(&viewImpl->m_descriptor));
+            viewImpl->m_allocator = &m_rtvAllocator;
             D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
             rtvDesc.Format = D3DUtil::getMapFormat(desc.format);
             switch (desc.renderTarget.shape)
@@ -2874,6 +4463,7 @@ Result D3D12Renderer::createTextureView(ITextureResource* texture, IResourceView
     case IResourceView::Type::DepthStencil:
         {
             SLANG_RETURN_ON_FAIL(m_dsvAllocator.allocate(&viewImpl->m_descriptor));
+            viewImpl->m_allocator = &m_dsvAllocator;
             D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
             dsvDesc.Format = D3DUtil::getMapFormat(desc.format);
             switch (desc.renderTarget.shape)
@@ -2899,14 +4489,16 @@ Result D3D12Renderer::createTextureView(ITextureResource* texture, IResourceView
             // TODO: need to support the separate "counter resource" for the case
             // of append/consume buffers with attached counters.
 
-            SLANG_RETURN_ON_FAIL(m_viewAllocator.allocate(&viewImpl->m_descriptor));
+            SLANG_RETURN_ON_FAIL(m_cpuViewHeap.allocate(&viewImpl->m_descriptor));
+            viewImpl->m_allocator = &m_cpuViewHeap;
             m_device->CreateUnorderedAccessView(resourceImpl->m_resource, nullptr, nullptr, viewImpl->m_descriptor.cpuHandle);
         }
         break;
 
     case IResourceView::Type::ShaderResource:
         {
-            SLANG_RETURN_ON_FAIL(m_viewAllocator.allocate(&viewImpl->m_descriptor));
+            SLANG_RETURN_ON_FAIL(m_cpuViewHeap.allocate(&viewImpl->m_descriptor));
+            viewImpl->m_allocator = &m_cpuViewHeap;
 
             // Need to construct the D3D12_SHADER_RESOURCE_VIEW_DESC because otherwise TextureCube is not accessed
             // appropriately (rather than just passing nullptr to CreateShaderResourceView)
@@ -2925,7 +4517,7 @@ Result D3D12Renderer::createTextureView(ITextureResource* texture, IResourceView
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createBufferView(IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView)
+Result D3D12Device::createBufferView(IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView)
 {
     auto resourceImpl = (BufferResourceImpl*) buffer;
     auto resourceDesc = *resourceImpl->getDesc();
@@ -2965,7 +4557,8 @@ Result D3D12Renderer::createBufferView(IBufferResource* buffer, IResourceView::D
             // TODO: need to support the separate "counter resource" for the case
             // of append/consume buffers with attached counters.
 
-            SLANG_RETURN_ON_FAIL(m_viewAllocator.allocate(&viewImpl->m_descriptor));
+            SLANG_RETURN_ON_FAIL(m_cpuViewHeap.allocate(&viewImpl->m_descriptor));
+            viewImpl->m_allocator = &m_cpuViewHeap;
             m_device->CreateUnorderedAccessView(resourceImpl->m_resource, nullptr, &uavDesc, viewImpl->m_descriptor.cpuHandle);
         }
         break;
@@ -2994,7 +4587,8 @@ Result D3D12Renderer::createBufferView(IBufferResource* buffer, IResourceView::D
                 srvDesc.Buffer.NumElements = UINT(resourceDesc.sizeInBytes / gfxGetFormatSize(desc.format));
             }
 
-            SLANG_RETURN_ON_FAIL(m_viewAllocator.allocate(&viewImpl->m_descriptor));
+            SLANG_RETURN_ON_FAIL(m_cpuViewHeap.allocate(&viewImpl->m_descriptor));
+            viewImpl->m_allocator = &m_cpuViewHeap;
             m_device->CreateShaderResourceView(resourceImpl->m_resource, &srvDesc, viewImpl->m_descriptor.cpuHandle);
         }
         break;
@@ -3004,7 +4598,7 @@ Result D3D12Renderer::createBufferView(IBufferResource* buffer, IResourceView::D
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createFramebuffer(IFramebuffer::Desc const& desc, IFramebuffer** outFb)
+Result D3D12Device::createFramebuffer(IFramebuffer::Desc const& desc, IFramebuffer** outFb)
 {
     RefPtr<FramebufferImpl> framebuffer = new FramebufferImpl();
     framebuffer->renderTargetViews.setCount(desc.renderTargetCount);
@@ -3041,7 +4635,7 @@ Result D3D12Renderer::createFramebuffer(IFramebuffer::Desc const& desc, IFramebu
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createFramebufferLayout(
+Result D3D12Device::createFramebufferLayout(
     IFramebufferLayout::Desc const& desc, IFramebufferLayout** outLayout)
 {
     RefPtr<FramebufferLayoutImpl> layout = new FramebufferLayoutImpl();
@@ -3064,7 +4658,7 @@ Result D3D12Renderer::createFramebufferLayout(
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createRenderPassLayout(
+Result D3D12Device::createRenderPassLayout(
     const IRenderPassLayout::Desc& desc,
     IRenderPassLayout** outRenderPassLayout)
 {
@@ -3074,7 +4668,7 @@ Result D3D12Renderer::createRenderPassLayout(
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createInputLayout(const InputElementDesc* inputElements, UInt inputElementCount, IInputLayout** outLayout)
+Result D3D12Device::createInputLayout(const InputElementDesc* inputElements, UInt inputElementCount, IInputLayout** outLayout)
 {
     RefPtr<InputLayoutImpl> layout(new InputLayoutImpl);
 
@@ -3121,7 +4715,7 @@ Result D3D12Renderer::createInputLayout(const InputElementDesc* inputElements, U
     return SLANG_OK;
 }
 
-Result D3D12Renderer::readBufferResource(
+Result D3D12Device::readBufferResource(
     IBufferResource* bufferIn,
     size_t offset,
     size_t size,
@@ -3175,867 +4769,105 @@ Result D3D12Renderer::readBufferResource(
     return SLANG_OK;
 }
 
-void D3D12Renderer::DescriptorSetImpl::setConstantBuffer(UInt range, UInt index, IBufferResource* buffer)
+Result D3D12Device::createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram)
 {
-    auto dxDevice = m_renderer->m_device;
-
-    auto resourceImpl = (BufferResourceImpl*) buffer;
-    auto resourceDesc = resourceImpl->getDesc();
-
-    // Constant buffer view size must be a multiple of 256 bytes, so we round it up here.
-    const size_t alignedSizeInBytes = D3DUtil::calcAligned(resourceDesc->sizeInBytes, 256);
-
-    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-    cbvDesc.BufferLocation = resourceImpl->m_resource.getResource()->GetGPUVirtualAddress();
-    cbvDesc.SizeInBytes = UINT(alignedSizeInBytes);
-
-    auto& rangeInfo = m_layout->m_ranges[range];
-
-#ifdef _DEBUG
-    switch(rangeInfo.type)
-    {
-    default:
-        assert(!"incorrect slot type");
-        break;
-
-    case DescriptorSlotType::UniformBuffer:
-    case DescriptorSlotType::DynamicUniformBuffer:
-        break;
-    }
-#endif
-
-    auto arrayIndex = rangeInfo.arrayIndex + index;
-    auto descriptorIndex = m_resourceTable + arrayIndex;
-
-    m_resourceObjects[arrayIndex] = resourceImpl;
-    dxDevice->CreateConstantBufferView(
-        &cbvDesc,
-        m_resourceHeap->getCpuHandle(int(descriptorIndex)));
-}
-
-void D3D12Renderer::DescriptorSetImpl::setResource(UInt range, UInt index, IResourceView* view)
-{
-    auto dxDevice = m_renderer->m_device;
-
-    auto viewImpl = (ResourceViewImpl*) view;
-
-    auto& rangeInfo = m_layout->m_ranges[range];
-
-    // TODO: validation that slot type matches view
-
-    auto arrayIndex = rangeInfo.arrayIndex + index;
-    auto descriptorIndex = m_resourceTable + arrayIndex;
-
-    m_resourceObjects[arrayIndex] = viewImpl;
-    dxDevice->CopyDescriptorsSimple(
-        1,
-        m_resourceHeap->getCpuHandle(int(descriptorIndex)),
-        viewImpl->m_descriptor.cpuHandle,
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-}
-
-void D3D12Renderer::DescriptorSetImpl::setSampler(UInt range, UInt index, ISamplerState* sampler)
-{
-    auto dxDevice = m_renderer->m_device;
-
-    auto samplerImpl = (SamplerStateImpl*) sampler;
-
-    auto& rangeInfo = m_layout->m_ranges[range];
-
-#ifdef _DEBUG
-    switch(rangeInfo.type)
-    {
-    default:
-        assert(!"incorrect slot type");
-        break;
-
-    case DescriptorSlotType::Sampler:
-        break;
-    }
-#endif
-
-    auto arrayIndex = rangeInfo.arrayIndex + index;
-    auto descriptorIndex = m_samplerTable + arrayIndex;
-
-    m_samplerObjects[arrayIndex] = samplerImpl;
-    dxDevice->CopyDescriptorsSimple(
-        1,
-        m_samplerHeap->getCpuHandle(int(descriptorIndex)),
-        samplerImpl->m_descriptor.cpuHandle,
-        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-}
-
-void D3D12Renderer::DescriptorSetImpl::setCombinedTextureSampler(
-    UInt range,
-    UInt index,
-    IResourceView*   textureView,
-    ISamplerState*   sampler)
-{
-    auto dxDevice = m_renderer->m_device;
-
-    auto viewImpl = (ResourceViewImpl*) textureView;
-    auto samplerImpl = (SamplerStateImpl*) sampler;
-
-    auto& rangeInfo = m_layout->m_ranges[range];
-
-#ifdef _DEBUG
-    switch(rangeInfo.type)
-    {
-    default:
-        assert(!"incorrect slot type");
-        break;
-
-    case DescriptorSlotType::CombinedImageSampler:
-        break;
-    }
-#endif
-
-    auto arrayIndex = rangeInfo.arrayIndex + index;
-    auto resourceDescriptorIndex = m_resourceTable + arrayIndex;
-    auto samplerDescriptorIndex = m_samplerTable + arrayIndex;
-
-    m_resourceObjects[arrayIndex] = viewImpl;
-    dxDevice->CopyDescriptorsSimple(
-        1,
-        m_resourceHeap->getCpuHandle(int(resourceDescriptorIndex)),
-        viewImpl->m_descriptor.cpuHandle,
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-    m_samplerObjects[arrayIndex] = samplerImpl;
-    dxDevice->CopyDescriptorsSimple(
-        1,
-        m_samplerHeap->getCpuHandle(int(samplerDescriptorIndex)),
-        samplerImpl->m_descriptor.cpuHandle,
-        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-}
-
-void D3D12Renderer::DescriptorSetImpl::setRootConstants(
-    UInt range,
-    UInt offset,
-    UInt size,
-    void const* data)
-{
-    // The `range` parameter is the index of the range in
-    // the original `DescriptorSetLayout::Desc`, which must
-    // have been a root-constant range for this call to be
-    // valid.
-    //
-    SLANG_ASSERT(range < UInt(m_layout->m_ranges.getCount()));
-    auto& rangeInfo = m_layout->m_ranges[range];
-    SLANG_ASSERT(rangeInfo.type == DescriptorSlotType::RootConstant);
-
-    // The `arrayIndex` in that descriptor slot range is the "flat"
-    // index of the root constant range that the user is trying
-    // to write into. The root constant range represents a range
-    // of bytes in the `m_rootConstantData` buffer.
-    //
-    auto rootConstantIndex = rangeInfo.arrayIndex;
-    SLANG_ASSERT(rootConstantIndex >= 0);
-    SLANG_ASSERT(rootConstantIndex < m_layout->m_rootConstantRanges.getCount());
-    auto& rootConstantRangeInfo = m_layout->m_rootConstantRanges[rootConstantIndex];
-    SLANG_ASSERT(offset + size <= UInt(rootConstantRangeInfo.size));
-
-    memcpy((char*)m_rootConstantData.getBuffer() + rootConstantRangeInfo.offset + offset, data, size);
-}
-
-Result D3D12Renderer::createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram)
-{
-    if (desc.slangProgram && desc.slangProgram->getSpecializationParamCount() != 0)
+    RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl();
+    shaderProgram->m_pipelineType = desc.pipelineType;
+    shaderProgram->slangProgram = desc.slangProgram;
+    RootShaderObjectLayoutImpl::create(
+        this,
+        desc.slangProgram,
+        desc.slangProgram->getLayout(),
+        shaderProgram->m_rootObjectLayout.writeRef());
+    if (desc.slangProgram->getSpecializationParamCount() != 0)
     {
         // For a specializable program, we don't invoke any actual slang compilation yet.
-        RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl();
-        initProgramCommon(shaderProgram, desc);
         *outProgram = shaderProgram.detach();
         return SLANG_OK;
     }
-
-    if( desc.kernelCount == 0 )
+    // For a fully specialized program, read and store its kernel code in `shaderProgram`.
+    auto programReflection = desc.slangProgram->getLayout();
+    for (SlangUInt i = 0; i < programReflection->getEntryPointCount(); i++)
     {
-        return createProgramFromSlang(this, desc, outProgram);
-    }
-
-    RefPtr<ShaderProgramImpl> program(new ShaderProgramImpl());
-    program->m_pipelineType = desc.pipelineType;
-
-    if (desc.pipelineType == PipelineType::Compute)
-    {
-        auto computeKernel = desc.findKernel(StageType::Compute);
-        program->m_computeShader.insertRange(0, (const uint8_t*) computeKernel->codeBegin, computeKernel->getCodeSize());
-    }
-    else
-    {
-        auto vertexKernel = desc.findKernel(StageType::Vertex);
-        auto fragmentKernel = desc.findKernel(StageType::Fragment);
-
-        program->m_vertexShader.insertRange(0, (const uint8_t*) vertexKernel->codeBegin, vertexKernel->getCodeSize());
-        program->m_pixelShader.insertRange(0, (const uint8_t*) fragmentKernel->codeBegin, fragmentKernel->getCodeSize());
-    }
-    initProgramCommon(program, desc);
-
-    *outProgram = program.detach();
-    return SLANG_OK;
-}
-
-Result D3D12Renderer::createDescriptorSetLayout(const IDescriptorSetLayout::Desc& desc, IDescriptorSetLayout** outLayout)
-{
-    Int rangeCount = desc.slotRangeCount;
-
-    // For our purposes, there are three main cases of descriptor ranges to consider:
-    //
-    // 1. Resources: CBV, SRV, UAV
-    //
-    // 2. Samplers
-    //
-    // 3. Combined texture/sampler pairs
-    //
-    // The combined case presents challenges, because we will implement
-    // them as both a resource slot and a sampler slot, and for conveience
-    // in the indexing logic, it would be nice it they "lined up."
-    //
-    // We will start by counting how many ranges, and how many
-    // descriptors, of each type we have.
-    //
-
-    Int dedicatedResourceCount = 0;
-    Int dedicatedSamplerCount = 0;
-    Int combinedCount = 0;
-
-    Int dedicatedResourceRangeCount = 0;
-    Int dedicatedSamplerRangeCount = 0;
-    Int combinedRangeCount = 0;
-
-    for(Int rr = 0; rr < rangeCount; ++rr)
-    {
-        auto rangeDesc = desc.slotRanges[rr];
-        switch(rangeDesc.type)
+        auto entryPointInfo = programReflection->getEntryPointByIndex(i);
+        auto stage = entryPointInfo->getStage();
+        ComPtr<ISlangBlob> kernelCode;
+        ComPtr<ISlangBlob> diagnostics;
+        auto compileResult = desc.slangProgram->getEntryPointCode(
+            (SlangInt)i, 0, kernelCode.writeRef(), diagnostics.writeRef());
+        if (diagnostics)
         {
-        case DescriptorSlotType::Sampler:
-            dedicatedSamplerCount += rangeDesc.count;
-            dedicatedSamplerRangeCount++;
+            // TODO: report compile error.
+        }
+        SLANG_RETURN_ON_FAIL(compileResult);
+        List<uint8_t>* shaderCodeDestBuffer = nullptr;
+        switch (stage)
+        {
+        case SLANG_STAGE_COMPUTE:
+            shaderCodeDestBuffer = &shaderProgram->m_computeShader;
             break;
-
-        case DescriptorSlotType::CombinedImageSampler:
-            combinedCount += rangeDesc.count;
-            combinedRangeCount++;
+        case SLANG_STAGE_VERTEX:
+            shaderCodeDestBuffer = &shaderProgram->m_vertexShader;
             break;
-
-        case DescriptorSlotType::RootConstant:
-            // A root constant slot range doesn't contribute
-            // to the toal number of resources or samplers.
+        case SLANG_STAGE_FRAGMENT:
+            shaderCodeDestBuffer = &shaderProgram->m_pixelShader;
             break;
-
         default:
-            dedicatedResourceCount += rangeDesc.count;
-            dedicatedResourceRangeCount++;
-            break;
+            SLANG_ASSERT(!"unsupported shader stage.");
+            return SLANG_FAIL;
         }
+        shaderCodeDestBuffer->addRange(
+            reinterpret_cast<const uint8_t*>(kernelCode->getBufferPointer()),
+            (Index)kernelCode->getBufferSize());
     }
-
-    // Now we know how many ranges we have to allocate space for,
-    // and also how they need to be arranged.
-    //
-    // Each "combined" range will map to two ranges in the D3D
-    // descriptor tables.
-
-    RefPtr<DescriptorSetLayoutImpl> descriptorSetLayoutImpl = new DescriptorSetLayoutImpl();
-
-    // We know the total number of resource and sampler "slots" that an instance
-    // of this descriptor-set layout would need:
-    //
-    descriptorSetLayoutImpl->m_resourceCount = combinedCount + dedicatedResourceCount;
-    descriptorSetLayoutImpl->m_samplerCount = combinedCount + dedicatedSamplerCount;
-
-    // We can start by allocating the D3D root parameter info needed for the
-    // descriptor set, based on the total number or ranges we need, which
-    // we can compute from the combined and dedicated counts:
-    //
-    Int totalResourceRangeCount = combinedRangeCount + dedicatedResourceRangeCount;
-    Int totalSamplerRangeCount  = combinedRangeCount + dedicatedSamplerRangeCount;
-
-    if( totalResourceRangeCount )
-    {
-        D3D12_ROOT_PARAMETER dxRootParameter = {};
-        dxRootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        dxRootParameter.DescriptorTable.NumDescriptorRanges = UINT(totalResourceRangeCount);
-        descriptorSetLayoutImpl->m_dxRootParameters.add(dxRootParameter);
-    }
-    if( totalSamplerRangeCount )
-    {
-        D3D12_ROOT_PARAMETER dxRootParameter = {};
-        dxRootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        dxRootParameter.DescriptorTable.NumDescriptorRanges = UINT(totalSamplerRangeCount);
-        descriptorSetLayoutImpl->m_dxRootParameters.add(dxRootParameter);
-    }
-
-    // Next we can allocate space for all the D3D register ranges we need,
-    // again based on totals that we can compute easily:
-    //
-    Int totalRangeCount = totalResourceRangeCount + totalSamplerRangeCount;
-    descriptorSetLayoutImpl->m_dxRanges.setCount(totalRangeCount);
-
-    // Now we will walk through the ranges in  the order they were
-    // specified, so that we can fill in the "range info" required for
-    // binding parameters into descriptor sets allocated with this layout.
-    //
-    // This effectively determines the space required in two arrays
-    // in each descriptor set: one for resources, and one for samplers.
-    // A "combined" descriptor requires space in both arrays. The entries
-    // for "dedicated" samplers/resources always come after those for
-    // "combined" descriptors in the same array, so that a single index
-    // can be used for both arrays in the combined case.
-    //
-
-    {
-        Int samplerCounter = 0;
-        Int resourceCounter = 0;
-        Int combinedCounter = 0;
-        for(Int rr = 0; rr < rangeCount; ++rr)
-        {
-            auto rangeDesc = desc.slotRanges[rr];
-
-            DescriptorSetLayoutImpl::RangeInfo rangeInfo;
-
-            rangeInfo.type = rangeDesc.type;
-            rangeInfo.count = rangeDesc.count;
-
-            switch(rangeDesc.type)
-            {
-            default:
-                // Default case is a dedicated resource, and its index in the
-                // resource array will come after all the combined entries.
-                rangeInfo.arrayIndex = combinedCount + resourceCounter;
-                resourceCounter += rangeInfo.count;
-                break;
-
-            case DescriptorSlotType::Sampler:
-                // A dedicated sampler comes after all the entries for
-                // combined texture/samplers in the sampler array.
-                rangeInfo.arrayIndex = combinedCount + samplerCounter;
-                samplerCounter += rangeInfo.count;
-                break;
-
-            case DescriptorSlotType::CombinedImageSampler:
-                // Combined descriptors take entries at the front of
-                // the resource and sampler arrays.
-                rangeInfo.arrayIndex = combinedCounter;
-                combinedCounter += rangeInfo.count;
-                break;
-
-            case DescriptorSlotType::RootConstant:
-                {
-                    // A root constant range is a bit different than
-                    // the other cases because it does *not* introduce
-                    // any descriptor rangess into D3D12 descriptor tables,
-                    // while it *does* introduce a distinct root parameter.
-                    //
-                    D3D12_ROOT_PARAMETER dxRootParameter = {};
-                    dxRootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-                    dxRootParameter.Constants.Num32BitValues = UINT(rangeInfo.count) / UINT(sizeof(uint32_t));
-
-                    // When binding the data for the range to the pipeline,
-                    // we will need to know the "root parameter index" in
-                    // order to identify the range to D3D12.
-                    //
-                    auto rootParameterIndex = descriptorSetLayoutImpl->m_dxRootParameters.getCount();
-                    descriptorSetLayoutImpl->m_dxRootParameters.add(dxRootParameter);
-
-                    // We need to create and store additional tracking data
-                    // to remember this root constant range and how to set it.
-                    //
-                    // The additional data includes the D3D12 root parameter index,
-                    // and the size of the range (in bytes).
-                    //
-                    DescriptorSetLayoutImpl::RootConstantRangeInfo rootConstantRangeInfo;
-                    rootConstantRangeInfo.rootParamIndex = rootParameterIndex;
-                    rootConstantRangeInfo.size = rangeDesc.count;
-                    //
-                    // We also need to compute an offset for the data in the backing
-                    // storage of a particular descriptor set; we also use this as
-                    // a place to update the  total size of the root constant data.
-                    //
-                    // Note: We don't deal with alignment issues here. D3D12 requires
-                    // all root-constant data to be in multiples of 4 bytes and to be
-                    // 4-byte aligned, and that should mean that alignment works
-                    // out without extra effort on our part.
-                    //
-                    rootConstantRangeInfo.offset = descriptorSetLayoutImpl->m_rootConstantDataSize;
-                    descriptorSetLayoutImpl->m_rootConstantDataSize += rootConstantRangeInfo.size;
-
-                    auto rootConstantIndex = descriptorSetLayoutImpl->m_rootConstantRanges.getCount();
-                    descriptorSetLayoutImpl->m_rootConstantRanges.add(rootConstantRangeInfo);
-
-                    rangeInfo.arrayIndex = rootConstantIndex;
-                    rangeInfo.count = 1;
-                }
-                break;
-            }
-
-            descriptorSetLayoutImpl->m_ranges.add(rangeInfo);
-        }
-    }
-
-    // Finally, we will go through and fill in ready-to-go D3D
-    // register range information.
-    {
-        UInt cbvRegisterCounter = 0;
-        UInt srvRegisterCounter = 0;
-        UInt uavRegisterCounter = 0;
-        UInt samplerRegisterCounter = 0;
-
-        Int resourceRangeCounter = 0;
-        Int samplerRangeCounter = 0;
-        Int combinedRangeCounter = 0;
-
-        for(Int rr = 0; rr < rangeCount; ++rr)
-        {
-            auto rangeDesc = desc.slotRanges[rr];
-            Int bindingCount = rangeDesc.count;
-
-            // All of these descriptor ranges will be initialized
-            // with a "space" of zero, with the assumption that
-            // the actual space number will come from when they are
-            // used as part of a pipeline layout.
-            //
-            Int bindingSpace = 0;
-
-            Int dxRangeIndex = -1;
-            Int dxPairedSamplerRangeIndex = -1;
-            switch(rangeDesc.type)
-            {
-            default:
-                // Default case is a dedicated resource, and its index in the
-                // resource array will come after all the combined entries.
-                dxRangeIndex = combinedRangeCount + resourceRangeCounter;
-                resourceRangeCounter++;
-                break;
-
-            case DescriptorSlotType::Sampler:
-                // A dedicated sampler comes after all the entries for
-                // combined texture/samplers in the sampler array.
-                dxRangeIndex = totalResourceRangeCount + combinedRangeCount + samplerRangeCounter;
-                samplerRangeCounter++;
-                break;
-
-            case DescriptorSlotType::CombinedImageSampler:
-                // Combined descriptors take entries at the front of
-                // the resource and sampler arrays.
-                dxRangeIndex = combinedRangeCounter;
-                dxPairedSamplerRangeIndex = totalResourceRangeCount + combinedRangeCounter;
-                combinedRangeCounter++;
-                break;
-
-
-            case DescriptorSlotType::RootConstant:
-                {
-                    // A root constant range consumes a `b` register binding
-                    // under the D3D12 rules, because it is represented as
-                    // a `cbuffer` or `ConstantBuffer` declaration in HLSL.
-                    //
-                    // We need to allocate a register for the root constant
-                    // buffer here to make the bindings line up, but we
-                    // will skip out of the rest of the logic (via a `continue`
-                    // so that this range doesn't turn into a descriptor
-                    // range in one of the D3D12 descriptor tables.
-                    //
-                    Int dxRegister = rangeDesc.binding;
-                    if( dxRegister < 0 )
-                    {
-                        dxRegister = cbvRegisterCounter;
-                    }
-                    cbvRegisterCounter = dxRegister + bindingCount;
-
-                    auto rootConstantRangeIndex = descriptorSetLayoutImpl->m_ranges[rr].arrayIndex;
-                    auto rootParamIndex = descriptorSetLayoutImpl->m_rootConstantRanges[rootConstantRangeIndex].rootParamIndex;
-
-                    // The root constant range is represented in the D3D12
-                    // root signature as its own root parameter (not in any
-                    // table), and that root parameter needs to be set up
-                    // to reference the correct binding space and index.
-                    //
-                    auto& dxRootParam = descriptorSetLayoutImpl->m_dxRootParameters[rootParamIndex];
-                    dxRootParam.Constants.RegisterSpace = UINT(bindingSpace);
-                    dxRootParam.Constants.ShaderRegister = UINT(dxRegister);
-                    continue;
-                }
-                break;
-            }
-
-            D3D12_DESCRIPTOR_RANGE& dxRange = descriptorSetLayoutImpl->m_dxRanges[dxRangeIndex];
-            memset(&dxRange, 0, sizeof(dxRange));
-
-            Int dxRegister = rangeDesc.binding;
-
-            switch(rangeDesc.type)
-            {
-            default:
-                // ERROR: unsupported slot type.
-                break;
-
-            case DescriptorSlotType::Sampler:
-                {
-                    if( dxRegister < 0 )
-                    {
-                        dxRegister = samplerRegisterCounter;
-                    }
-                    samplerRegisterCounter = dxRegister + bindingCount;
-
-                    dxRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-                    dxRange.NumDescriptors = UINT(bindingCount);
-                    dxRange.BaseShaderRegister = UINT(dxRegister);
-                    dxRange.RegisterSpace = UINT(bindingSpace);
-                    dxRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-                }
-                break;
-
-            case DescriptorSlotType::SampledImage:
-            case DescriptorSlotType::UniformTexelBuffer:
-                {
-                    if( dxRegister < 0 )
-                    {
-                        dxRegister = srvRegisterCounter;
-                    }
-                    srvRegisterCounter = dxRegister + bindingCount;
-
-                    dxRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-                    dxRange.NumDescriptors = UINT(bindingCount);
-                    dxRange.BaseShaderRegister = UINT(dxRegister);
-                    dxRange.RegisterSpace = UINT(bindingSpace);
-                    dxRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-                }
-                break;
-
-            case DescriptorSlotType::CombinedImageSampler:
-                {
-                    // The combined texture/sampler case basically just
-                    // does the work of both the SRV and sampler cases above.
-                    //
-                    // TODO(tfoley): The current API for passing down an
-                    // explicit register/binding can't handle the requirement
-                    // that we specify *two* registers/bindings for the
-                    // combined image/sampler case.
-                    //
-                    // Realistically, the `Renderer` implementation for
-                    // targes that don't support combined texture/sampler
-                    // bindings should just error out when a client attempts
-                    // to create a descriptor set that uses them (rather than
-                    // the current behavior which adds a lot of complexity
-                    // in the name of trying to make them work).
-
-                    {
-                        // Here's the SRV logic:
-                        Int srvRegister = dxRegister;
-                        if( srvRegister < 0 )
-                        {
-                            srvRegister = srvRegisterCounter;
-                        }
-                        srvRegisterCounter = srvRegister + bindingCount;
-
-                        dxRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-                        dxRange.NumDescriptors = UINT(bindingCount);
-                        dxRange.BaseShaderRegister = UINT(srvRegister);
-                        dxRange.RegisterSpace = UINT(bindingSpace);
-                        dxRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-                    }
-
-                    {
-                        // And here we do the sampler logic at the "paired" index.
-                        D3D12_DESCRIPTOR_RANGE& dxPairedSamplerRange = descriptorSetLayoutImpl->m_dxRanges[dxPairedSamplerRangeIndex];
-                        memset(&dxPairedSamplerRange, 0, sizeof(dxPairedSamplerRange));
-
-                        Int samplerRegister = dxRegister;
-                        if( samplerRegister < 0 )
-                        {
-                            samplerRegister = samplerRegisterCounter;
-                        }
-                        samplerRegisterCounter = samplerRegister + bindingCount;
-
-                        dxPairedSamplerRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-                        dxPairedSamplerRange.NumDescriptors = UINT(bindingCount);
-                        dxPairedSamplerRange.BaseShaderRegister = UINT(samplerRegister);
-                        dxPairedSamplerRange.RegisterSpace = UINT(bindingSpace);
-                        dxPairedSamplerRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-                    }
-
-                }
-                break;
-
-
-            case DescriptorSlotType::InputAttachment:
-            case DescriptorSlotType::StorageImage:
-            case DescriptorSlotType::StorageTexelBuffer:
-            case DescriptorSlotType::StorageBuffer:
-            case DescriptorSlotType::DynamicStorageBuffer:
-                {
-                    if( dxRegister < 0 )
-                    {
-                        dxRegister = uavRegisterCounter;
-                    }
-                    uavRegisterCounter = dxRegister + bindingCount;
-
-                    dxRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-                    dxRange.NumDescriptors = UINT(bindingCount);
-                    dxRange.BaseShaderRegister = UINT(dxRegister);
-                    dxRange.RegisterSpace = UINT(bindingSpace);
-                    dxRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-                }
-                break;
-            case DescriptorSlotType::ReadOnlyStorageBuffer:
-            {
-                if (dxRegister < 0)
-                {
-                    dxRegister = srvRegisterCounter;
-                }
-                srvRegisterCounter = dxRegister + bindingCount;
-
-                dxRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-                dxRange.NumDescriptors = UINT(bindingCount);
-                dxRange.BaseShaderRegister = UINT(dxRegister);
-                dxRange.RegisterSpace = UINT(bindingSpace);
-                dxRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-            }
-            break;
-            case DescriptorSlotType::UniformBuffer:
-            case DescriptorSlotType::DynamicUniformBuffer:
-                {
-                    if( dxRegister < 0 )
-                    {
-                        dxRegister = cbvRegisterCounter;
-                    }
-                    cbvRegisterCounter = dxRegister + bindingCount;
-
-                    dxRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-                    dxRange.NumDescriptors = UINT(bindingCount);
-                    dxRange.BaseShaderRegister = UINT(dxRegister);
-                    dxRange.RegisterSpace = UINT(bindingSpace);
-                    dxRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-                }
-                break;
-
-
-
-
-            }
-        }
-    }
-
-    *outLayout = descriptorSetLayoutImpl.detach();
+    *outProgram = shaderProgram.detach();
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createPipelineLayout(const IPipelineLayout::Desc& desc, IPipelineLayout** outLayout)
+Result D3D12Device::createShaderObjectLayout(
+    slang::TypeLayoutReflection* typeLayout,
+    ShaderObjectLayoutBase** outLayout)
 {
-    static const UInt kMaxRanges = 16;
-    static const UInt kMaxRootParameters = 32;
-
-    D3D12_DESCRIPTOR_RANGE ranges[kMaxRanges];
-    D3D12_ROOT_PARAMETER rootParameters[kMaxRootParameters];
-
-    UInt rangeCount = 0;
-    UInt rootParameterCount = 0;
-
-    auto descriptorSetCount = desc.descriptorSetCount;
-
-    Int spaceCounter = 0;
-
-    // We are going to make two passes over the descriptor set layouts
-    // that are being used to build the pipeline layout. In the first
-    // pass we will collect all the descriptor ranges that have been
-    // specified, applying an offset to their register spaces as needed.
-    //
-    for(UInt dd = 0; dd < descriptorSetCount; ++dd)
-    {
-        auto& descriptorSetInfo = desc.descriptorSets[dd];
-        auto descriptorSetLayout = (DescriptorSetLayoutImpl*) descriptorSetInfo.layout;
-
-        // For now we assume that the register space used for
-        // logical descriptor set #N will be space N.
-        //
-        // TODO: This might need to be revisited in the future because
-        // a single logical descriptor set might need to encompass stuff
-        // that comes from multiple spaces (e.g., if it contains an unbounded
-        // array).
-        //
-        Int space = descriptorSetInfo.space;
-        if( space < 0 )
-        {
-            space = spaceCounter;
-        }
-        spaceCounter = space+1;
-
-        // Copy descriptor range information from the set layout into our
-        // temporary copy (this is required because the same set layout
-        // might be applied to different ranges).
-        //
-        // API design note: this copy step could be avoided if the D3D
-        // API allowed for a "space offset" to be applied as part of
-        // a descriptor-table root parameter.
-        //
-        for(auto setDescriptorRange : descriptorSetLayout->m_dxRanges)
-        {
-            auto& range = ranges[rangeCount++];
-            range = setDescriptorRange;
-            range.RegisterSpace = UINT(space);
-
-            // HACK: in order to deal with SM5.0 shaders, `u` registers
-            // in `space0` need to start with a number *after* the number
-            // of `SV_Target` outputs that will be used.
-            //
-            // TODO: This is clearly a mess, and doing this behavior here
-            // means it *won't* work for SM5.1 where the restriction is
-            // lifted. The only real alternative is to rely on explicit
-            // register numbers (e.g., from shader reflection) but that
-            // goes against the simplicity that this API layer strives for
-            // (everything so far has been set up to work correctly with
-            // automatic assignment of bindings).
-            //
-            if( range.RegisterSpace == 0
-                && range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV )
-            {
-                range.BaseShaderRegister += UINT(desc.renderTargetCount);
-            }
-        }
-    }
-
-    // In our second pass, we will copy over root parameters, which
-    // may end up pointing into the list of ranges from the first step.
-    //
-    auto rangePtr = &ranges[0];
-    for(UInt dd = 0; dd < descriptorSetCount; ++dd)
-    {
-        auto& descriptorSetInfo = desc.descriptorSets[dd];
-        auto descriptorSetLayout = (DescriptorSetLayoutImpl*) descriptorSetInfo.layout;
-
-        // For now we assume that the register space used for
-        // logical descriptor set #N will be space N.
-        //
-        // Note: this is the same assumption made in the first
-        // loop, and any change/fix will need to be made to
-        // both places consistently.
-        //
-        UInt bindingSpace   = dd;
-
-        // Copy root parameter information from the set layout to our
-        // overall pipeline layout.
-        for( auto setRootParameter : descriptorSetLayout->m_dxRootParameters )
-        {
-            auto& rootParameter = rootParameters[rootParameterCount++];
-            rootParameter = setRootParameter;
-
-            switch( rootParameter.ParameterType )
-            {
-            default:
-                break;
-
-            case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
-                // In the case where this parameter is a descriptor table, it
-                // needs to point into our array of ranges (with offsets applied),
-                // so we will fix up those pointers here.
-                //
-                rootParameter.DescriptorTable.pDescriptorRanges = rangePtr;
-                rangePtr += rootParameter.DescriptorTable.NumDescriptorRanges;
-                break;
-
-            case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
-                // In the case where the parameter is a root constant range,
-                // it needs to reflect the register space for the descriptor
-                // set, as computed based on sets specified.
-                //
-                rootParameter.Constants.RegisterSpace = UINT(bindingSpace);
-                break;
-            }
-        }
-    }
-
-    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
-    rootSignatureDesc.NumParameters = UINT(rootParameterCount);
-    rootSignatureDesc.pParameters = rootParameters;
-
-    // TODO: static samplers should be reasonably easy to support...
-    rootSignatureDesc.NumStaticSamplers = 0;
-    rootSignatureDesc.pStaticSamplers = nullptr;
-
-    // TODO: only set this flag if needed (requires creating root
-    // signature at same time as pipeline state...).
-    //
-    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    ComPtr<ID3DBlob> signature;
-    ComPtr<ID3DBlob> error;
-    if( SLANG_FAILED(m_D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.writeRef(), error.writeRef())) )
-    {
-        fprintf(stderr, "error: D3D12SerializeRootSignature failed");
-        if( error )
-        {
-            fprintf(stderr, ": %s\n", (const char*) error->GetBufferPointer());
-        }
-        return SLANG_FAIL;
-    }
-
-    ComPtr<ID3D12RootSignature> rootSignature;
-    SLANG_RETURN_ON_FAIL(m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(rootSignature.writeRef())));
-
-
-    RefPtr<PipelineLayoutImpl> pipelineLayoutImpl = new PipelineLayoutImpl();
-    pipelineLayoutImpl->m_rootSignature = rootSignature;
-    pipelineLayoutImpl->m_descriptorSetCount = descriptorSetCount;
-    *outLayout = pipelineLayoutImpl.detach();
+    RefPtr<ShaderObjectLayoutImpl> layout;
+    SLANG_RETURN_ON_FAIL(
+        ShaderObjectLayoutImpl::createForElementType(
+        this, typeLayout, layout.writeRef()));
+    *outLayout = layout.detach();
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createDescriptorSet(
-    IDescriptorSetLayout* layout,
-    IDescriptorSet::Flag::Enum flag,
-    IDescriptorSet** outDescriptorSet)
+Result D3D12Device::createShaderObject(
+    ShaderObjectLayoutBase* layout,
+    IShaderObject** outObject)
 {
-    auto layoutImpl = (DescriptorSetLayoutImpl*) layout;
-
-    RefPtr<DescriptorSetImpl> descriptorSetImpl = new DescriptorSetImpl();
-    descriptorSetImpl->m_renderer = this;
-    descriptorSetImpl->m_layout = layoutImpl;
-
-    // We allocate CPU-visible descriptor tables to providing the
-    // backing storage for each descriptor set. GPU-visible storage
-    // will only be allocated as needed during per-frame logic in
-    // order to ensure that a descriptor set it available for use
-    // in rendering.
-    //
-    Int resourceCount = layoutImpl->m_resourceCount;
-    if( resourceCount )
-    {
-        auto resourceHeap = &m_cpuViewHeap;
-        descriptorSetImpl->m_resourceHeap = resourceHeap;
-        descriptorSetImpl->m_resourceTable = resourceHeap->allocate(int(resourceCount));
-        descriptorSetImpl->m_resourceObjects.setCount(resourceCount);
-    }
-
-    Int samplerCount = layoutImpl->m_samplerCount;
-    if( samplerCount )
-    {
-        auto samplerHeap = &m_cpuSamplerHeap;
-        descriptorSetImpl->m_samplerHeap = samplerHeap;
-        descriptorSetImpl->m_samplerTable = samplerHeap->allocate(int(samplerCount));
-        descriptorSetImpl->m_samplerObjects.setCount(samplerCount);
-    }
-
-    descriptorSetImpl->m_rootConstantData.setCount(layoutImpl->m_rootConstantDataSize);
-
-    *outDescriptorSet = descriptorSetImpl.detach();
+    RefPtr<ShaderObjectImpl> shaderObject;
+    SLANG_RETURN_ON_FAIL(ShaderObjectImpl::create(
+        this, reinterpret_cast<ShaderObjectLayoutImpl*>(layout),
+        shaderObject.writeRef()));
+    *outObject = shaderObject.detach();
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createGraphicsPipelineState(const GraphicsPipelineStateDesc& inDesc, IPipelineState** outState)
+Result D3D12Device::createGraphicsPipelineState(const GraphicsPipelineStateDesc& inDesc, IPipelineState** outState)
 {
     GraphicsPipelineStateDesc desc = inDesc;
-    preparePipelineDesc(desc);
-
-    auto pipelineLayoutImpl = (PipelineLayoutImpl*) desc.pipelineLayout;
     auto programImpl = (ShaderProgramImpl*) desc.program;
+
+    if (!programImpl->m_rootObjectLayout->m_rootSignature)
+    {
+        RefPtr<PipelineStateImpl> pipelineStateImpl = new PipelineStateImpl();
+        pipelineStateImpl->init(desc);
+        *outState = pipelineStateImpl.detach();
+        return SLANG_OK;
+    }
+
+    // Only actually create a D3D12 pipeline state if the pipeline is fully specialized.
     auto inputLayoutImpl = (InputLayoutImpl*) desc.inputLayout;
 
     // Describe and create the graphics pipeline state object (PSO)
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 
-    psoDesc.pRootSignature = pipelineLayoutImpl->m_rootSignature;
+    psoDesc.pRootSignature = programImpl->m_rootObjectLayout->m_rootSignature;
 
     psoDesc.VS = { programImpl->m_vertexShader.getBuffer(), SIZE_T(programImpl->m_vertexShader.getCount()) };
     psoDesc.PS = { programImpl->m_pixelShader .getBuffer(), SIZE_T(programImpl->m_pixelShader .getCount()) };
@@ -4128,13 +4960,18 @@ Result D3D12Renderer::createGraphicsPipelineState(const GraphicsPipelineStateDes
     return SLANG_OK;
 }
 
-Result D3D12Renderer::createComputePipelineState(const ComputePipelineStateDesc& inDesc, IPipelineState** outState)
+Result D3D12Device::createComputePipelineState(const ComputePipelineStateDesc& inDesc, IPipelineState** outState)
 {
     ComputePipelineStateDesc desc = inDesc;
-    preparePipelineDesc(desc);
 
-    auto pipelineLayoutImpl = (PipelineLayoutImpl*) desc.pipelineLayout;
     auto programImpl = (ShaderProgramImpl*) desc.program;
+    if (!programImpl->m_rootObjectLayout->m_rootSignature)
+    {
+        RefPtr<PipelineStateImpl> pipelineStateImpl = new PipelineStateImpl();
+        pipelineStateImpl->init(desc);
+        *outState = pipelineStateImpl.detach();
+        return SLANG_OK;
+    }
 
     // Only actually create a D3D12 pipeline state if the pipeline is fully specialized.
     ComPtr<ID3D12PipelineState> pipelineState;
@@ -4142,7 +4979,7 @@ Result D3D12Renderer::createComputePipelineState(const ComputePipelineStateDesc&
     {
         // Describe and create the compute pipeline state object
         D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
-        computeDesc.pRootSignature = pipelineLayoutImpl->m_rootSignature;
+        computeDesc.pRootSignature = programImpl->m_rootObjectLayout->m_rootSignature;
         computeDesc.CS = {
             programImpl->m_computeShader.getBuffer(),
             SIZE_T(programImpl->m_computeShader.getCount())};

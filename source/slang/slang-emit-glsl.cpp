@@ -737,6 +737,17 @@ void GLSLSourceEmitter::emitLoopControlDecorationImpl(IRLoopControlDecoration* d
     }
 }
 
+void GLSLSourceEmitter::_emitSpecialFloatImpl(IRType* type, const char* valueExpr)
+{
+    if( type->getOp() != kIROp_FloatType )
+    {
+        emitType(type);
+    }
+    m_writer->emit("(");
+    m_writer->emit(valueExpr);
+    m_writer->emit(")");
+}
+
 void GLSLSourceEmitter::emitSimpleValueImpl(IRInst* inst) 
 {
     switch (inst->getOp())
@@ -753,14 +764,38 @@ void GLSLSourceEmitter::emitSimpleValueImpl(IRInst* inst)
                     default: 
                     
                     case BaseType::Int8:
+                    {
+                        emitType(type);
+                        m_writer->emit("(");
+                        m_writer->emit(litInst->value.intVal);
+                        m_writer->emit(")");
+                        return;
+                    }
                     case BaseType::Int16:
+                    {
+                        m_writer->emit(litInst->value.intVal);
+                        m_writer->emit("S");
+                        return;
+                    }
                     case BaseType::Int:
                     {
                         m_writer->emit(litInst->value.intVal);
                         return;
                     }
                     case BaseType::UInt8:
+                    {
+                        emitType(type);
+                        m_writer->emit("(");
+                        m_writer->emit(UInt(litInst->value.intVal));
+                        m_writer->emit("U)");
+                        return;
+                    }
                     case BaseType::UInt16:
+                    {
+                        m_writer->emit(UInt(litInst->value.intVal));
+                        m_writer->emit("US");
+                        return;
+                    }
                     case BaseType::UInt:
                     {
                         m_writer->emit(UInt(litInst->value.intVal));
@@ -789,26 +824,43 @@ void GLSLSourceEmitter::emitSimpleValueImpl(IRInst* inst)
         {
             IRConstant* constantInst = static_cast<IRConstant*>(inst);
 
+            auto type = constantInst->getDataType();
             IRConstant::FloatKind kind = constantInst->getFloatKind();
 
             switch (kind)
             {
                 case IRConstant::FloatKind::Nan:
                 {
-                    m_writer->emit("(0.0 / 0.0)");
+                    _emitSpecialFloatImpl(type, "0.0 / 0.0");
                     return;
                 }
                 case IRConstant::FloatKind::PositiveInfinity:
                 {
-                    m_writer->emit("(1.0 / 0.0)");
+                    _emitSpecialFloatImpl(type, "1.0 / 0.0");
                     return;
                 }
                 case IRConstant::FloatKind::NegativeInfinity:
                 {
-                    m_writer->emit("(-1.0 / 0.0)");
+                    _emitSpecialFloatImpl(type, "-1.0 / 0.0");
                     return;
                 }
-                default: break;
+                default:
+                {
+                    m_writer->emit(((IRConstant*) inst)->value.floatVal);
+                    switch( type->getOp() )
+                    {
+                    case kIROp_HalfType:
+                        m_writer->emit("HF");
+                        break;
+                    case kIROp_DoubleType:
+                        m_writer->emit("LF");
+                        break;
+                    default:
+                        break;
+                    }
+
+                    return;
+                }
             }
             break;
         }
@@ -1822,6 +1874,7 @@ void GLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
                     // We know that the acceleration structure type will translate
                     // to the one from that extension:
                     //
+                    _requireRayTracing();
                     m_writer->emit("accelerationStructureNV");
                 }
                 else
@@ -1831,17 +1884,13 @@ void GLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
                     // could provide the `accelerationSturctureEXT` type, but there
                     // can be drivers that provide only one and not the other.
                     //
-                    // Because we can't pick one upon just seeing the type, we need to
-                    // emit the type here but *not* call `_requireRayTracing()` or
-                    // anything like it, because we don't yet know the specific extension
-                    // we should ask for.
+                    // For now we will just kludge this by assuming that any driver
+                    // that supports one of these extensions supports the other.
                     //
-                    // TODO: We might eventually want to have this step set a flag that
-                    // will cause a compilation error if nothing else in the code requires
-                    // a specific concrete ray-tracing extension. Ideally all of these
-                    // details could be subusmed under the capability system sooner or
-                    // later.
-                    // 
+                    // TODO: Revisit that decision once the driver landscape is more stable/clear.
+                    //
+                    _requireRayTracing();
+
                     m_writer->emit("accelerationStructureEXT");
                 }
                 break;

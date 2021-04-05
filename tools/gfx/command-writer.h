@@ -10,7 +10,6 @@ namespace gfx
 enum class CommandName
 {
     SetPipelineState,
-    SetDescriptorSet,
     BindRootShaderObject,
     SetFramebuffer,
     ClearFrame,
@@ -128,28 +127,10 @@ public:
         m_commands.add(Command(CommandName::SetPipelineState, offset));
     }
 
-    void setDescriptorSet(
-        PipelineType pipelineType,
-        IPipelineLayout* layout,
-        UInt index,
-        IDescriptorSet* descriptorSet)
-    {
-        uint32_t pipelineLayoutOffset = encodeObject(layout);
-        uint32_t descSetOffset = encodeObject(descriptorSet);
-        m_commands.add(Command(
-            CommandName::SetDescriptorSet,
-            (uint32_t)pipelineType,
-            pipelineLayoutOffset,
-            (uint32_t)index,
-            descSetOffset));
-    }
-
-    void bindRootShaderObject(PipelineType pipelineType, IShaderObject* object)
+    void bindRootShaderObject(IShaderObject* object)
     {
         auto rootOffset = encodeObject(object);
-        m_commands.add(Command(
-            CommandName::BindRootShaderObject,
-            (uint32_t)pipelineType, rootOffset));
+        m_commands.add(Command(CommandName::BindRootShaderObject, rootOffset));
     }
 
     void uploadBufferData(IBufferResource* buffer, size_t offset, size_t size, void* data)
