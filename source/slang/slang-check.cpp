@@ -18,9 +18,6 @@ namespace Slang
         PassThroughMode compilerType;
     };
 
-    const Guid IID_ISlangSharedLibraryLoader = SLANG_UUID_ISlangSharedLibraryLoader;
-    const Guid IID_ISlangUnknown = SLANG_UUID_ISlangUnknown;
-
     class SinkSharedLibraryLoader : public RefObject, public ISlangSharedLibraryLoader
     {
     public:
@@ -57,7 +54,7 @@ namespace Slang
     protected:
         ISlangUnknown* getInterface(const Guid& guid)
         {
-            return (guid == IID_ISlangUnknown || guid == IID_ISlangSharedLibraryLoader) ? static_cast<ISlangSharedLibraryLoader*>(this) : nullptr;
+            return (guid == ISlangUnknown::getTypeGuid() || guid == ISlangSharedLibraryLoader::getTypeGuid()) ? static_cast<ISlangSharedLibraryLoader*>(this) : nullptr;
         }
         ISlangSharedLibraryLoader* m_loader;
         DiagnosticSink* m_sink;
@@ -146,7 +143,7 @@ namespace Slang
             if (SLANG_FAILED(locator(m_downstreamCompilerPaths[int(type)], m_sharedLibraryLoader, m_downstreamCompilerSet)))
             {
                 // If the locator reported a failure the first time we invoked
-                // it, then we will invoke it against with a wrapper shared librar
+                // it, then we will invoke it against with a wrapper shared library
                 // loader that reported library load failures to our diagnost `sink`.
                 //
                 // This means that in the case of failure the user will see a listing

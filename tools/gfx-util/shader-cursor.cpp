@@ -42,7 +42,7 @@ Result ShaderCursor::getField(const char* name, const char* nameEnd, ShaderCurso
             //
             SlangInt fieldIndex = m_typeLayout->findFieldIndexByName(name, nameEnd);
             if (fieldIndex == -1)
-                return SLANG_E_INVALID_ARG;
+                break;
 
             // Once we know the index of the field being referenced,
             // we create a cursor to point at the field, based on
@@ -115,25 +115,75 @@ Result ShaderCursor::getField(const char* name, const char* nameEnd, ShaderCurso
         break;
     }
 
+    // If a cursor is pointing at a root shader object (created for a
+    // program), then we will also iterate over the entry point shader
+    // objects attached to it and look for a matching parameter name
+    // on them.
+    //
+    // This is a bit of "do what I mean" logic and could potentially
+    // lead to problems if there could be multiple entry points with
+    // the same parameter name.
+    //
+    // TODO: figure out whether we should support this long-term.
+    //
+    auto entryPointCount = (gfx::Int) m_baseObject->getEntryPointCount();
+    for( gfx::Int e = 0; e < entryPointCount; ++e )
+    {
+        ComPtr<IShaderObject> entryPoint;
+        m_baseObject->getEntryPoint(e, entryPoint.writeRef());
+
+        ShaderCursor entryPointCursor(entryPoint);
+
+        auto result = entryPointCursor.getField(name, nameEnd, outCursor);
+        if(SLANG_SUCCEEDED(result))
+            return result;
+    }
+
     return SLANG_E_INVALID_ARG;
 }
 
 ShaderCursor ShaderCursor::getElement(SlangInt index) const
 {
     // TODO: need to auto-dereference various buffer types...
-
-    if (m_typeLayout->getKind() == slang::TypeReflection::Kind::Array)
+    switch( m_typeLayout->getKind() )
     {
-        ShaderCursor elementCursor;
-        elementCursor.m_baseObject = m_baseObject;
-        elementCursor.m_typeLayout = m_typeLayout->getElementTypeLayout();
-        elementCursor.m_offset.uniformOffset =
-            m_offset.uniformOffset +
-            index * m_typeLayout->getElementStride(SLANG_PARAMETER_CATEGORY_UNIFORM);
-        elementCursor.m_offset.bindingRangeIndex = m_offset.bindingRangeIndex;
-        elementCursor.m_offset.bindingArrayIndex =
-            m_offset.bindingArrayIndex * m_typeLayout->getElementCount() + index;
-        return elementCursor;
+    case slang::TypeReflection::Kind::Array:
+        {
+            ShaderCursor elementCursor;
+            elementCursor.m_baseObject = m_baseObject;
+            elementCursor.m_typeLayout = m_typeLayout->getElementTypeLayout();
+            elementCursor.m_offset.uniformOffset =
+                m_offset.uniformOffset +
+                index * m_typeLayout->getElementStride(SLANG_PARAMETER_CATEGORY_UNIFORM);
+            elementCursor.m_offset.bindingRangeIndex = m_offset.bindingRangeIndex;
+            elementCursor.m_offset.bindingArrayIndex =
+                m_offset.bindingArrayIndex * m_typeLayout->getElementCount() + index;
+            return elementCursor;
+        }
+        break;
+
+    case slang::TypeReflection::Kind::Struct:
+        {
+            // The logic here is similar to `getField()` except that we don't
+            // need to look up the field index based on a name first.
+            //
+            auto fieldIndex = index;
+            slang::VariableLayoutReflection* fieldLayout =
+                m_typeLayout->getFieldByIndex((unsigned int)fieldIndex);
+            if(!fieldLayout)
+                return ShaderCursor();
+
+            ShaderCursor fieldCursor;
+            fieldCursor.m_baseObject = m_baseObject;
+            fieldCursor.m_typeLayout = fieldLayout->getTypeLayout();
+            fieldCursor.m_offset.uniformOffset = m_offset.uniformOffset + fieldLayout->getOffset();
+            fieldCursor.m_offset.bindingRangeIndex =
+                m_offset.bindingRangeIndex + m_typeLayout->getFieldBindingRangeOffset(fieldIndex);
+            fieldCursor.m_offset.bindingArrayIndex = m_offset.bindingArrayIndex;
+
+            return fieldCursor;
+        }
+        break;
     }
 
     return ShaderCursor();

@@ -11,22 +11,18 @@
 #include "../../source/core/slang-string-util.h"
 #include "../../source/core/slang-byte-encode-util.h"
 #include "../../source/core/slang-char-util.h"
-
-using namespace Slang;
+#include "../../source/core/slang-process-util.h"
+#include "../../source/core/slang-render-api-util.h"
 
 #include "directory-util.h"
-#include "../../source/core/slang-render-api-util.h"
 #include "test-context.h"
 #include "test-reporter.h"
 #include "options.h"
 #include "slangc-tool.h"
 #include "parse-diagnostic-util.h"
 
-#include "../../source/core/slang-downstream-compiler.h"
-
-#include "../../source/core/slang-nvrtc-compiler.h"
-
-#include "../../source/core/slang-process-util.h"
+#include "../../source/compiler-core/slang-downstream-compiler.h"
+#include "../../source/compiler-core/slang-nvrtc-compiler.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "external/stb/stb_image.h"
@@ -38,6 +34,8 @@ using namespace Slang;
 
 #define SLANG_PRELUDE_NAMESPACE CPPPrelude
 #include "../../prelude/slang-cpp-types.h"
+
+using namespace Slang;
 
 // Options for a particular test
 struct TestOptions
@@ -1063,6 +1061,71 @@ static bool _areResultsEqual(TestOptions::Type type, const String& a, const Stri
             return false;
         }
     }
+}
+
+TestResult runDocTest(TestContext* context, TestInput& input)
+{
+    // need to execute the stand-alone Slang compiler on the file, and compare its output to what we expect
+    auto outputStem = input.outputStem;
+
+    CommandLine cmdLine;
+    _initSlangCompiler(context, cmdLine);
+
+    cmdLine.addArg(input.filePath);
+
+    for (auto arg : input.testOptions->args)
+    {
+        cmdLine.addArg(arg);
+    }
+
+    ExecuteResult exeRes;
+    TEST_RETURN_ON_DONE(spawnAndWait(context, outputStem, input.spawnType, cmdLine, exeRes));
+
+    if (context->isCollectingRequirements())
+    {
+        return TestResult::Pass;
+    }
+
+    String actualOutput = getOutput(exeRes);
+
+    String expectedOutputPath = outputStem + ".expected";
+    String expectedOutput;
+    try
+    {
+        expectedOutput = Slang::File::readAllText(expectedOutputPath);
+    }
+    catch (const Slang::IOException&)
+    {
+    }
+
+    // If no expected output file was found, then we
+    // expect everything to be empty
+    if (expectedOutput.getLength() == 0)
+    {
+        expectedOutput = "result code = 0\nstandard error = {\n}\nstandard output = {\n}\n";
+    }
+
+    TestResult result = TestResult::Pass;
+
+    // Otherwise we compare to the expected output
+    if (!_areResultsEqual(input.testOptions->type, expectedOutput, actualOutput))
+    {
+        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        result = TestResult::Fail;
+    }
+
+    // If the test failed, then we write the actual output to a file
+    // so that we can easily diff it from the command line and
+    // diagnose the problem.
+    if (result == TestResult::Fail)
+    {
+        String actualOutputPath = outputStem + ".actual";
+        Slang::File::writeAllText(actualOutputPath, actualOutput);
+
+        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+    }
+
+    return result;
 }
 
 TestResult runSimpleTest(TestContext* context, TestInput& input)
@@ -2740,6 +2803,7 @@ static const TestCommandInfo s_testCommandInfos[] =
     { "CPP_COMPILER_COMPILE",                   &runCPPCompilerCompile,                     RenderApiFlag::CPU},
     { "PERFORMANCE_PROFILE",                    &runPerformanceProfile,                     0 },
     { "COMPILE",                                &runCompile,                                0 },
+    { "DOC",                                    &runDocTest,                                0 },
 };
 
 const TestCommandInfo* _findTestCommandInfoByCommand(const UnownedStringSlice& name)

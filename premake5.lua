@@ -135,6 +135,14 @@ newoption {
    allowed     = { { "true", "True"}, { "false", "False" } }
 }
 
+newoption {
+    trigger     = "enable-xlib",
+    description = "(Optional) If true build `gfx` and `platform` with xlib to support windowed apps on linux.",
+    value       = "bool",
+    default     = "true",
+    allowed     = { { "true", "True"}, { "false", "False" } }
+ }
+
 buildLocation = _OPTIONS["build-location"]
 executeBinary = (_OPTIONS["execute-binary"] == "true")
 targetDetail = _OPTIONS["target-detail"]
@@ -145,7 +153,7 @@ optixPath = _OPTIONS["optix-sdk-path"]
 enableOptix = not not (_OPTIONS["enable-optix"] == "true" or optixPath)
 enableProfile = (_OPTIONS["enable-profile"] == "true")
 enableEmbedStdLib = (_OPTIONS["enable-embed-stdlib"] == "true")
-
+enableXlib = (_OPTIONS["enable-xlib"] == "true")
 -- This is the path where nvapi is expected to be found
 
 nvapiPath = "external/nvapi"
@@ -164,6 +172,10 @@ end
 
 -- Is true when the target is really windows (ie not something on top of windows like cygwin)
 isTargetWindows = (os.target() == "windows") and not (targetDetail == "mingw" or targetDetail == "cygwin")
+
+if isTargetWindows then
+    enableXlib = false
+end
 
 -- Even if we have the nvapi path, we only want to currently enable on windows targets
 
@@ -339,6 +351,48 @@ function getBuildLocationName()
     end 
 end
 
+-- Adds CUDA dependency to a project
+function addCUDAIfEnabled()
+    if type(cudaPath) == "string" and isTargetWindows then
+        filter {}
+        includedirs { cudaPath .. "/include" }
+        includedirs { cudaPath .. "/include", cudaPath .. "/common/inc" }
+        links { "cuda", "cudart" }
+        if optixPath then
+            defines { "RENDER_TEST_OPTIX" }
+            includedirs { optixPath .. "include/" }
+        end
+        
+        filter { "platforms:x86" }
+            libdirs { cudaPath .. "/lib/Win32/" }
+           
+        filter { "platforms:x64" }
+            libdirs { cudaPath .. "/lib/x64/" }       
+        filter {}
+        return true
+    elseif enableCuda then
+        filter {}
+        if type(cudaPath) == "string" then
+            includedirs { cudaPath .. "/include" }
+            includedirs { cudaPath .. "/include" }
+            if optixPath then
+                defines { "GFX_OPTIX" }
+                includedirs { optixPath .. "include/" }
+            end
+            filter { "platforms:x86" }
+            libdirs { cudaPath .. "/lib32/" }
+            filter { "platforms:x64" }
+            libdirs { cudaPath .. "/lib64/" }
+            filter {}
+            links { "cuda", "cudart" }
+        else
+            print "Error: CUDA is enabled but --cuda-sdk-path is not specified."
+        end
+        return true
+    end
+    return false
+end
+
 --
 -- Next we will define a helper routine that all of our
 -- projects will bottleneck through. Here `name` is
@@ -488,11 +542,22 @@ function toolSharedLibrary(name)
     -- specifying that the project lives under the `tools/` path.
     --
     baseSlangProject(name .. "-tool", "tools/" .. name)
-    
+
     defines { "SLANG_SHARED_LIBRARY_TOOL" }
    
     kind "SharedLib"
 end
+
+function exampleLibrary(name)
+    group "examples"
+    baseSlangProject(name, "examples/"..name)
+    kind "StaticLib"
+    includedirs { ".", "tools" }
+    links { "gfx", "slang", "platform", "gfx-util", "core"}
+    addCUDAIfEnabled(); 
+end
+
+exampleLibrary "example-base"
 
 -- Finally we have the example programs that show how to use Slang.
 --
@@ -525,7 +590,18 @@ function example(name)
     -- and the `gfx` abstraction layer (which in turn
     -- depends on the `core` library). We specify all of that here,
     -- rather than in each example.
-    links { "slang", "core", "gfx", "gfx-util", "platform" }
+    links { "example-base", "slang", "gfx", "gfx-util", "platform", "core" }
+
+    if isTargetWindows then
+    else
+        if enableXlib then
+            defines { "SLANG_ENABLE_XLIB" }
+            libdirs { "/usr/X11/lib" }
+            links {"X11"}
+        end
+    end
+
+    addCUDAIfEnabled();
 end
 
 --
@@ -552,26 +628,24 @@ function generatorProject(name, sourcePath)
     kind "StaticLib"
 end   
 
-if isTargetWindows then
-    --
-    -- With all of these helper routines defined, we can now define the
-    -- actual projects quite simply. For example, here is the entire
-    -- declaration of the "Hello, World" example project:
-    --
-    example "hello-world"
-    --
-    -- Note how we are calling our custom `example()` subroutine with
-    -- the same syntax sugar that Premake usually advocates for their
-    -- `project()` function. This allows us to treat `example` as
-    -- a kind of specialized "subclass" of `project`
-    --
+--
+-- With all of these helper routines defined, we can now define the
+-- actual projects quite simply. For example, here is the entire
+-- declaration of the "Hello, World" example project:
+--
+example "hello-world"
+--
+-- Note how we are calling our custom `example()` subroutine with
+-- the same syntax sugar that Premake usually advocates for their
+-- `project()` function. This allows us to treat `example` as
+-- a kind of specialized "subclass" of `project`
+--
 
-    -- Let's go ahead and set up the projects for our other example now.
-    example "gpu-printing"
-        kind "ConsoleApp"
+-- Let's go ahead and set up the projects for our other example now.
+example "gpu-printing"
+    kind "ConsoleApp"
 
-    example "shader-toy"
-end
+example "shader-toy"
 
 example "shader-object"
     kind "ConsoleApp"
@@ -607,6 +681,28 @@ standardProject("core", "source/core")
         addSourceDir "source/core/unix"
     end
     
+standardProject("compiler-core", "source/compiler-core")
+    uuid "12C1E89D-F5D0-41D3-8E8D-FB3F358F8126"
+    kind "StaticLib"
+    -- We need the compiler-core library to be relocatable to be able to link with slang.so
+    pic "On"
+
+    links { "core" }
+
+    -- For our core implementation, we want to use the most
+    -- aggressive warning level supported by the target, and
+    -- to treat every warning as an error to make sure we
+    -- keep our code free of warnings.
+    --
+    warnings "Extra"
+    flags { "FatalWarnings" }    
+    
+    if isTargetWindows then
+        addSourceDir "source/compiler-core/windows"
+    else
+        addSourceDir "source/compiler-core/unix"
+    end
+    
 --
 -- The cpp extractor is a tool that scans C++ header files to extract
 -- reflection like information, and generate files to handle 
@@ -617,22 +713,7 @@ tool "slang-cpp-extractor"
     uuid "CA8A30D1-8FA9-4330-B7F7-84709246D8DC"
     includedirs { "." }
     
-    files { 
-        "source/slang/slang-lexer.cpp",
-        "source/slang/slang-lexer.h",
-        "source/slang/slang-source-loc.cpp",
-        "source/slang/slang-source-loc.h",
-        "source/slang/slang-file-system.cpp",
-        "source/slang/slang-file-system.h",
-        "source/slang/slang-diagnostics.cpp",
-        "source/slang/slang-diagnostics.h",
-        "source/slang/slang-name.cpp",
-        "source/slang/slang-name.h",
-        "source/slang/slang-token.cpp",
-        "source/slang/slang-token.h",
-    }
-    
-    links { "core" }
+    links { "core", "compiler-core" }
     
 --
 -- `slang-generate` is a tool we use for source code generation on
@@ -656,7 +737,7 @@ tool "slang-embed"
 tool "slang-test"
     uuid "0C768A18-1D25-4000-9F37-DA5FE99E3B64"
     includedirs { "." }
-    links { "core", "slang", "miniz", "lz4" }
+    links { "core", "compiler-core", "slang", "miniz", "lz4" }
     
     -- We want to set to the root of the project, but that doesn't seem to work with '.'. 
     -- So set a path that resolves to the same place.
@@ -697,7 +778,6 @@ toolSharedLibrary "render-test"
     
     includedirs { ".", "external", "source", "tools/gfx", "tools/platform" }
     links { "core", "slang", "gfx", "gfx-util", "platform" }
-   
     if isTargetWindows then    
         addSourceDir "tools/render-test/windows"
         
@@ -708,27 +788,14 @@ toolSharedLibrary "render-test"
         -- directory into the output directory.
         -- d3dcompiler_47.dll is copied from the external/slang-binaries submodule.
         postbuildcommands { '"$(SolutionDir)tools\\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/%{cfg.platform:lower()}/" "%{cfg.targetdir}/" "windows-%{cfg.platform:lower()}"'}    
-    end
-   
-    if type(cudaPath) == "string" and isTargetWindows then
-        addSourceDir "tools/render-test/cuda"
-        defines { "RENDER_TEST_CUDA" }
-        includedirs { cudaPath .. "/include" }
-        includedirs { cudaPath .. "/include", cudaPath .. "/common/inc" }
-        links { "cuda", "cudart" }
-        if optixPath then
-            defines { "RENDER_TEST_OPTIX" }
-            includedirs { optixPath .. "include/" }
+        if (type(cudaPath) == "string") then
+            addSourceDir "tools/render-test/cuda"
         end
-        
-        filter { "platforms:x86" }
-            libdirs { cudaPath .. "/lib/Win32/" }
-           
-        filter { "platforms:x64" }
-            libdirs { cudaPath .. "/lib/x64/" }       
-        
     end
-  
+    if addCUDAIfEnabled() then
+        defines { "RENDER_TEST_CUDA" }
+    end
+
 --
 -- `gfx` is a abstraction layer for different GPU platforms.
 --
@@ -748,7 +815,9 @@ tool "gfx"
     files {"slang-gfx.h"}
 
     -- Will compile across targets
+    addSourceDir "tools/gfx/cpu"
     addSourceDir "tools/gfx/nvapi"
+    addSourceDir "tools/gfx/cuda"
 
     -- To special case that we may be building using cygwin on windows. If 'true windows' we build for dx12/vk and run the script
     -- If not we assume it's a cygwin/mingw type situation and remove files that aren't appropriate
@@ -766,30 +835,20 @@ tool "gfx"
         addSourceDir "tools/gfx/d3d" 
         addSourceDir "tools/gfx/d3d11"
         addSourceDir "tools/gfx/d3d12"
-        addSourceDir "tools/gfx/cuda"
-
-        if type(cudaPath) == "string" then
-            defines { "GFX_ENABLE_CUDA" }
-            includedirs { cudaPath .. "/include" }
-            includedirs { cudaPath .. "/include", cudaPath .. "/common/inc" }
-            if optixPath then
-                defines { "GFX_OPTIX" }
-                includedirs { optixPath .. "include/" }
-            end
-            links { "cuda", "cudart" }   
-            filter { "platforms:x86" }
-                libdirs { cudaPath .. "/lib/Win32/" }
-            filter { "platforms:x64" }
-                libdirs { cudaPath .. "/lib/x64/" }
-        end
     elseif targetDetail == "mingw" or targetDetail == "cygwin" then
         -- Don't support any render techs...
     elseif os.target() == "macosx" then
         --addSourceDir "tools/gfx/open-gl"
     else
         -- Linux like
-        --addSourceDir "tools/gfx/vulkan"
+        addSourceDir "tools/gfx/vulkan"
         --addSourceDir "tools/gfx/open-gl"
+    end
+
+    if enableXlib then
+        defines { "SLANG_ENABLE_XLIB" }
+        libdirs { "/usr/X11/lib" }
+        links {"X11"}
     end
 
     -- If NVAPI is enabled
@@ -810,6 +869,9 @@ tool "gfx"
             links { "nvapi64" }
             
     end
+    if addCUDAIfEnabled() then
+        defines { "GFX_ENABLE_CUDA" }
+    end
 
 --
 -- `gfx-util` is a static library containing utilities and helpers for using
@@ -828,17 +890,24 @@ tool "gfx-util"
 --
 tool "platform" 
     uuid "3565fe5e-4fa3-11eb-ae93-0242ac130002"
-    kind "StaticLib"
+    kind "SharedLib"
     pic "On"
-    
+    links {"core", "slang", "gfx" }
+    defines { "SLANG_PLATFORM_DYNAMIC", "SLANG_PLATFORM_DYNAMIC_EXPORT" }
     includedirs { ".", "external", "source", "external/imgui", "tools/gfx" }
-
     addSourceDir "tools/platform"
     addSourceDir "tools/platform/linux"
     addSourceDir "tools/platform/windows"
+    addSourceDir "tools/platform/placeholder"
     -- Include windowing support on Windows.
     if isTargetWindows then
         systemversion "10.0.14393.0"
+    else
+        if enableXlib then
+            defines { "SLANG_ENABLE_XLIB" }
+            libdirs { "/usr/X11/lib" }
+            links {"X11"}
+        end
     end
 
 --
@@ -997,7 +1066,7 @@ if enableEmbedStdLib then
     standardProject("slangc-bootstrap", "source/slangc")
         uuid "6339BF31-AC99-4819-B719-679B63451EF0"
         kind "ConsoleApp"
-        links { "core", "miniz", "lz4" }
+        links { "core", "compiler-core", "miniz", "lz4" }
         
         -- We need to run all the generators to be able to build the main 
         -- slang source in source/slang
@@ -1097,7 +1166,7 @@ end
 standardProject("slang", "source/slang")
     uuid "DB00DA62-0533-4AFD-B59F-A67D5B3A0808"
     kind "SharedLib"
-    links { "core", "miniz", "lz4"}
+    links { "core", "compiler-core", "miniz", "lz4"}
     warnings "Extra"
     flags { "FatalWarnings" }
     pic "On"
@@ -1198,7 +1267,7 @@ if enableProfile then
         addSourceDir "source/slang"
 
         includedirs { "." }
-        links { "core", "miniz", "lz4"}
+        links { "core", "compiler-core", "miniz", "lz4"}
         
         filter { "system:linux" }
             linkoptions{  "-pg" }

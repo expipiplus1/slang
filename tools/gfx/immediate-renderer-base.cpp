@@ -1,5 +1,6 @@
 #include "immediate-renderer-base.h"
 #include "simple-render-pass-layout.h"
+#include "simple-transient-resource-heap.h"
 #include "command-writer.h"
 #include "core/slang-basic.h"
 #include "core/slang-blob.h"
@@ -32,6 +33,7 @@ public:
 public:
     CommandWriter m_writer;
     ImmediateRendererBase* m_renderer;
+    RefPtr<ShaderObjectBase> m_rootShaderObject;
 
     void init(ImmediateRendererBase* renderer)
     {
@@ -39,7 +41,8 @@ public:
     }
 
     void reset()
-    { m_writer.clear();
+    {
+        m_writer.clear();
     }
 
     class RenderCommandEncoderImpl
@@ -57,16 +60,18 @@ public:
             *outObject = nullptr;
             return SLANG_E_NO_INTERFACE;
         }
-        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() { return 1; }
-        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
 
     public:
         CommandWriter* m_writer;
+        CommandBufferImpl* m_commandBuffer;
         virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
 
         void init(CommandBufferImpl* cmdBuffer, SimpleRenderPassLayout* renderPass, IFramebuffer* framebuffer)
         {
             m_writer = &cmdBuffer->m_writer;
+            m_commandBuffer = cmdBuffer;
 
             // Encode clear commands.
             m_writer->setFramebuffer(framebuffer);
@@ -99,36 +104,28 @@ public:
             m_writer->clearFrame(clearMask, clearDepth, clearStencil);
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state)
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
         {
             m_writer->setPipelineState(state);
+            auto stateImpl = static_cast<PipelineStateBase*>(state);
+            SLANG_RETURN_ON_FAIL(m_commandBuffer->m_renderer->createRootShaderObject(
+                stateImpl->m_program, outRootObject));
+            *m_commandBuffer->m_rootShaderObject.writeRef() = static_cast<ShaderObjectBase*>(*outRootObject);
+            return SLANG_OK;
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
-            bindRootShaderObject(IShaderObject* object)
-        {
-            m_writer->bindRootShaderObject(PipelineType::Graphics, object);
-        }
-
-        virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSet(
-            IPipelineLayout* layout,
-            UInt index,
-            IDescriptorSet* descriptorSet)
-        {
-            m_writer->setDescriptorSet(PipelineType::Graphics, layout, index, descriptorSet);
-        }
-
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            setViewports(uint32_t count, const Viewport* viewports)
+            setViewports(uint32_t count, const Viewport* viewports) override
         {
             m_writer->setViewports(count, viewports);
         }
         virtual SLANG_NO_THROW void SLANG_MCALL
-            setScissorRects(uint32_t count, const ScissorRect* scissors)
+            setScissorRects(uint32_t count, const ScissorRect* scissors) override
         {
             m_writer->setScissorRects(count, scissors);
         }
-        virtual SLANG_NO_THROW void SLANG_MCALL setPrimitiveTopology(PrimitiveTopology topology)
+        virtual SLANG_NO_THROW void SLANG_MCALL setPrimitiveTopology(PrimitiveTopology topology) override
         {
             m_writer->setPrimitiveTopology(topology);
         }
@@ -137,29 +134,31 @@ public:
             UInt slotCount,
             IBufferResource* const* buffers,
             const UInt* strides,
-            const UInt* offsets)
+            const UInt* offsets) override
         {
             m_writer->setVertexBuffers(startSlot, slotCount, buffers, strides, offsets);
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
-            setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset)
+            setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset) override
         {
             m_writer->setIndexBuffer(buffer, indexFormat, offset);
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL draw(UInt vertexCount, UInt startVertex)
+        virtual SLANG_NO_THROW void SLANG_MCALL draw(UInt vertexCount, UInt startVertex) override
         {
+            m_writer->bindRootShaderObject(m_commandBuffer->m_rootShaderObject);
             m_writer->draw(vertexCount, startVertex);
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
-            drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex)
+            drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex) override
         {
+            m_writer->bindRootShaderObject(m_commandBuffer->m_rootShaderObject);
             m_writer->drawIndexed(indexCount, startIndex, baseVertex);
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL setStencilReference(uint32_t referenceValue)
+        virtual SLANG_NO_THROW void SLANG_MCALL setStencilReference(uint32_t referenceValue) override
         {
             m_writer->setStencilReference(referenceValue);
         }
@@ -193,11 +192,12 @@ public:
             *outObject = nullptr;
             return SLANG_E_NO_INTERFACE;
         }
-        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() { return 1; }
-        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
 
     public:
         CommandWriter* m_writer;
+        CommandBufferImpl* m_commandBuffer;
 
         virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override
         {
@@ -206,28 +206,23 @@ public:
         void init(CommandBufferImpl* cmdBuffer)
         {
             m_writer = &cmdBuffer->m_writer;
+            m_commandBuffer = cmdBuffer;
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
         {
             m_writer->setPipelineState(state);
-        }
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            bindRootShaderObject(IShaderObject* object) override
-        {
-            m_writer->bindRootShaderObject(PipelineType::Compute, object);
-        }
-
-        virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSet(
-            IPipelineLayout* layout,
-            UInt index,
-            IDescriptorSet* descriptorSet) override
-        {
-            m_writer->setDescriptorSet(PipelineType::Compute, layout, index, descriptorSet);
+            auto stateImpl = static_cast<PipelineStateBase*>(state);
+            SLANG_RETURN_ON_FAIL(m_commandBuffer->m_renderer->createRootShaderObject(
+                stateImpl->m_program, outRootObject));
+            *m_commandBuffer->m_rootShaderObject.writeRef() = static_cast<ShaderObjectBase*>(*outRootObject);
+            return SLANG_OK;
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
         {
+            m_writer->bindRootShaderObject(m_commandBuffer->m_rootShaderObject);
             m_writer->dispatchCompute(x, y, z);
         }
     };
@@ -255,8 +250,8 @@ public:
             *outObject = nullptr;
             return SLANG_E_NO_INTERFACE;
         }
-        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() { return 1; }
-        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
 
     public:
         CommandWriter* m_writer;
@@ -278,7 +273,7 @@ public:
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
-            uploadBufferData(IBufferResource* dst, size_t offset, size_t size, void* data)
+            uploadBufferData(IBufferResource* dst, size_t offset, size_t size, void* data) override
         {
             m_writer->uploadBufferData(dst, offset, size, data);
         }
@@ -303,19 +298,10 @@ public:
             switch (name)
             {
             case CommandName::SetPipelineState:
-                m_renderer->_setPipelineState(m_writer.getObject<IPipelineState>(cmd.operands[0]));
+                m_renderer->setPipelineState(m_writer.getObject<IPipelineState>(cmd.operands[0]));
                 break;
             case CommandName::BindRootShaderObject:
-                m_renderer->bindRootShaderObject(
-                    (PipelineType)cmd.operands[0],
-                    m_writer.getObject<IShaderObject>(cmd.operands[1]));
-                break;
-            case CommandName::SetDescriptorSet:
-                m_renderer->setDescriptorSet(
-                    (gfx::PipelineType)cmd.operands[0],
-                    m_writer.getObject<IPipelineLayout>(cmd.operands[1]),
-                    (UInt)cmd.operands[2],
-                    m_writer.getObject<IDescriptorSet>(cmd.operands[3]));
+                m_renderer->bindRootShaderObject(m_writer.getObject<IShaderObject>(cmd.operands[0]));
                 break;
             case CommandName::SetFramebuffer:
                 m_renderer->setFramebuffer(m_writer.getObject<IFramebuffer>(cmd.operands[0]));
@@ -425,15 +411,6 @@ public:
 
     virtual SLANG_NO_THROW const Desc& SLANG_MCALL getDesc() override { return m_desc; }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createCommandBuffer(ICommandBuffer** outCommandBuffer) override
-    {
-        RefPtr<CommandBufferImpl> newCmdBuffer = new CommandBufferImpl();
-        newCmdBuffer->init(m_renderer);
-        *outCommandBuffer = newCmdBuffer.detach();
-        return SLANG_OK;
-    }
-
     virtual SLANG_NO_THROW void SLANG_MCALL
         executeCommandBuffers(uint32_t count, ICommandBuffer* const* commandBuffers) override
     {
@@ -448,43 +425,24 @@ public:
         m_renderer->waitForGpu();
     }
 };
-}
 
+using TransientResourceHeapImpl =
+    SimpleTransientResourceHeap<ImmediateRendererBase, CommandBufferImpl>;
+
+}
 
 ImmediateRendererBase::ImmediateRendererBase() {
     m_queue = new CommandQueueImpl(this);
 }
 
-void ImmediateRendererBase::bindRootShaderObject(PipelineType pipelineType, IShaderObject* shaderObject)
+SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createTransientResourceHeap(
+    const ITransientResourceHeap::Desc& desc,
+    ITransientResourceHeap** outHeap)
 {
-    class ImmediateCommandEncoder : public GraphicsComputeCommandEncoderBase
-    {
-    public:
-        virtual SLANG_NO_THROW void SLANG_MCALL setDescriptorSetImpl(
-            PipelineType pipelineType,
-            IPipelineLayout* layout,
-            UInt index,
-            IDescriptorSet* descriptorSet) override
-        {
-            auto renderer = static_cast<ImmediateRendererBase*>(m_rendererBase);
-            renderer->setDescriptorSet(pipelineType, layout, index, descriptorSet);
-        }
-
-        virtual SLANG_NO_THROW void SLANG_MCALL uploadBufferDataImpl(
-            IBufferResource* buffer,
-            size_t offset,
-            size_t size,
-            void* data) override
-        {
-            auto renderer = static_cast<ImmediateRendererBase*>(m_rendererBase);
-            renderer->uploadBufferData(buffer, offset, size, data);
-        }
-    };
-    ImmediateCommandEncoder encoder;
-    encoder.m_rendererBase = this;
-    encoder.m_currentPipeline = static_cast<PipelineStateBase*>(m_currentPipelineState.get());
-    encoder.bindRootShaderObjectImpl(pipelineType, shaderObject);
-    _setPipelineState(encoder.m_currentPipeline);
+    RefPtr<TransientResourceHeapImpl> result = new TransientResourceHeapImpl();
+    SLANG_RETURN_ON_FAIL(result->init(this, desc));
+    *outHeap = result.detach();
+    return SLANG_OK;
 }
 
 SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createCommandQueue(
@@ -508,16 +466,6 @@ SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createRenderPassLayout(
     renderPass->init(desc);
     *outRenderPassLayout = renderPass.detach();
     return SLANG_OK;
-}
-
-void ImmediateRendererBase::_setPipelineState(IPipelineState* state)
-{
-    PipelineStateBase* pipelineImpl = static_cast<PipelineStateBase*>(state);
-    if (!pipelineImpl->isSpecializable)
-    {
-        setPipelineState(state);
-    }
-    m_currentPipelineState = state;
 }
 
 void ImmediateRendererBase::uploadBufferData(

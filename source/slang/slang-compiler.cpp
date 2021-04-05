@@ -10,7 +10,9 @@
 
 #include "slang-check.h"
 #include "slang-compiler.h"
-#include "slang-lexer.h"
+
+#include "../compiler-core/slang-lexer.h"
+
 #include "slang-lower-to-ir.h"
 #include "slang-mangle.h"
 #include "slang-parameter-binding.h"
@@ -183,11 +185,9 @@ namespace Slang
     // EntryPoint
     //
 
-    static const Guid IID_IEntryPoint = SLANG_UUID_IEntryPoint;
-
     ISlangUnknown* EntryPoint::getInterface(const Guid& guid)
     {
-        if(guid == IID_IEntryPoint)
+        if(guid == slang::IEntryPoint::getTypeGuid())
             return static_cast<slang::IEntryPoint*>(this);
 
         return Super::getInterface(guid);
