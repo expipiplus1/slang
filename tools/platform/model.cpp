@@ -20,7 +20,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace gfx {
+namespace platform {
+
+using namespace gfx;
+using namespace Slang;
 
 // TinyObj provides a tuple type that bundles up indices, but doesn't
 // provide equality comparison or hashing for that type. We'd like
@@ -70,11 +73,11 @@ bool operator==(SmoothingGroupVertexID const& left, SmoothingGroupVertexID const
 
 namespace std
 {
-    template<> struct hash<gfx::ObjIndexKey>
+    template<> struct hash<platform::ObjIndexKey>
     {
-        size_t operator()(gfx::ObjIndexKey const& key) const
+        size_t operator()(platform::ObjIndexKey const& key) const
         {
-            gfx::Hasher hasher;
+            platform::Hasher hasher;
             hasher.add(key.index.vertex_index);
             hasher.add(key.index.normal_index);
             hasher.add(key.index.texcoord_index);
@@ -82,11 +85,11 @@ namespace std
         }
     };
 
-    template<> struct hash<gfx::SmoothingGroupVertexID>
+    template <> struct hash<platform::SmoothingGroupVertexID>
     {
-        size_t operator()(gfx::SmoothingGroupVertexID const& id) const
+        size_t operator()(platform::SmoothingGroupVertexID const& id) const
         {
-            gfx::Hasher hasher;
+            platform::Hasher hasher;
             hasher.add(id.smoothingGroup);
             hasher.add(id.positionID);
             return hasher.state;
@@ -94,7 +97,7 @@ namespace std
     };
 }
 
-namespace gfx
+namespace platform
 {
 
 ComPtr<ITextureResource> loadTextureImage(
@@ -186,12 +189,16 @@ ComPtr<ITextureResource> loadTextureImage(
 
     int mipCount = (int) subresourceInitData.size();
 
-    ITextureResource::Desc desc;
-    desc.init2D(IResource::Type::Texture2D, format, extentX, extentY, mipCount);
-
-    auto texture =
-        device->createTextureResource(IResource::Usage::PixelShaderResource, desc, subresourceInitData.data());
-
+    ITextureResource::Desc desc = {};
+    desc.type = IResource::Type::Texture2D;
+    desc.defaultState = ResourceState::ShaderResource;
+    desc.allowedStates = ResourceStateSet(ResourceState::ShaderResource);
+    desc.format = format;
+    desc.size.width = extentX;
+    desc.size.height = extentY;
+    desc.size.depth = 1;
+    desc.numMipLevels = mipCount;
+    auto texture = device->createTextureResource(desc, subresourceInitData.data());
     free(data);
 
     return texture;
@@ -202,7 +209,7 @@ static std::string makeString(const char* start, const char* end)
     return std::string(start, size_t(end - start));
 }
 
-Result ModelLoader::load(
+SlangResult ModelLoader::load(
     char const* inputPath,
     void**      outModel)
 {
@@ -539,23 +546,23 @@ Result ModelLoader::load(
     modelData.meshes = meshes.data();
 
     IBufferResource::Desc vertexBufferDesc;
-    vertexBufferDesc.init(modelData.vertexCount * sizeof(Vertex));
-    vertexBufferDesc.setDefaults(IResource::Usage::VertexBuffer);
+    vertexBufferDesc.type = IResource::Type::Buffer;
+    vertexBufferDesc.sizeInBytes = modelData.vertexCount * sizeof(Vertex);
+    vertexBufferDesc.allowedStates =
+        ResourceStateSet(ResourceState::VertexBuffer, ResourceState::CopyDestination);
+    vertexBufferDesc.defaultState = ResourceState::VertexBuffer;
 
-    modelData.vertexBuffer = device->createBufferResource(
-        IResource::Usage::VertexBuffer,
-        vertexBufferDesc,
-        flatVertices.data());
+    modelData.vertexBuffer = device->createBufferResource(vertexBufferDesc, flatVertices.data());
     if(!modelData.vertexBuffer) return SLANG_FAIL;
 
     IBufferResource::Desc indexBufferDesc;
-    indexBufferDesc.init(modelData.indexCount * sizeof(Index));
-    vertexBufferDesc.setDefaults(IResource::Usage::IndexBuffer);
+    indexBufferDesc.type = IResource::Type::Buffer;
+    indexBufferDesc.sizeInBytes = modelData.indexCount * sizeof(Index);
+    indexBufferDesc.allowedStates =
+        ResourceStateSet(ResourceState::IndexBuffer, ResourceState::CopyDestination);
+    indexBufferDesc.defaultState = ResourceState::IndexBuffer;
 
-    modelData.indexBuffer = device->createBufferResource(
-        IResource::Usage::IndexBuffer,
-        indexBufferDesc,
-        flatIndices.data());
+    modelData.indexBuffer = device->createBufferResource(indexBufferDesc, flatIndices.data());
     if(!modelData.indexBuffer) return SLANG_FAIL;
 
     *outModel = callbacks->createModel(modelData);

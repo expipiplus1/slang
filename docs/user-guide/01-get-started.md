@@ -1,3 +1,7 @@
+---
+layout: user-guide
+---
+
 # Getting Started with Slang
 
 Slang enables you to do many powerful things with shader code, including compiling shader code to many different platforms, obtaining reflection information, organizing your shader library in a modern modular fashion, controlling specialization and more. The following sections help you getting started with the basics of Slang in a simple example. We will assume Windows as the operating system, but the steps performed here are similar for other platforms.
@@ -90,8 +94,4 @@ Note that in the generated GLSL code, all shader parameters are qualified with e
 
 ## The full example
 
-> #### Note ####
-> The current `hello-world` implementation does not use raw Vulkan API calls;
-> this will be addressed in a future revision so that it matches the documentation.
-
-The full Vulkan example that sets up and runs the `hello-world.slang` shader in located in the `/examples/hello-world` directory of the Slang repository. The example code initializes a Vulkan context and runs the compiled SPIRV code.
+The full Vulkan example that sets up and runs the `hello-world.slang` shader in located in the [/examples/hello-world](https://github.com/shader-slang/slang/tree/master/examples/hello-world) directory of the Slang repository. The example code initializes a Vulkan context and runs the compiled SPIRV code. The example code demonstrates how to use the Slang API to load and compile shaders.

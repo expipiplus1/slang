@@ -7,8 +7,7 @@
 #include "core/slang-basic.h"
 #include "core/slang-blob.h"
 
-#include "../command-writer.h"
-#include "../renderer-shared.h"
+#include "../immediate-renderer-base.h"
 #include "../slang-context.h"
 
 #define SLANG_PRELUDE_NAMESPACE slang_prelude
@@ -90,6 +89,18 @@ void _unpackFloatTexel(void const* texelData, void* outData, size_t outSize)
     memcpy(outData, temp, outSize);
 }
 
+template<int N>
+void _unpackFloat16Texel(void const* texelData, void* outData, size_t outSize)
+{
+    auto input = (int16_t const*)texelData;
+
+    float temp[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    for (int i = 0; i < N; ++i)
+        temp[i] = HalfToFloat(input[i]);
+
+    memcpy(outData, temp, outSize);
+}
+
 static inline float _unpackUnorm8Value(uint8_t value)
 {
     return value / 255.0f;
@@ -144,42 +155,45 @@ void _unpackUInt32Texel(void const* texelData, void* outData, size_t outSize)
     memcpy(outData, temp, outSize);
 }
 
-#define TEXTURE_FORMAT_INFO(FORMAT) static const CPUTextureFormatInfo kCPUTextureFormatInfo_##FORMAT
+struct CPUFormatInfoMap
+{
+    CPUFormatInfoMap()
+    {
+        memset(m_infos, 0, sizeof(m_infos));
 
-TEXTURE_FORMAT_INFO(RGBA_Float32)      = { &_unpackFloatTexel<4> };
-TEXTURE_FORMAT_INFO(RGB_Float32)       = { &_unpackFloatTexel<3> };
-TEXTURE_FORMAT_INFO(RG_Float32)        = { &_unpackFloatTexel<2> };
-TEXTURE_FORMAT_INFO(R_Float32)         = { &_unpackFloatTexel<1> };
-TEXTURE_FORMAT_INFO(RGBA_Unorm_UInt8)  = { &_unpackUnorm8Texel<4> };
-TEXTURE_FORMAT_INFO(BGRA_Unorm_UInt8)  = { &_unpackUnormBGRA8Texel };
-TEXTURE_FORMAT_INFO(R_UInt16)          = { &_unpackUInt16Texel<1> };
-TEXTURE_FORMAT_INFO(R_UInt32)          = { &_unpackUInt32Texel<1> };
-TEXTURE_FORMAT_INFO(D_Float32)         = { &_unpackFloatTexel<1> };
+        set(Format::RGBA_Float32, &_unpackFloatTexel<4>);
+        set(Format::RGB_Float32, &_unpackFloatTexel<3>);
 
-#undef TEXTURE_FORMAT_INFO
+        set(Format::RG_Float32, &_unpackFloatTexel<2>);
+        set(Format::R_Float32, &_unpackFloatTexel<1>);
+
+        set(Format::RGBA_Float16, &_unpackFloat16Texel<4>);
+        set(Format::RG_Float16, &_unpackFloat16Texel<2>);
+        set(Format::R_Float16, &_unpackFloat16Texel<1>);
+
+        set(Format::RGBA_Unorm_UInt8, &_unpackUnorm8Texel<4>);
+        set(Format::BGRA_Unorm_UInt8, &_unpackUnormBGRA8Texel);
+        set(Format::R_UInt16, &_unpackUInt16Texel<1>);
+        set(Format::R_UInt32, &_unpackUInt32Texel<1>);
+        set(Format::D_Float32, &_unpackFloatTexel<1>);
+    }
+
+    void set(Format format, CPUTextureUnpackFunc func)
+    {
+        auto& info = m_infos[Index(format)];
+        info.unpackFunc = func;
+    }
+    SLANG_FORCE_INLINE const CPUTextureFormatInfo& get(Format format) const { return m_infos[Index(format)]; }
+
+    CPUTextureFormatInfo m_infos[Index(Format::CountOf)];
+};
+
+static const CPUFormatInfoMap g_formatInfoMap;
 
 static CPUTextureFormatInfo const* _getFormatInfo(Format format)
 {
-    switch(format)
-    {
-    case Format::D_Unorm24_S8:
-    default:
-        return nullptr;
-
-
-#define CASE(FORMAT) case Format::FORMAT: return &kCPUTextureFormatInfo_##FORMAT;
-    CASE(RGBA_Float32)
-    CASE(RGB_Float32)
-    CASE(RG_Float32)
-    CASE(R_Float32)
-    CASE(RGBA_Unorm_UInt8)
-    CASE(BGRA_Unorm_UInt8)
-    CASE(R_UInt16)
-    CASE(R_UInt32)
-    CASE(D_Float32)
-
-#undef CASE
-    }
+    const CPUTextureFormatInfo& info = g_formatInfoMap.get(format);
+    return info.unpackFunc ? &info : nullptr;
 }
 
 class CPUTextureResource : public TextureResource
@@ -192,6 +206,7 @@ public:
     {}
     ~CPUTextureResource()
     {
+        free(m_data);
     }
 
     Result init(ITextureResource::SubresourceData const* initData)
@@ -342,7 +357,7 @@ public:
     void*           m_data = nullptr;
 };
 
-class CPUResourceView : public IResourceView, public RefObject
+class CPUResourceView : public IResourceView, public ComObject
 {
 public:
     enum class Kind
@@ -351,7 +366,7 @@ public:
         Texture,
     };
 
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
+    SLANG_COM_OBJECT_IUNKNOWN_ALL
     IResourceView* getInterface(const Guid& guid)
     {
         if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IResourceView)
@@ -800,9 +815,9 @@ public:
 
         auto& bindingRange = layout->m_bindingRanges[bindingRangeIndex];
         auto subObjectIndex = bindingRange.baseIndex + offset.bindingArrayIndex;
-        CPUShaderObject* subObject = m_objects[subObjectIndex];
+        auto& subObject = m_objects[subObjectIndex];
 
-        *outObject = ComPtr<IShaderObject>(subObject).detach();
+        returnComPtr(outObject, subObject);
 
         return SLANG_OK;
     }
@@ -1013,7 +1028,6 @@ public:
                 // type, we need to make sure to use that type as the specialization argument.
 
                 // TODO: need to implement the case where the field is an array of existential values.
-                SLANG_ASSERT(bindingRange.count == 1);
                 ExtendedShaderObjectType specializedSubObjType;
                 SLANG_RETURN_ON_FAIL(m_objects[subObjIndex]->getSpecializedShaderObjectType(&specializedSubObjType));
                 args.add(specializedSubObjType);
@@ -1046,6 +1060,12 @@ public:
 class CPURootShaderObject : public CPUShaderObject
 {
 public:
+    // Override default reference counting behavior to disable lifetime management via ComPtr.
+    // Root objects are managed by command buffer and does not need to be freed by the user.
+    SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+    SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
+
+public:
     SlangResult init(IDevice* device, CPUProgramLayout* programLayout);
 
     CPUProgramLayout* getLayout() { return static_cast<CPUProgramLayout*>(m_layout.Ptr()); }
@@ -1058,7 +1078,7 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL
         getEntryPoint(UInt index, IShaderObject** outEntryPoint) override
     {
-        *outEntryPoint = ComPtr<IShaderObject>(m_entryPoints[index]).detach();
+        returnComPtr(outEntryPoint, m_entryPoints[index]);
         return SLANG_OK;
     }
     virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
@@ -1085,7 +1105,7 @@ public:
 class CPUPipelineState : public PipelineStateBase
 {
 public:
-    CPUShaderProgram* getProgram() { return static_cast<CPUShaderProgram*>(m_program.get()); }
+    CPUShaderProgram* getProgram() { return static_cast<CPUShaderProgram*>(m_program.Ptr()); }
 
     void init(const ComputePipelineStateDesc& inDesc)
     {
@@ -1096,309 +1116,82 @@ public:
     }
 };
 
-class CPUDevice : public RendererBase
+class CPUDevice : public ImmediateComputeDeviceBase
 {
 private:
     RefPtr<CPUPipelineState> m_currentPipeline = nullptr;
     RefPtr<CPURootShaderObject> m_currentRootObject = nullptr;
     DeviceInfo m_info;
 
-    class CommandQueueImpl;
-
-    class CommandBufferImpl
-        : public ICommandBuffer
-        , public CommandWriter
-        , public RefObject
+    virtual void setPipelineState(IPipelineState* state) override
     {
-    public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        ICommandBuffer* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ICommandBuffer)
-                return static_cast<ICommandBuffer*>(this);
-            return nullptr;
-        }
-    public:
-        virtual SLANG_NO_THROW void SLANG_MCALL encodeRenderCommands(
-            IRenderPassLayout* renderPass,
-            IFramebuffer* framebuffer,
-            IRenderCommandEncoder** outEncoder) override
-        {
-            SLANG_UNUSED(renderPass);
-            SLANG_UNUSED(framebuffer);
-            *outEncoder = nullptr;
-        }
+        m_currentPipeline = static_cast<CPUPipelineState*>(state);
+    }
 
-        class ComputeCommandEncoderImpl
-            : public IComputeCommandEncoder
-        {
-        public:
-            virtual SLANG_NO_THROW SlangResult SLANG_MCALL
-                queryInterface(SlangUUID const& uuid, void** outObject) override
-            {
-                if (uuid == GfxGUID::IID_ISlangUnknown ||
-                    uuid == GfxGUID::IID_IComputeCommandEncoder)
-                {
-                    *outObject = static_cast<IComputeCommandEncoder*>(this);
-                    return SLANG_OK;
-                }
-                *outObject = nullptr;
-                return SLANG_E_NO_INTERFACE;
-            }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-
-        public:
-            CommandWriter* m_writer;
-
-            virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
-            void init(CommandBufferImpl* cmdBuffer)
-            {
-                m_writer = cmdBuffer;
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
-            {
-                m_writer->setPipelineState(state);
-            }
-            virtual SLANG_NO_THROW void SLANG_MCALL
-                bindRootShaderObject(IShaderObject* object) override
-            {
-                m_writer->bindRootShaderObject(PipelineType::Compute, object);
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
-            {
-                m_writer->dispatchCompute(x, y, z);
-            }
-        };
-
-        ComputeCommandEncoderImpl m_computeCommandEncoder;
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            encodeComputeCommands(IComputeCommandEncoder** outEncoder) override
-        {
-            m_computeCommandEncoder.init(this);
-            *outEncoder = &m_computeCommandEncoder;
-        }
-
-        class ResourceCommandEncoderImpl
-            : public IResourceCommandEncoder
-        {
-        public:
-            virtual SLANG_NO_THROW SlangResult SLANG_MCALL
-                queryInterface(SlangUUID const& uuid, void** outObject) override
-            {
-                if (uuid == GfxGUID::IID_ISlangUnknown ||
-                    uuid == GfxGUID::IID_IResourceCommandEncoder)
-                {
-                    *outObject = static_cast<IResourceCommandEncoder*>(this);
-                    return SLANG_OK;
-                }
-                *outObject = nullptr;
-                return SLANG_E_NO_INTERFACE;
-            }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-
-        public:
-            CommandWriter* m_writer;
-
-            void init(CommandBufferImpl* cmdBuffer)
-            {
-                m_writer = cmdBuffer;
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
-            virtual SLANG_NO_THROW void SLANG_MCALL copyBuffer(
-                IBufferResource* dst,
-                size_t dstOffset,
-                IBufferResource* src,
-                size_t srcOffset,
-                size_t size) override
-            {
-                m_writer->copyBuffer(dst, dstOffset, src, srcOffset, size);
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL
-            uploadBufferData(IBufferResource* dst, size_t offset, size_t size, void* data) override
-            {
-                m_writer->uploadBufferData(dst, offset, size, data);
-            }
-        };
-
-        ResourceCommandEncoderImpl m_resourceCommandEncoder;
-
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            encodeResourceCommands(IResourceCommandEncoder** outEncoder) override
-        {
-            m_resourceCommandEncoder.init(this);
-            *outEncoder = &m_resourceCommandEncoder;
-        }
-
-        virtual SLANG_NO_THROW void SLANG_MCALL close() override {}
-    };
-
-    class CommandQueueImpl
-        : public ICommandQueue
-        , public RefObject
+    virtual void bindRootShaderObject(IShaderObject* object) override
     {
-    public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
-        ICommandQueue* getInterface(const Guid& guid)
+        m_currentRootObject = static_cast<CPURootShaderObject*>(object);
+    }
+
+    virtual void dispatchCompute(int x, int y, int z) override
+    {
+        int entryPointIndex = 0;
+        int targetIndex = 0;
+
+        // Specialize the compute kernel based on the shader object bindings.
+        RefPtr<PipelineStateBase> newPipeline;
+        maybeSpecializePipeline(m_currentPipeline, m_currentRootObject, newPipeline);
+        m_currentPipeline = static_cast<CPUPipelineState*>(newPipeline.Ptr());
+
+        auto program = m_currentPipeline->getProgram();
+        auto entryPointLayout =
+            m_currentRootObject->getLayout()->getEntryPoint(entryPointIndex);
+        auto entryPointName = entryPointLayout->getEntryPointName();
+
+        auto entryPointObject = m_currentRootObject->getEntryPoint(entryPointIndex);
+
+        ComPtr<ISlangSharedLibrary> sharedLibrary;
+        ComPtr<ISlangBlob> diagnostics;
+        auto compileResult = program->slangProgram->getEntryPointHostCallable(
+            entryPointIndex, targetIndex, sharedLibrary.writeRef(), diagnostics.writeRef());
+        if (diagnostics)
         {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ICommandQueue)
-                return static_cast<ICommandQueue*>(this);
-            return nullptr;
+            getDebugCallback()->handleMessage(
+                compileResult == SLANG_OK ? DebugMessageType::Warning : DebugMessageType::Error,
+                DebugMessageSource::Slang,
+                (char*)diagnostics->getBufferPointer());
         }
+        if (SLANG_FAILED(compileResult)) return;
 
-    public:
-        RefPtr<CPUPipelineState> currentPipeline;
-        RefPtr<CPURootShaderObject> currentRootObject;
-        RefPtr<CPUDevice> renderer;
-        Desc m_desc;
-    public:
-        void init(CPUDevice* inRenderer)
-        {
-            renderer = inRenderer;
-            m_desc.type = ICommandQueue::QueueType::Graphics;
-        }
-        ~CommandQueueImpl()
-        {
-            currentPipeline = nullptr;
-            currentRootObject = nullptr;
-        }
+        auto func = (slang_prelude::ComputeFunc) sharedLibrary->findSymbolAddressByName(entryPointName);
 
-    public:
-        virtual SLANG_NO_THROW const Desc& SLANG_MCALL getDesc() override
-        {
-            return m_desc;
-        }
-        virtual SLANG_NO_THROW Result SLANG_MCALL
-            createCommandBuffer(ICommandBuffer** outCommandBuffer) override
-        {
-            RefPtr<CommandBufferImpl> result = new CommandBufferImpl();
-            *outCommandBuffer = result.detach();
-            return SLANG_OK;
-        }
+        slang_prelude::ComputeVaryingInput varyingInput;
+        varyingInput.startGroupID.x = 0;
+        varyingInput.startGroupID.y = 0;
+        varyingInput.startGroupID.z = 0;
+        varyingInput.endGroupID.x = x;
+        varyingInput.endGroupID.y = y;
+        varyingInput.endGroupID.z = z;
 
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            executeCommandBuffers(uint32_t count, ICommandBuffer* const* commandBuffers) override
-        {
-            for (uint32_t i = 0; i < count; i++)
-            {
-                execute(static_cast<CommandBufferImpl*>(commandBuffers[i]));
-            }
-        }
+        auto globalParamsData = m_currentRootObject->m_data;
+        auto entryPointParamsData = entryPointObject->m_data;
+        func(&varyingInput, entryPointParamsData, globalParamsData);
+    }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL wait() override
-        {}
-
-    public:
-        void setPipelineState(IPipelineState* state)
-        {
-            currentPipeline = static_cast<CPUPipelineState*>(state);
-        }
-
-        Result bindRootShaderObject(PipelineType pipelineType, IShaderObject* object)
-        {
-            currentRootObject = static_cast<CPURootShaderObject*>(object);
-            if (currentRootObject)
-                return SLANG_OK;
-            return SLANG_E_INVALID_ARG;
-        }
-
-        void dispatchCompute(int x, int y, int z)
-        {
-            int entryPointIndex = 0;
-            int targetIndex = 0;
-
-            // Specialize the compute kernel based on the shader object bindings.
-            RefPtr<PipelineStateBase> newPipeline;
-            renderer->maybeSpecializePipeline(currentPipeline, currentRootObject, newPipeline);
-            currentPipeline = static_cast<CPUPipelineState*>(newPipeline.Ptr());
-
-            auto program = currentPipeline->getProgram();
-            auto entryPointLayout = currentRootObject->getLayout()->getEntryPoint(entryPointIndex);
-            auto entryPointName = entryPointLayout->getEntryPointName();
-
-            auto entryPointObject = currentRootObject->getEntryPoint(entryPointIndex);
-
-            ComPtr<ISlangSharedLibrary> sharedLibrary;
-            program->slangProgram->getEntryPointHostCallable(entryPointIndex, targetIndex, sharedLibrary.writeRef());
-
-            auto func = (slang_prelude::ComputeFunc) sharedLibrary->findSymbolAddressByName(entryPointName);
-
-            slang_prelude::ComputeVaryingInput varyingInput;
-            varyingInput.startGroupID.x = 0;
-            varyingInput.startGroupID.y = 0;
-            varyingInput.startGroupID.z = 0;
-            varyingInput.endGroupID.x = x;
-            varyingInput.endGroupID.y = y;
-            varyingInput.endGroupID.z = z;
-
-            auto globalParamsData = currentRootObject->m_data;
-            auto entryPointParamsData = entryPointObject->m_data;
-            func(&varyingInput, entryPointParamsData, globalParamsData);
-        }
-
-        void copyBuffer(
-            IBufferResource* dst,
-            size_t dstOffset,
-            IBufferResource* src,
-            size_t srcOffset,
-            size_t size)
-        {
-            auto dstImpl = static_cast<CPUBufferResource*>(dst);
-            auto srcImpl = static_cast<CPUBufferResource*>(src);
-            memcpy(
-                (uint8_t*)dstImpl->m_data + dstOffset,
-                (uint8_t*)srcImpl->m_data + srcOffset,
-                size);
-        }
-
-        void uploadBufferData(IBufferResource* dst, size_t offset, size_t size, void* data)
-        {
-            auto dstImpl = static_cast<CPUBufferResource*>(dst);
-            memcpy((uint8_t*)dstImpl->m_data + offset, data, size);
-        }
-
-        void execute(CommandBufferImpl* commandBuffer)
-        {
-            for (auto& cmd : commandBuffer->m_commands)
-            {
-                switch (cmd.name)
-                {
-                case CommandName::SetPipelineState:
-                    setPipelineState(commandBuffer->getObject<IPipelineState>(cmd.operands[0]));
-                    break;
-                case CommandName::BindRootShaderObject:
-                    bindRootShaderObject(
-                        (PipelineType)cmd.operands[0],
-                        commandBuffer->getObject<IShaderObject>(cmd.operands[1]));
-                    break;
-                case CommandName::DispatchCompute:
-                    dispatchCompute(
-                        int(cmd.operands[0]), int(cmd.operands[1]), int(cmd.operands[2]));
-                    break;
-                case CommandName::CopyBuffer:
-                    copyBuffer(
-                        commandBuffer->getObject<IBufferResource>(cmd.operands[0]),
-                        cmd.operands[1],
-                        commandBuffer->getObject<IBufferResource>(cmd.operands[2]),
-                        cmd.operands[3],
-                        cmd.operands[4]);
-                    break;
-                case CommandName::UploadBufferData:
-                    uploadBufferData(
-                        commandBuffer->getObject<IBufferResource>(cmd.operands[0]),
-                        cmd.operands[1],
-                        cmd.operands[2],
-                        commandBuffer->getData<uint8_t>(cmd.operands[3]));
-                    break;
-                }
-            }
-        }
-    };
+    virtual void copyBuffer(
+        IBufferResource* dst,
+        size_t dstOffset,
+        IBufferResource* src,
+        size_t srcOffset,
+        size_t size) override
+    {
+        auto dstImpl = static_cast<CPUBufferResource*>(dst);
+        auto srcImpl = static_cast<CPUBufferResource*>(src);
+        memcpy(
+            (uint8_t*)dstImpl->m_data + dstOffset,
+            (uint8_t*)srcImpl->m_data + srcOffset,
+            size);
+    }
 
 public:
     ~CPUDevice()
@@ -1428,32 +1221,33 @@ public:
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureResource(
-        IResource::Usage initialUsage,
         const ITextureResource::Desc& desc,
         const ITextureResource::SubresourceData* initData,
         ITextureResource** outResource) override
     {
-        RefPtr<CPUTextureResource> texture = new CPUTextureResource(desc);
+        TextureResource::Desc srcDesc = fixupTextureDesc(desc);
+
+        RefPtr<CPUTextureResource> texture = new CPUTextureResource(srcDesc);
 
         SLANG_RETURN_ON_FAIL(texture->init(initData));
 
-        *outResource = texture.detach();
+        returnComPtr(outResource, texture);
         return SLANG_OK;
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferResource(
-        IResource::Usage initialUsage,
-        const IBufferResource::Desc& desc,
+        const IBufferResource::Desc& descIn,
         const void* initData,
         IBufferResource** outResource) override
     {
+        auto desc = fixupBufferDesc(descIn);
         RefPtr<CPUBufferResource> resource = new CPUBufferResource(desc);
         SLANG_RETURN_ON_FAIL(resource->init());
         if (initData)
         {
             SLANG_RETURN_ON_FAIL(resource->setData(0, desc.sizeInBytes, initData));
         }
-        *outResource = resource.detach();
+        returnComPtr(outResource, resource);
         return SLANG_OK;
     }
 
@@ -1462,7 +1256,7 @@ public:
     {
         auto texture = static_cast<CPUTextureResource*>(inTexture);
         RefPtr<CPUTextureView> view = new CPUTextureView(desc, texture);
-        *outView = view.detach();
+        returnComPtr(outView, view);
         return SLANG_OK;
     }
 
@@ -1471,7 +1265,7 @@ public:
     {
         auto buffer = static_cast<CPUBufferResource*>(inBuffer);
         RefPtr<CPUBufferView> view = new CPUBufferView(desc, buffer);
-        *outView = view.detach();
+        returnComPtr(outView, view);
         return SLANG_OK;
     }
 
@@ -1480,7 +1274,7 @@ public:
         ShaderObjectLayoutBase**        outLayout) override
     {
         RefPtr<CPUShaderObjectLayout> cpuLayout = new CPUShaderObjectLayout(this, typeLayout);
-        *outLayout = cpuLayout.detach();
+        returnRefPtrMove(outLayout, cpuLayout);
 
         return SLANG_OK;
     }
@@ -1493,20 +1287,19 @@ public:
 
         RefPtr<CPUShaderObject> result = new CPUShaderObject();
         SLANG_RETURN_ON_FAIL(result->init(this, cpuLayout));
-        *outObject = result.detach();
+        returnComPtr(outObject, result);
 
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createRootShaderObject(IShaderProgram* program, IShaderObject** outObject) override
+    virtual Result createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject) override
     {
         auto cpuProgram = static_cast<CPUShaderProgram*>(program);
         auto cpuProgramLayout = cpuProgram->layout;
 
         RefPtr<CPURootShaderObject> result = new CPURootShaderObject();
         SLANG_RETURN_ON_FAIL(result->init(this, cpuProgramLayout));
-        *outObject = result.detach();
+        returnRefPtrMove(outObject, result);
         return SLANG_OK;
     }
 
@@ -1532,7 +1325,7 @@ public:
             cpuProgram->layout = cpuProgramLayout;
         }
 
-        *outProgram = cpuProgram.detach();
+        returnComPtr(outProgram, cpuProgram);
         return SLANG_OK;
     }
 
@@ -1541,7 +1334,7 @@ public:
     {
         RefPtr<CPUPipelineState> state = new CPUPipelineState();
         state->init(desc);
-        *outState = state.detach();
+        returnComPtr(outState, state);
         return Result();
     }
 
@@ -1551,44 +1344,7 @@ public:
     }
 
 public:
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createCommandQueue(const ICommandQueue::Desc& desc, ICommandQueue** outQueue) override
-    {
-        RefPtr<CommandQueueImpl> queue = new CommandQueueImpl();
-        queue->init(this);
-        *outQueue = queue.detach();
-        return SLANG_OK;
-    }
-    virtual SLANG_NO_THROW Result SLANG_MCALL createSwapchain(
-        const ISwapchain::Desc& desc, WindowHandle window, ISwapchain** outSwapchain) override
-    {
-        SLANG_UNUSED(desc);
-        SLANG_UNUSED(window);
-        SLANG_UNUSED(outSwapchain);
-        return SLANG_FAIL;
-    }
-    virtual SLANG_NO_THROW Result SLANG_MCALL createFramebufferLayout(
-        const IFramebufferLayout::Desc& desc, IFramebufferLayout** outLayout) override
-    {
-        SLANG_UNUSED(desc);
-        SLANG_UNUSED(outLayout);
-        return SLANG_FAIL;
-    }
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createFramebuffer(const IFramebuffer::Desc& desc, IFramebuffer** outFramebuffer) override
-    {
-        SLANG_UNUSED(desc);
-        SLANG_UNUSED(outFramebuffer);
-        return SLANG_FAIL;
-    }
-    virtual SLANG_NO_THROW Result SLANG_MCALL createRenderPassLayout(
-        const IRenderPassLayout::Desc& desc,
-        IRenderPassLayout** outRenderPassLayout) override
-    {
-        SLANG_UNUSED(desc);
-        SLANG_UNUSED(outRenderPassLayout);
-        return SLANG_FAIL;
-    }
+    
     virtual SLANG_NO_THROW Result SLANG_MCALL
         createSamplerState(ISamplerState::Desc const& desc, ISamplerState** outSampler) override
     {
@@ -1596,54 +1352,16 @@ public:
         *outSampler = nullptr;
         return SLANG_OK;
     }
-    
-    virtual SLANG_NO_THROW Result SLANG_MCALL createInputLayout(
-        const InputElementDesc* inputElements,
-        UInt inputElementCount,
-        IInputLayout** outLayout) override
-    {
-        SLANG_UNUSED(inputElements);
-        SLANG_UNUSED(inputElementCount);
-        SLANG_UNUSED(outLayout);
-        return SLANG_E_NOT_AVAILABLE;
-    }
-    virtual SLANG_NO_THROW Result SLANG_MCALL createGraphicsPipelineState(
-        const GraphicsPipelineStateDesc& desc, IPipelineState** outState) override
-    {
-        SLANG_UNUSED(desc);
-        SLANG_UNUSED(outState);
-        return SLANG_E_NOT_AVAILABLE;
-    }
-    virtual SLANG_NO_THROW SlangResult SLANG_MCALL readTextureResource(
-        ITextureResource* texture,
-        ResourceState state,
-        ISlangBlob** outBlob,
-        size_t* outRowPitch,
-        size_t* outPixelSize) override
-    {
-        SLANG_UNUSED(texture);
-        SLANG_UNUSED(outBlob);
-        SLANG_UNUSED(outRowPitch);
-        SLANG_UNUSED(outPixelSize);
 
-        return SLANG_E_NOT_AVAILABLE;
-    }
-    virtual SLANG_NO_THROW Result SLANG_MCALL readBufferResource(
-        IBufferResource* buffer,
-        size_t offset,
-        size_t size,
-        ISlangBlob** outBlob) override
+    virtual void submitGpuWork() override {}
+    virtual void waitForGpu() override {}
+    virtual void* map(IBufferResource* buffer, MapFlavor flavor) override
     {
+        SLANG_UNUSED(flavor);
         auto bufferImpl = static_cast<CPUBufferResource*>(buffer);
-        RefPtr<ListBlob> blob = new ListBlob();
-        blob->m_data.setCount((Index)size);
-        memcpy(
-            blob->m_data.getBuffer(),
-            (uint8_t*)bufferImpl->m_data + offset,
-            size);
-        *outBlob = blob.detach();
-        return SLANG_OK;
+        return bufferImpl->m_data;
     }
+    virtual void unmap(IBufferResource* buffer) override { SLANG_UNUSED(buffer); }
 };
 
 SlangResult CPUShaderObject::init(IDevice* device, CPUShaderObjectLayout* typeLayout)
@@ -1725,7 +1443,7 @@ SlangResult SLANG_MCALL createCPUDevice(const IDevice::Desc* desc, IDevice** out
 {
     RefPtr<CPUDevice> result = new CPUDevice();
     SLANG_RETURN_ON_FAIL(result->initialize(*desc));
-    *outDevice = result.detach();
+    returnComPtr(outDevice, result);
     return SLANG_OK;
 }
 

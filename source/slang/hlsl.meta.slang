@@ -1066,6 +1066,7 @@ matrix<uint,N,M> asuint(matrix<uint,N,M> x)
 
 __target_intrinsic(hlsl)
 __target_intrinsic(glsl, "uint16_t(packHalf2x16(vec2($0, 0.0)))")
+__target_intrinsic(cuda, "__half_as_ushort")
 uint16_t asuint16(float16_t value);
 
 vector<uint16_t,N> asuint16<let N : int>(vector<float16_t,N> value)
@@ -1078,6 +1079,7 @@ matrix<uint16_t,R,C> asuint16<let R : int, let C : int>(matrix<float16_t,R,C> va
 
 __target_intrinsic(hlsl)
 __target_intrinsic(glsl, "float16_t(unpackHalf2x16($0).x)")
+__target_intrinsic(cuda, "__ushort_as_half")
 float16_t asfloat16(uint16_t value);
 
 vector<float16_t,N> asfloat16<let N : int>(vector<uint16_t,N> value)
@@ -1088,11 +1090,16 @@ matrix<float16_t,R,C> asfloat16<let R : int, let C : int>(matrix<uint16_t,R,C> v
 
 // Float<->signed cases:
 
-__target_intrinsic(hlsl) [__unsafeForceInlineEarly] int16_t asint16(float16_t value) { return asuint16(value); }
+__target_intrinsic(hlsl)
+__target_intrinsic(cuda, "__half_as_short")
+[__unsafeForceInlineEarly] int16_t asint16(float16_t value) { return asuint16(value); }
 __target_intrinsic(hlsl) [__unsafeForceInlineEarly] vector<int16_t,N> asint16<let N : int>(vector<float16_t,N> value) { return asuint16(value); }
 __target_intrinsic(hlsl) [__unsafeForceInlineEarly] matrix<int16_t,R,C> asint16<let R : int, let C : int>(matrix<float16_t,R,C> value) { return asuint16(value); }
 
-__target_intrinsic(hlsl) [__unsafeForceInlineEarly] float16_t asfloat16(int16_t value) { return asfloat16(asuint16(value)); }
+__target_intrinsic(hlsl)
+__target_intrinsic(cuda, "__short_as_half")
+[__unsafeForceInlineEarly] float16_t asfloat16(int16_t value) { return asfloat16(asuint16(value)); }
+
 __target_intrinsic(hlsl) [__unsafeForceInlineEarly] vector<float16_t,N> asfloat16<let N : int>(vector<int16_t,N> value) { return asfloat16(asuint16(value)); }
 __target_intrinsic(hlsl) [__unsafeForceInlineEarly] matrix<float16_t,R,C> asfloat16<let R : int, let C : int>(matrix<int16_t,R,C> value) { return asfloat16(asuint16(value)); }
 
@@ -1593,6 +1600,8 @@ vector<float, N> f16tof32(vector<uint, N> value)
     VECTOR_MAP_UNARY(float, N, f16tof32, value);
 }
 
+
+
 // Convert to 16-bit float stored in low bits of integer
 __target_intrinsic(glsl, "packHalf2x16(vec2($0,0.0))")
 __glsl_version(420)
@@ -1605,6 +1614,39 @@ vector<uint, N> f32tof16(vector<float, N> value)
 {
     VECTOR_MAP_UNARY(uint, N, f32tof16, value);
 }
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// The following is Slang specific and NOT part of standard HLSL
+// It's not clear what happens with float16 time in HLSL -> can the float16 coerce to uint for example? If so that would
+// give the wrong result
+
+__target_intrinsic(glsl, "unpackHalf2x16($0).x")
+__target_intrinsic(cuda, "__half2float")
+__glsl_version(420)
+float f16tof32(float16_t value);
+
+__generic<let N : int>
+__target_intrinsic(hlsl)
+__target_intrinsic(cuda, "__half2float")
+vector<float, N> f16tof32(vector<float16_t, N> value)
+{
+    VECTOR_MAP_UNARY(float, N, f16tof32, value);
+}
+
+// Convert to float16_t
+__target_intrinsic(glsl, "packHalf2x16(vec2($0,0.0))")
+__glsl_version(420)
+__target_intrinsic(cuda, "__float2half")
+float16_t f32tof16_(float value);
+
+__generic<let N : int>
+__target_intrinsic(cuda, "__float2half")
+vector<float16_t, N> f32tof16_(vector<float, N> value)
+{
+    VECTOR_MAP_UNARY(uint, N, f32tof16, value);
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 // Flip surface normal to face forward, if needed
 __generic<T : __BuiltinFloatingPointType, let N : int>
@@ -4417,12 +4459,14 @@ bool ReportHit(float tHit, uint hitKind, A attributes)
 __target_intrinsic(hlsl)
 __target_intrinsic(GL_NV_ray_tracing, ignoreIntersectionNV)
 __target_intrinsic(GL_EXT_ray_tracing, "ignoreIntersectionEXT;")
+__target_intrinsic(cuda, "optixIgnoreIntersection")
 void IgnoreHit();
 
 // 10.3.5
 __target_intrinsic(hlsl)
 __target_intrinsic(GL_NV_ray_tracing, terminateRayNV)
 __target_intrinsic(GL_EXT_ray_tracing, "terminateRayEXT;")
+__target_intrinsic(cuda, "optixTerminateRay")
 void AcceptHitAndEndSearch();
 
 // 10.4 - System Values and Special Semantics
@@ -4439,20 +4483,24 @@ uint3 DispatchRaysIndex();
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_LaunchSizeNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_LaunchSizeEXT)")
+__target_intrinsic(cuda, "optixGetLaunchDimensions")
 uint3 DispatchRaysDimensions();
 
 // 10.4.2 - Ray System Values
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_WorldRayOriginNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_WorldRayOriginEXT)")
+__target_intrinsic(cuda, "optixGetWorldRayOrigin")
 float3 WorldRayOrigin();
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_WorldRayDirectionNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_WorldRayDirectionEXT)")
+__target_intrinsic(cuda, "optixGetWorldRayDirection")
 float3 WorldRayDirection();
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_RayTminNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_RayTminEXT)")
+__target_intrinsic(cuda, "optixGetRayTmin")
 float RayTMin();
 
 // Note: The `RayTCurrent()` intrinsic should translate to
@@ -4467,32 +4515,41 @@ float RayTMin();
 //
 __target_intrinsic(GL_NV_ray_tracing, "(gl_RayTmaxNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_RayTmaxEXT)")
+__target_intrinsic(cuda, "optixGetRayTmax")
 float RayTCurrent();
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_IncomingRayFlagsNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_IncomingRayFlagsEXT)")
+__target_intrinsic(cuda, "optixGetRayFlags")
 uint RayFlags();
 
 // 10.4.3 - Primitive/Object Space System Values
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_InstanceCustomIndexNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_InstanceCustomIndexEXT)")
+__target_intrinsic(cuda, "optixGetInstanceIndex")
 uint InstanceIndex();
 
 __target_intrinsic(__glslRayTracing, "(gl_InstanceID)")
+__target_intrinsic(cuda, "optixGetInstanceId")
 uint InstanceID();
 
 __target_intrinsic(__glslRayTracing, "(gl_PrimitiveID)")
+__target_intrinsic(cuda, "optixGetPrimitiveIndex")
 uint PrimitiveIndex();
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_ObjectRayOriginNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_ObjectRayOriginEXT)")
+__target_intrinsic(cuda, "optixGetObjectRayOrigin")
 float3 ObjectRayOrigin();
 
 __target_intrinsic(GL_NV_ray_tracing, "(gl_ObjectRayDirectionNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_ObjectRayDirectionEXT)")
+__target_intrinsic(cuda, "optixGetObjectRayDirection")
 float3 ObjectRayDirection();
 
+// TODO: optix has an optixGetObjectToWorldTransformMatrix function that returns 12
+// floats by reference. 
 __target_intrinsic(GL_NV_ray_tracing, "transpose(gl_ObjectToWorldNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "transpose(gl_ObjectToWorldEXT)")
 float3x4 ObjectToWorld3x4();
@@ -4534,6 +4591,7 @@ float3x4 WorldToObject() { return WorldToObject3x4(); }
 // 10.4.4 - Hit Specific System values
 __target_intrinsic(GL_NV_ray_tracing, "(gl_HitKindNV)")
 __target_intrinsic(GL_EXT_ray_tracing, "(gl_HitKindEXT)")
+__target_intrinsic(cuda, "optixGetHitKind")
 uint HitKind();
 
 // Pre-defined hit kinds (not documented explicitly)

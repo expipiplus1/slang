@@ -11,6 +11,7 @@ const Slang::Guid GfxGUID::IID_ISlangUnknown = SLANG_UUID_ISlangUnknown;
 const Slang::Guid GfxGUID::IID_IShaderProgram = SLANG_UUID_IShaderProgram;
 const Slang::Guid GfxGUID::IID_IInputLayout = SLANG_UUID_IInputLayout;
 const Slang::Guid GfxGUID::IID_IPipelineState = SLANG_UUID_IPipelineState;
+const Slang::Guid GfxGUID::IID_ITransientResourceHeap = SLANG_UUID_ITransientResourceHeap;
 const Slang::Guid GfxGUID::IID_IResourceView = SLANG_UUID_IResourceView;
 const Slang::Guid GfxGUID::IID_IFramebuffer = SLANG_UUID_IFrameBuffer;
 const Slang::Guid GfxGUID::IID_IFramebufferLayout = SLANG_UUID_IFramebufferLayout;
@@ -20,7 +21,7 @@ const Slang::Guid GfxGUID::IID_ISamplerState = SLANG_UUID_ISamplerState;
 const Slang::Guid GfxGUID::IID_IResource = SLANG_UUID_IResource;
 const Slang::Guid GfxGUID::IID_IBufferResource = SLANG_UUID_IBufferResource;
 const Slang::Guid GfxGUID::IID_ITextureResource = SLANG_UUID_ITextureResource;
-const Slang::Guid GfxGUID::IID_IRenderer = SLANG_UUID_IRenderer;
+const Slang::Guid GfxGUID::IID_IDevice = SLANG_UUID_IDevice;
 const Slang::Guid GfxGUID::IID_IShaderObject = SLANG_UUID_IShaderObject;
 
 const Slang::Guid GfxGUID::IID_IRenderPassLayout = SLANG_UUID_IRenderPassLayout;
@@ -182,6 +183,20 @@ IShaderProgram* gfx::ShaderProgramBase::getInterface(const Guid& guid)
     return nullptr;
 }
 
+IInputLayout* gfx::InputLayoutBase::getInterface(const Guid& guid)
+{
+    if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IInputLayout)
+        return static_cast<IInputLayout*>(this);
+    return nullptr;
+}
+
+IFramebufferLayout* gfx::FramebufferLayoutBase::getInterface(const Guid& guid)
+{
+    if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IFramebufferLayout)
+        return static_cast<IFramebufferLayout*>(this);
+    return nullptr;
+}
+
 IPipelineState* gfx::PipelineStateBase::getInterface(const Guid& guid)
 {
     if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IPipelineState)
@@ -196,11 +211,19 @@ void PipelineStateBase::initializeBase(const PipelineStateDesc& inDesc)
     auto program = desc.getProgram();
     m_program = program;
     isSpecializable = (program->slangProgram && program->slangProgram->getSpecializationParamCount() != 0);
+
+    // Hold a strong reference to inputLayout and framebufferLayout objects to prevent it from
+    // destruction.
+    if (inDesc.type == PipelineType::Graphics)
+    {
+        inputLayout = static_cast<InputLayoutBase*>(inDesc.graphics.inputLayout);
+        framebufferLayout = static_cast<FramebufferLayoutBase*>(inDesc.graphics.framebufferLayout);
+    }
 }
 
 IDevice* gfx::RendererBase::getInterface(const Guid& guid)
 {
-    return (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IRenderer)
+    return (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IDevice)
                ? static_cast<IDevice*>(this)
                : nullptr;
 }
@@ -268,6 +291,30 @@ ShaderComponentID ShaderCache::getComponentId(slang::TypeReflection* type)
     switch (type->getKind())
     {
     case slang::TypeReflection::Kind::Specialized:
+        {
+            auto baseType = type->getElementType();
+
+            StringBuilder builder;
+            builder.append(UnownedTerminatedStringSlice(baseType->getName()));
+
+            auto rawType = (SlangReflectionType*) type;
+
+            builder.appendChar('<');
+            SlangInt argCount = spReflectionType_getSpecializedTypeArgCount(rawType);
+            for(SlangInt a = 0; a < argCount; ++a)
+            {
+                if(a != 0) builder.appendChar(',');
+                if(auto rawArgType = spReflectionType_getSpecializedTypeArgType(rawType, a))
+                {
+                    auto argType = (slang::TypeReflection*) rawArgType;
+                    builder.append(argType->getName());
+                }
+            }
+            builder.appendChar('>');
+            key.typeName = builder.getUnownedSlice();
+            key.updateHash();
+            return getComponentId(key);
+        }
         // TODO: collect specialization arguments and append them to `key`.
         SLANG_UNIMPLEMENTED_X("specialized type");
     default:
@@ -299,7 +346,7 @@ ShaderComponentID ShaderCache::getComponentId(ComponentKey key)
     return resultId;
 }
 
-void ShaderCache::addSpecializedPipeline(PipelineKey key, Slang::ComPtr<IPipelineState> specializedPipeline)
+void ShaderCache::addSpecializedPipeline(PipelineKey key, Slang::RefPtr<PipelineStateBase> specializedPipeline)
 {
     specializedPipelines[key] = specializedPipeline;
 }
@@ -362,7 +409,7 @@ Result RendererBase::maybeSpecializePipeline(
         pipelineKey.specializationArgs.addRange(specializationArgs.componentIDs);
         pipelineKey.updateHash();
 
-        ComPtr<IPipelineState> specializedPipelineState = shaderCache.getSpecializedPipelineState(pipelineKey);
+        RefPtr<PipelineStateBase> specializedPipelineState = shaderCache.getSpecializedPipelineState(pipelineKey);
         // Try to find specialized pipeline from shader cache.
         if (!specializedPipelineState)
         {
@@ -392,33 +439,61 @@ Result RendererBase::maybeSpecializePipeline(
             SLANG_RETURN_ON_FAIL(createProgram(specializedProgramDesc, specializedProgram.writeRef()));
 
             // Create specialized pipeline state.
+            ComPtr<IPipelineState> specializedPipelineComPtr;
             switch (pipelineType)
             {
             case PipelineType::Compute:
             {
                 auto pipelineDesc = currentPipeline->desc.compute;
                 pipelineDesc.program = specializedProgram;
-                SLANG_RETURN_ON_FAIL(createComputePipelineState(pipelineDesc, specializedPipelineState.writeRef()));
+                SLANG_RETURN_ON_FAIL(
+                    createComputePipelineState(pipelineDesc, specializedPipelineComPtr.writeRef()));
                 break;
             }
             case PipelineType::Graphics:
             {
                 auto pipelineDesc = currentPipeline->desc.graphics;
                 pipelineDesc.program = specializedProgram;
-                SLANG_RETURN_ON_FAIL(createGraphicsPipelineState(pipelineDesc, specializedPipelineState.writeRef()));
+                SLANG_RETURN_ON_FAIL(createGraphicsPipelineState(
+                    pipelineDesc, specializedPipelineComPtr.writeRef()));
                 break;
             }
             default:
                 break;
             }
-            auto specializedPipelineStateBase = static_cast<PipelineStateBase*>(specializedPipelineState.get());
-            specializedPipelineStateBase->unspecializedPipelineState = currentPipeline;
+            specializedPipelineState =
+                static_cast<PipelineStateBase*>(specializedPipelineComPtr.get());
+            specializedPipelineState->unspecializedPipelineState = currentPipeline;
             shaderCache.addSpecializedPipeline(pipelineKey, specializedPipelineState);
         }
-        outNewPipeline = static_cast<PipelineStateBase*>(specializedPipelineState.get());
+        auto specializedPipelineStateBase = static_cast<PipelineStateBase*>(specializedPipelineState.Ptr());
+        outNewPipeline = specializedPipelineStateBase;
     }
     return SLANG_OK;
 }
 
+IDebugCallback*& _getDebugCallback()
+{
+    static IDebugCallback* callback = nullptr;
+    return callback;
+}
+
+class NullDebugCallback : public IDebugCallback
+{
+public:
+    virtual SLANG_NO_THROW void SLANG_MCALL
+        handleMessage(DebugMessageType type, DebugMessageSource source, const char* message) override
+    {
+        SLANG_UNUSED(type);
+        SLANG_UNUSED(source);
+        SLANG_UNUSED(message);
+    }
+};
+IDebugCallback* _getNullDebugCallback()
+{
+    static NullDebugCallback result = {};
+    return &result;
+}
 
 } // namespace gfx
+

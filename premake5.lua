@@ -263,7 +263,7 @@ workspace "slang"
         optimize "Off"
         symbols "On"
         defines { "_DEBUG" }
-
+        -- staticruntime "Off"
     -- For the release configuration we will turn optimizations on
     -- (we do not yet micro-manage the optimization settings)
     -- and set the preprocessor definition that VS would add by default.
@@ -549,6 +549,17 @@ function toolSharedLibrary(name)
     kind "SharedLib"
 end
 
+function exampleLibrary(name)
+    group "examples"
+    baseSlangProject(name, "examples/"..name)
+    kind "StaticLib"
+    includedirs { ".", "tools" }
+    links { "gfx", "slang", "platform", "gfx-util", "core"}
+    addCUDAIfEnabled(); 
+end
+
+exampleLibrary "example-base"
+
 -- Finally we have the example programs that show how to use Slang.
 --
 function example(name)
@@ -580,7 +591,7 @@ function example(name)
     -- and the `gfx` abstraction layer (which in turn
     -- depends on the `core` library). We specify all of that here,
     -- rather than in each example.
-    links { "slang", "core", "gfx", "gfx-util", "platform" }
+    links { "example-base", "slang", "gfx", "gfx-util", "platform", "core" }
 
     if isTargetWindows then
     else
@@ -624,6 +635,8 @@ end
 -- declaration of the "Hello, World" example project:
 --
 example "hello-world"
+    kind "ConsoleApp"
+    includedirs {"external/vulkan/include"}
 --
 -- Note how we are calling our custom `example()` subroutine with
 -- the same syntax sugar that Premake usually advocates for their
@@ -632,10 +645,14 @@ example "hello-world"
 --
 
 -- Let's go ahead and set up the projects for our other example now.
+example "triangle"
+
 example "gpu-printing"
     kind "ConsoleApp"
 
 example "shader-toy"
+
+example "model-viewer"
 
 example "shader-object"
     kind "ConsoleApp"
@@ -671,6 +688,28 @@ standardProject("core", "source/core")
         addSourceDir "source/core/unix"
     end
     
+standardProject("compiler-core", "source/compiler-core")
+    uuid "12C1E89D-F5D0-41D3-8E8D-FB3F358F8126"
+    kind "StaticLib"
+    -- We need the compiler-core library to be relocatable to be able to link with slang.so
+    pic "On"
+
+    links { "core" }
+
+    -- For our core implementation, we want to use the most
+    -- aggressive warning level supported by the target, and
+    -- to treat every warning as an error to make sure we
+    -- keep our code free of warnings.
+    --
+    warnings "Extra"
+    flags { "FatalWarnings" }    
+    
+    if isTargetWindows then
+        addSourceDir "source/compiler-core/windows"
+    else
+        addSourceDir "source/compiler-core/unix"
+    end
+    
 --
 -- The cpp extractor is a tool that scans C++ header files to extract
 -- reflection like information, and generate files to handle 
@@ -681,22 +720,7 @@ tool "slang-cpp-extractor"
     uuid "CA8A30D1-8FA9-4330-B7F7-84709246D8DC"
     includedirs { "." }
     
-    files { 
-        "source/slang/slang-lexer.cpp",
-        "source/slang/slang-lexer.h",
-        "source/slang/slang-source-loc.cpp",
-        "source/slang/slang-source-loc.h",
-        "source/slang/slang-file-system.cpp",
-        "source/slang/slang-file-system.h",
-        "source/slang/slang-diagnostics.cpp",
-        "source/slang/slang-diagnostics.h",
-        "source/slang/slang-name.cpp",
-        "source/slang/slang-name.h",
-        "source/slang/slang-token.cpp",
-        "source/slang/slang-token.h",
-    }
-    
-    links { "core" }
+    links { "compiler-core", "core" }
     
 --
 -- `slang-generate` is a tool we use for source code generation on
@@ -720,7 +744,7 @@ tool "slang-embed"
 tool "slang-test"
     uuid "0C768A18-1D25-4000-9F37-DA5FE99E3B64"
     includedirs { "." }
-    links { "core", "slang", "miniz", "lz4" }
+    links { "core", "compiler-core", "slang", "miniz", "lz4" }
     
     -- We want to set to the root of the project, but that doesn't seem to work with '.'. 
     -- So set a path that resolves to the same place.
@@ -1049,7 +1073,7 @@ if enableEmbedStdLib then
     standardProject("slangc-bootstrap", "source/slangc")
         uuid "6339BF31-AC99-4819-B719-679B63451EF0"
         kind "ConsoleApp"
-        links { "core", "miniz", "lz4" }
+        links { "core", "compiler-core", "miniz", "lz4" }
         
         -- We need to run all the generators to be able to build the main 
         -- slang source in source/slang
@@ -1149,7 +1173,7 @@ end
 standardProject("slang", "source/slang")
     uuid "DB00DA62-0533-4AFD-B59F-A67D5B3A0808"
     kind "SharedLib"
-    links { "core", "miniz", "lz4"}
+    links { "core", "compiler-core", "miniz", "lz4"}
     warnings "Extra"
     flags { "FatalWarnings" }
     pic "On"
@@ -1211,6 +1235,10 @@ standardProject("slang", "source/slang")
                 "{COPY} ../../../external/slang-binaries/bin/" .. targetName .. "/libslang-glslang.so %{cfg.targetdir}"
             }
     end
+
+    filter {"configurations:debug"}
+        defines { "SLANG_ENABLE_IR_BREAK_ALLOC=1" }
+    filter {}
        
     
 if enableProfile then
@@ -1250,7 +1278,7 @@ if enableProfile then
         addSourceDir "source/slang"
 
         includedirs { "." }
-        links { "core", "miniz", "lz4"}
+        links { "core", "compiler-core", "miniz", "lz4"}
         
         filter { "system:linux" }
             linkoptions{  "-pg" }

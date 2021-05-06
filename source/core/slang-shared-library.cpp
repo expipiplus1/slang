@@ -20,18 +20,13 @@
 namespace Slang
 {
 
-// Allocate static const storage for the various interface IDs that the Slang API needs to expose
-static const Guid IID_ISlangUnknown = SLANG_UUID_ISlangUnknown;
-static const Guid IID_ISlangSharedLibrary = SLANG_UUID_ISlangSharedLibrary;
-static const Guid IID_ISlangSharedLibraryLoader = SLANG_UUID_ISlangSharedLibraryLoader;
-
 /* !!!!!!!!!!!!!!!!!!!!!!!!!! DefaultSharedLibraryLoader !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 
 /* static */DefaultSharedLibraryLoader DefaultSharedLibraryLoader::s_singleton;
 
 ISlangUnknown* DefaultSharedLibraryLoader::getInterface(const Guid& guid)
 {
-    return (guid == IID_ISlangUnknown || guid == IID_ISlangSharedLibraryLoader) ? static_cast<ISlangSharedLibraryLoader*>(this) : nullptr;
+    return (guid == ISlangUnknown::getTypeGuid() || guid == ISlangSharedLibraryLoader::getTypeGuid()) ? static_cast<ISlangSharedLibraryLoader*>(this) : nullptr;
 }
 
 SlangResult DefaultSharedLibraryLoader::loadSharedLibrary(const char* path, ISlangSharedLibrary** outSharedLibrary)
@@ -81,9 +76,21 @@ TemporarySharedLibrary::~TemporarySharedLibrary()
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!!! DefaultSharedLibrary !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 
-ISlangUnknown* DefaultSharedLibrary::getInterface(const Guid& guid)
+SLANG_NO_THROW SlangResult SLANG_MCALL DefaultSharedLibrary::queryInterface(SlangUUID const& uuid, void** outObject)
 {
-    return (guid == IID_ISlangUnknown || guid == IID_ISlangSharedLibrary) ? static_cast<ISlangSharedLibrary*>(this) : nullptr;
+    if (uuid == DefaultSharedLibrary::getTypeGuid())
+    {
+        *outObject = this;
+        return SLANG_OK;
+    }
+
+    if (uuid == ISlangUnknown::getTypeGuid() || uuid == ISlangSharedLibrary::getTypeGuid()) 
+    {
+        addReference();
+        *outObject = static_cast<ISlangSharedLibrary*>(this);
+        return SLANG_OK;
+    }
+    return SLANG_E_NO_INTERFACE;
 }
 
 DefaultSharedLibrary::~DefaultSharedLibrary()
