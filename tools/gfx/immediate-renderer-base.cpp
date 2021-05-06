@@ -1,5 +1,6 @@
 #include "immediate-renderer-base.h"
 #include "simple-render-pass-layout.h"
+#include "simple-transient-resource-heap.h"
 #include "command-writer.h"
 #include "core/slang-basic.h"
 #include "core/slang-blob.h"
@@ -18,10 +19,10 @@ using Slang::Guid;
 namespace
 {
 
-class CommandBufferImpl : public ICommandBuffer, public RefObject
+class CommandBufferImpl : public ICommandBuffer, public Slang::ComObject
 {
 public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
+    SLANG_COM_OBJECT_IUNKNOWN_ALL
     ICommandBuffer* getInterface(const Guid& guid)
     {
         if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ICommandBuffer)
@@ -31,7 +32,8 @@ public:
 
 public:
     CommandWriter m_writer;
-    ImmediateRendererBase* m_renderer;
+    RefPtr<ImmediateRendererBase> m_renderer;
+    RefPtr<ShaderObjectBase> m_rootShaderObject;
 
     void init(ImmediateRendererBase* renderer)
     {
@@ -39,7 +41,8 @@ public:
     }
 
     void reset()
-    { m_writer.clear();
+    {
+        m_writer.clear();
     }
 
     class RenderCommandEncoderImpl
@@ -49,7 +52,8 @@ public:
         virtual SLANG_NO_THROW SlangResult SLANG_MCALL
             queryInterface(SlangUUID const& uuid, void** outObject) override
         {
-            if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_IRenderCommandEncoder)
+            if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
+                uuid == GfxGUID::IID_IRenderCommandEncoder)
             {
                 *outObject = static_cast<IRenderCommandEncoder*>(this);
                 return SLANG_OK;
@@ -62,11 +66,13 @@ public:
 
     public:
         CommandWriter* m_writer;
+        CommandBufferImpl* m_commandBuffer;
         virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
 
         void init(CommandBufferImpl* cmdBuffer, SimpleRenderPassLayout* renderPass, IFramebuffer* framebuffer)
         {
             m_writer = &cmdBuffer->m_writer;
+            m_commandBuffer = cmdBuffer;
 
             // Encode clear commands.
             m_writer->setFramebuffer(framebuffer);
@@ -99,15 +105,15 @@ public:
             m_writer->clearFrame(clearMask, clearDepth, clearStencil);
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
         {
             m_writer->setPipelineState(state);
-        }
-
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            bindRootShaderObject(IShaderObject* object) override
-        {
-            m_writer->bindRootShaderObject(PipelineType::Graphics, object);
+            auto stateImpl = static_cast<PipelineStateBase*>(state);
+            SLANG_RETURN_ON_FAIL(m_commandBuffer->m_renderer->createRootShaderObject(
+                stateImpl->m_program, m_commandBuffer->m_rootShaderObject.writeRef()));
+            *outRootObject = m_commandBuffer->m_rootShaderObject.Ptr();
+            return SLANG_OK;
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
@@ -142,12 +148,14 @@ public:
 
         virtual SLANG_NO_THROW void SLANG_MCALL draw(UInt vertexCount, UInt startVertex) override
         {
+            m_writer->bindRootShaderObject(m_commandBuffer->m_rootShaderObject);
             m_writer->draw(vertexCount, startVertex);
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
             drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex) override
         {
+            m_writer->bindRootShaderObject(m_commandBuffer->m_rootShaderObject);
             m_writer->drawIndexed(indexCount, startIndex, baseVertex);
         }
 
@@ -177,7 +185,8 @@ public:
         virtual SLANG_NO_THROW SlangResult SLANG_MCALL
             queryInterface(SlangUUID const& uuid, void** outObject) override
         {
-            if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_IComputeCommandEncoder)
+            if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
+                uuid == GfxGUID::IID_IComputeCommandEncoder)
             {
                 *outObject = static_cast<IComputeCommandEncoder*>(this);
                 return SLANG_OK;
@@ -190,6 +199,7 @@ public:
 
     public:
         CommandWriter* m_writer;
+        CommandBufferImpl* m_commandBuffer;
 
         virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override
         {
@@ -198,20 +208,23 @@ public:
         void init(CommandBufferImpl* cmdBuffer)
         {
             m_writer = &cmdBuffer->m_writer;
+            m_commandBuffer = cmdBuffer;
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
         {
             m_writer->setPipelineState(state);
-        }
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            bindRootShaderObject(IShaderObject* object) override
-        {
-            m_writer->bindRootShaderObject(PipelineType::Compute, object);
+            auto stateImpl = static_cast<PipelineStateBase*>(state);
+            SLANG_RETURN_ON_FAIL(m_commandBuffer->m_renderer->createRootShaderObject(
+                stateImpl->m_program, m_commandBuffer->m_rootShaderObject.writeRef()));
+            *outRootObject = m_commandBuffer->m_rootShaderObject.Ptr();
+            return SLANG_OK;
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
         {
+            m_writer->bindRootShaderObject(m_commandBuffer->m_rootShaderObject);
             m_writer->dispatchCompute(x, y, z);
         }
     };
@@ -231,7 +244,8 @@ public:
         virtual SLANG_NO_THROW SlangResult SLANG_MCALL
             queryInterface(SlangUUID const& uuid, void** outObject) override
         {
-            if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_IResourceCommandEncoder)
+            if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
+                uuid == GfxGUID::IID_IResourceCommandEncoder)
             {
                 *outObject = static_cast<IResourceCommandEncoder*>(this);
                 return SLANG_OK;
@@ -290,9 +304,7 @@ public:
                 m_renderer->setPipelineState(m_writer.getObject<IPipelineState>(cmd.operands[0]));
                 break;
             case CommandName::BindRootShaderObject:
-                m_renderer->bindRootShaderObject(
-                    (PipelineType)cmd.operands[0],
-                    m_writer.getObject<IShaderObject>(cmd.operands[1]));
+                m_renderer->bindRootShaderObject(m_writer.getObject<IShaderObject>(cmd.operands[0]));
                 break;
             case CommandName::SetFramebuffer:
                 m_renderer->setFramebuffer(m_writer.getObject<IFramebuffer>(cmd.operands[0]));
@@ -372,44 +384,29 @@ public:
     }
 };
 
-class CommandQueueImpl
-    : public ICommandQueue
-    , public RefObject
+class CommandQueueImpl : public ImmediateCommandQueueBase
 {
 public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
-    ICommandQueue* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ICommandQueue)
-            return static_cast<ICommandQueue*>(this);
-        return nullptr;
-    }
-
-public:
-    ImmediateRendererBase* m_renderer;
     ICommandQueue::Desc m_desc;
 
-    CommandQueueImpl(ImmediateRendererBase* renderer)
-        : m_renderer(renderer)
+    ImmediateRendererBase* getRenderer()
     {
+        return static_cast<ImmediateRendererBase*>(m_renderer.get());
+    }
+
+    CommandQueueImpl(ImmediateRendererBase* renderer)
+    {
+        // Don't establish strong reference to `Device` at start, because
+        // there will be only one instance of command queue and it will be
+        // owned by `Device`. We should establish a strong reference only
+        // when there are external references to the command queue.
+        m_renderer.setWeakReference(renderer);
         m_desc.type = ICommandQueue::QueueType::Graphics;
     }
 
-    ~CommandQueueImpl()
-    {
-        m_renderer->m_queueCreateCount--;
-    }
+    ~CommandQueueImpl() { getRenderer()->m_queueCreateCount--; }
 
     virtual SLANG_NO_THROW const Desc& SLANG_MCALL getDesc() override { return m_desc; }
-
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createCommandBuffer(ICommandBuffer** outCommandBuffer) override
-    {
-        RefPtr<CommandBufferImpl> newCmdBuffer = new CommandBufferImpl();
-        newCmdBuffer->init(m_renderer);
-        *outCommandBuffer = newCmdBuffer.detach();
-        return SLANG_OK;
-    }
 
     virtual SLANG_NO_THROW void SLANG_MCALL
         executeCommandBuffers(uint32_t count, ICommandBuffer* const* commandBuffers) override
@@ -420,15 +417,27 @@ public:
         }
     }
 
-    virtual SLANG_NO_THROW void SLANG_MCALL wait() override
-    {
-        m_renderer->waitForGpu();
-    }
+    virtual SLANG_NO_THROW void SLANG_MCALL wait() override { getRenderer()->waitForGpu(); }
 };
+
+using TransientResourceHeapImpl =
+    SimpleTransientResourceHeap<ImmediateRendererBase, CommandBufferImpl>;
+
 }
 
-ImmediateRendererBase::ImmediateRendererBase() {
+ImmediateRendererBase::ImmediateRendererBase()
+{
     m_queue = new CommandQueueImpl(this);
+}
+
+SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createTransientResourceHeap(
+    const ITransientResourceHeap::Desc& desc,
+    ITransientResourceHeap** outHeap)
+{
+    RefPtr<TransientResourceHeapImpl> result = new TransientResourceHeapImpl();
+    SLANG_RETURN_ON_FAIL(result->init(this, desc));
+    returnComPtr(outHeap, result);
+    return SLANG_OK;
 }
 
 SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createCommandQueue(
@@ -439,8 +448,8 @@ SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createCommandQueue(
     // Only one queue is supported.
     if (m_queueCreateCount != 0)
         return SLANG_FAIL;
-    *outQueue = m_queue.get();
-    m_queue->addRef();
+    m_queue->establishStrongReferenceToDevice();
+    returnComPtr(outQueue, m_queue);
     return SLANG_OK;
 }
 
@@ -450,7 +459,7 @@ SLANG_NO_THROW Result SLANG_MCALL ImmediateRendererBase::createRenderPassLayout(
 {
     RefPtr<SimpleRenderPassLayout> renderPass = new SimpleRenderPassLayout();
     renderPass->init(desc);
-    *outRenderPassLayout = renderPass.detach();
+    returnComPtr(outRenderPassLayout, renderPass);
     return SLANG_OK;
 }
 
@@ -478,7 +487,7 @@ SLANG_NO_THROW SlangResult SLANG_MCALL ImmediateRendererBase::readBufferResource
         return SLANG_FAIL;
     memcpy(blob->m_data.getBuffer(), content + offset, size);
     unmap(buffer);
-    *outBlob = blob.detach();
+    returnComPtr(outBlob, blob);
     return SLANG_OK;
 }
 

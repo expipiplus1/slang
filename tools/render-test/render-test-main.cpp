@@ -97,8 +97,8 @@ public:
     void renderFrame(IRenderCommandEncoder* encoder);
     void finalize();
 
-    void applyBinding(PipelineType pipelineType, ICommandEncoder* encoder);
-    void setProjectionMatrix(IResourceCommandEncoder* encoder);
+    Result applyBinding(PipelineType pipelineType, ICommandEncoder* encoder);
+    void setProjectionMatrix(IShaderObject* rootObject);
     Result writeBindingOutput(const char* fileName);
 
     Result writeScreen(const char* filename);
@@ -117,8 +117,9 @@ protected:
     // variables for state to be used for rendering...
     uintptr_t m_constantBufferSize;
 
-    ComPtr<IDevice> m_device;
+    IDevice* m_device;
     ComPtr<ICommandQueue> m_queue;
+    ComPtr<ITransientResourceHeap> m_transientHeap;
     ComPtr<IRenderPassLayout> m_renderPass;
     ComPtr<IInputLayout> m_inputLayout;
     ComPtr<IBufferResource> m_vertexBuffer;
@@ -134,7 +135,6 @@ protected:
 
     Options m_options;
 
-    ComPtr<IShaderObject> m_programVars;
     ShaderOutputPlan m_outputPlan;
 };
 
@@ -213,7 +213,7 @@ struct AssignValsFromLayoutContext
 
         ComPtr<ITextureResource> texture;
         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(
-            textureEntry->textureDesc, textureBindFlags, device, texture));
+            textureEntry->textureDesc, ResourceState::ShaderResource, device, texture));
 
         auto sampler = _createSamplerState(device, samplerEntry->samplerDesc);
 
@@ -229,13 +229,11 @@ struct AssignValsFromLayoutContext
         return SLANG_OK;
     }
 
-    static const int textureBindFlags = IResource::BindFlag::NonPixelShaderResource | IResource::BindFlag::PixelShaderResource;
-
     SlangResult assignTexture(ShaderCursor const& dstCursor, ShaderInputLayout::TextureVal* srcVal)
     {
         ComPtr<ITextureResource> texture;
         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(
-            srcVal->textureDesc, textureBindFlags, device, texture));
+            srcVal->textureDesc, ResourceState::ShaderResource, device, texture));
 
         // TODO: support UAV textures...
 
@@ -273,19 +271,25 @@ struct AssignValsFromLayoutContext
 
             if(field.name.getLength() == 0)
             {
-                StdWriters::getError().print("error: entries in `ShaderInputLayout` must include a name\n");
-                return SLANG_E_INVALID_ARG;
+                // If no name was given, assume by-indexing matching is requested
+                auto fieldCursor = dstCursor.getElement(fieldIndex);
+                if(!fieldCursor.isValid())
+                {
+                    StdWriters::getError().print("error: could not find shader parameter at index %d\n", (int)fieldIndex);
+                    return SLANG_E_INVALID_ARG;
+                }
+                SLANG_RETURN_ON_FAIL(assign(fieldCursor, field.val));
             }
-
-            auto fieldCursor = dstCursor.getPath(field.name.getBuffer());
-
-            if(!fieldCursor.isValid())
+            else
             {
-                StdWriters::getError().print("error: could not find shader parameter matching '%s'\n", field.name.begin());
-                return SLANG_E_INVALID_ARG;
+                auto fieldCursor = dstCursor.getPath(field.name.getBuffer());
+                if(!fieldCursor.isValid())
+                {
+                    StdWriters::getError().print("error: could not find shader parameter matching '%s'\n", field.name.begin());
+                    return SLANG_E_INVALID_ARG;
+                }
+                SLANG_RETURN_ON_FAIL(assign(fieldCursor, field.val));
             }
-
-            assign(fieldCursor, field.val);
         }
         return SLANG_OK;
     }
@@ -328,9 +332,20 @@ struct AssignValsFromLayoutContext
 
         ComPtr<IShaderObject> shaderObject = device->createShaderObject(slangType);
 
-        assign(ShaderCursor(shaderObject), srcVal->contentVal);
+        SLANG_RETURN_ON_FAIL(assign(ShaderCursor(shaderObject), srcVal->contentVal));
 
         dstCursor.setObject(shaderObject);
+        return SLANG_OK;
+    }
+
+    SlangResult assignArray(ShaderCursor const& dstCursor, ShaderInputLayout::ArrayVal* srcVal)
+    {
+        Index elementCounter = 0;
+        for(auto elementVal : srcVal->vals)
+        {
+            Index elementIndex = elementCounter++;
+            SLANG_RETURN_ON_FAIL(assign(dstCursor[elementIndex], elementVal));
+        }
         return SLANG_OK;
     }
 
@@ -360,6 +375,9 @@ struct AssignValsFromLayoutContext
         case ShaderInputType::Aggregate:
             return assignAggregate(dstCursor, (ShaderInputLayout::AggVal*) srcVal.Ptr());
 
+        case ShaderInputType::Array:
+            return assignArray(dstCursor, (ShaderInputLayout::ArrayVal*) srcVal.Ptr());
+
         default:
             assert(!"Unhandled type");
             return SLANG_FAIL;
@@ -379,8 +397,11 @@ SlangResult _assignVarsFromLayout(
     return context.assign(rootCursor, layout.rootVal);
 }
 
-void RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* encoder)
+Result RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* encoder)
 {
+    auto slangReflection = (slang::ProgramLayout*)spGetReflection(
+        m_compilationOutput.output.getRequestForReflection());
+
     switch (pipelineType)
     {
     case PipelineType::Compute:
@@ -388,7 +409,9 @@ void RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* enc
             ComPtr<IComputeCommandEncoder> computeEncoder;
             encoder->queryInterface(
                 SLANG_UUID_IComputeCommandEncoder, (void**)computeEncoder.writeRef());
-            computeEncoder->bindRootShaderObject(m_programVars);
+            auto rootObject = computeEncoder->bindPipeline(m_pipelineState);
+            SLANG_RETURN_ON_FAIL(_assignVarsFromLayout(
+                m_device, rootObject, m_compilationOutput.layout, m_outputPlan, slangReflection));
         }
         break;
     case PipelineType::Graphics:
@@ -396,12 +419,16 @@ void RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* enc
             ComPtr<IRenderCommandEncoder> renderEncoder;
             encoder->queryInterface(
                 SLANG_UUID_IRenderCommandEncoder, (void**)renderEncoder.writeRef());
-            renderEncoder->bindRootShaderObject(m_programVars);
+            auto rootObject = renderEncoder->bindPipeline(m_pipelineState);
+            SLANG_RETURN_ON_FAIL(_assignVarsFromLayout(
+                m_device, rootObject, m_compilationOutput.layout, m_outputPlan, slangReflection));
+            setProjectionMatrix(rootObject);
         }
         break;
     default:
         throw "unknown pipeline type";
     }
+    return SLANG_OK;
 }
 
 SlangResult RenderTestApp::initialize(
@@ -421,22 +448,6 @@ SlangResult RenderTestApp::initialize(
     //
     SLANG_RETURN_ON_FAIL(
         device->createProgram(m_compilationOutput.output.desc, m_shaderProgram.writeRef()));
-
-    // If we are doing a non-pass-through compilation, then we will rely on
-    // Slang's reflection API to tell us what the parameters of the program are.
-    //
-    auto slangReflection = (slang::ProgramLayout*) spGetReflection(m_compilationOutput.output.getRequestForReflection());
-
-    // Once we have determined the layout of all the parameters we need to bind,
-    // we will create a shader object to use for storing and binding those parameters.
-    //
-    m_programVars = device->createRootShaderObject(m_shaderProgram);
-
-    // Now we need to assign from the input parameter data that was parsed into
-    // the program vars we allocated.
-    //
-    SLANG_RETURN_ON_FAIL(_assignVarsFromLayout(
-        device, m_programVars, m_compilationOutput.layout, m_outputPlan, slangReflection));
 
 	m_device = device;
 
@@ -481,10 +492,13 @@ SlangResult RenderTestApp::initialize(
                     inputElements, SLANG_COUNT_OF(inputElements), inputLayout.writeRef()));
 
                 IBufferResource::Desc vertexBufferDesc;
-                vertexBufferDesc.init(kVertexCount * sizeof(Vertex));
+                vertexBufferDesc.type = IResource::Type::Buffer;
+                vertexBufferDesc.sizeInBytes = kVertexCount * sizeof(Vertex);
+                vertexBufferDesc.cpuAccessFlags = IResource::AccessFlag::Write;
+                vertexBufferDesc.defaultState = ResourceState::VertexBuffer;
+                vertexBufferDesc.allowedStates = ResourceStateSet(ResourceState::VertexBuffer);
 
                 SLANG_RETURN_ON_FAIL(device->createBufferResource(
-                    IResource::Usage::VertexBuffer,
                     vertexBufferDesc,
                     kVertexData,
                     m_vertexBuffer.writeRef()));
@@ -516,31 +530,36 @@ Result RenderTestApp::_initializeShaders(
 
 void RenderTestApp::_initializeRenderPass()
 {
+    ITransientResourceHeap::Desc transientHeapDesc = {};
+    transientHeapDesc.constantBufferSize = 4096 * 1024;
+    m_transientHeap = m_device->createTransientResourceHeap(transientHeapDesc);
+
     ICommandQueue::Desc queueDesc = {ICommandQueue::QueueType::Graphics};
     m_queue = m_device->createCommandQueue(queueDesc);
-
+    
     gfx::ITextureResource::Desc depthBufferDesc;
-    depthBufferDesc.setDefaults(gfx::IResource::Usage::DepthWrite);
-    depthBufferDesc.init2D(
-        gfx::IResource::Type::Texture2D,
-        gfx::Format::D_Float32,
-        gWindowWidth,
-        gWindowHeight,
-        0);
+    depthBufferDesc.type = IResource::Type::Texture2D;
+    depthBufferDesc.size.width = gWindowWidth;
+    depthBufferDesc.size.height = gWindowHeight;
+    depthBufferDesc.size.depth = 1;
+    depthBufferDesc.numMipLevels = 1;
+    depthBufferDesc.format = Format::D_Float32;
+    depthBufferDesc.defaultState = ResourceState::DepthWrite;
+    depthBufferDesc.allowedStates = ResourceState::DepthWrite;
 
-    ComPtr<gfx::ITextureResource> depthBufferResource = m_device->createTextureResource(
-        gfx::IResource::Usage::DepthWrite, depthBufferDesc, nullptr);
+    ComPtr<gfx::ITextureResource> depthBufferResource =
+        m_device->createTextureResource(depthBufferDesc, nullptr);
 
     gfx::ITextureResource::Desc colorBufferDesc;
-    colorBufferDesc.setDefaults(gfx::IResource::Usage::RenderTarget);
-    colorBufferDesc.init2D(
-        gfx::IResource::Type::Texture2D,
-        gfx::Format::RGBA_Unorm_UInt8,
-        gWindowWidth,
-        gWindowHeight,
-        0);
-    m_colorBuffer = m_device->createTextureResource(
-        gfx::IResource::Usage::RenderTarget, colorBufferDesc, nullptr);
+    colorBufferDesc.type = IResource::Type::Texture2D;
+    colorBufferDesc.size.width = gWindowWidth;
+    colorBufferDesc.size.height = gWindowHeight;
+    colorBufferDesc.size.depth = 1;
+    colorBufferDesc.numMipLevels = 1;
+    colorBufferDesc.format = Format::RGBA_Unorm_UInt8;
+    colorBufferDesc.defaultState = ResourceState::RenderTarget;
+    colorBufferDesc.allowedStates = ResourceState::RenderTarget;
+    m_colorBuffer = m_device->createTextureResource(colorBufferDesc, nullptr);
 
     gfx::IResourceView::Desc colorBufferViewDesc;
     memset(&colorBufferViewDesc, 0, sizeof(colorBufferViewDesc));
@@ -591,11 +610,10 @@ void RenderTestApp::_initializeRenderPass()
     m_device->createRenderPassLayout(renderPassDesc, m_renderPass.writeRef());
 }
 
-void RenderTestApp::setProjectionMatrix(IResourceCommandEncoder* encoder)
+void RenderTestApp::setProjectionMatrix(IShaderObject* rootObject)
 {
-    SLANG_UNUSED(encoder);
     auto info = m_device->getDeviceInfo();
-    ShaderCursor(m_programVars)
+    ShaderCursor(rootObject)
         .getField("Uniforms")
         .getDereferenced()
         .setData(info.identityProjectionMatrix, sizeof(float) * 16);
@@ -604,8 +622,6 @@ void RenderTestApp::setProjectionMatrix(IResourceCommandEncoder* encoder)
 void RenderTestApp::renderFrame(IRenderCommandEncoder* encoder)
 {
     auto pipelineType = PipelineType::Graphics;
-
-    encoder->setPipelineState(m_pipelineState);
 
 	encoder->setPrimitiveTopology(PrimitiveTopology::TriangleList);
     encoder->setVertexBuffer(0, m_vertexBuffer, sizeof(Vertex));
@@ -618,7 +634,6 @@ void RenderTestApp::renderFrame(IRenderCommandEncoder* encoder)
 void RenderTestApp::runCompute(IComputeCommandEncoder* encoder)
 {
     auto pipelineType = PipelineType::Compute;
-    encoder->setPipelineState(m_pipelineState);
     applyBinding(pipelineType, encoder);
 	encoder->dispatchCompute(
         m_options.computeDispatchSize[0],
@@ -628,17 +643,6 @@ void RenderTestApp::runCompute(IComputeCommandEncoder* encoder)
 
 void RenderTestApp::finalize()
 {
-    m_programVars = nullptr;
-    m_inputLayout = nullptr;
-    m_vertexBuffer = nullptr;
-    m_shaderProgram = nullptr;
-    m_pipelineState = nullptr;
-    m_renderPass = nullptr;
-    m_framebuffer = nullptr;
-    m_framebufferLayout = nullptr;
-    m_colorBuffer = nullptr;
-    m_queue = nullptr;
-    m_device = nullptr;
 }
 
 Result RenderTestApp::writeBindingOutput(const char* fileName)
@@ -675,13 +679,16 @@ Result RenderTestApp::writeBindingOutput(const char* fileName)
 
                 auto stagingBufferDesc = bufferDesc;
                 stagingBufferDesc.cpuAccessFlags = IResource::AccessFlag::Read;
-                stagingBufferDesc.bindFlags = 0;
+                stagingBufferDesc.allowedStates =
+                    ResourceStateSet(ResourceState::CopyDestination, ResourceState::CopySource);
+                stagingBufferDesc.defaultState = ResourceState::CopyDestination;
 
                 ComPtr<IBufferResource> stagingBuffer;
-                SLANG_RETURN_ON_FAIL(m_device->createBufferResource(IResource::Usage::CopyDest, stagingBufferDesc, nullptr, stagingBuffer.writeRef()));
+                SLANG_RETURN_ON_FAIL(m_device->createBufferResource(stagingBufferDesc, nullptr, stagingBuffer.writeRef()));
 
                 ComPtr<ICommandBuffer> commandBuffer;
-                SLANG_RETURN_ON_FAIL(m_queue->createCommandBuffer(commandBuffer.writeRef()));
+                SLANG_RETURN_ON_FAIL(
+                    m_transientHeap->createCommandBuffer(commandBuffer.writeRef()));
 
                 ComPtr<IResourceCommandEncoder> encoder;
                 commandBuffer->encodeResourceCommands(encoder.writeRef());
@@ -690,7 +697,7 @@ Result RenderTestApp::writeBindingOutput(const char* fileName)
 
                 commandBuffer->close();
                 m_queue->executeCommandBuffer(commandBuffer);
-                m_queue->wait();
+                m_transientHeap->synchronizeAndReset();
 
                 m_device->readBufferResource(stagingBuffer, 0, bufferSize, blob.writeRef());
             }
@@ -729,7 +736,7 @@ Result RenderTestApp::writeScreen(const char* filename)
 
 Result RenderTestApp::update()
 {
-    auto commandBuffer = m_queue->createCommandBuffer();
+    auto commandBuffer = m_transientHeap->createCommandBuffer();
     if (m_options.shaderType == Options::ShaderProgramType::Compute)
     {
         auto encoder = commandBuffer->encodeComputeCommands();
@@ -738,10 +745,6 @@ Result RenderTestApp::update()
     }
     else
     {
-        auto resEncoder = commandBuffer->encodeResourceCommands();
-        setProjectionMatrix(resEncoder);
-        resEncoder->endEncoding();
-
         auto encoder = commandBuffer->encodeRenderCommands(m_renderPass, m_framebuffer);
         gfx::Viewport viewport = {};
         viewport.maxZ = 1.0f;
@@ -831,7 +834,11 @@ static SlangResult _setSessionPrelude(const Options& options, const char* exePat
         SLANG_RETURN_ON_FAIL(TestToolUtil::getRootPath(exePath, rootPath));
 
         String includePath;
-        SLANG_RETURN_ON_FAIL(TestToolUtil::getIncludePath(rootPath, "external/nvapi/nvHLSLExtns.h", includePath));
+        if (TestToolUtil::getIncludePath(rootPath, "external/nvapi/nvHLSLExtns.h", includePath) !=
+            SLANG_OK)
+        {
+            return SLANG_FAIL;
+        }
 
         StringBuilder buf;
         // We have to choose a slot that NVAPI will use. 
@@ -1001,6 +1008,10 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         }
     }
 
+#ifdef _DEBUG
+    gfxEnableDebugLayer();
+#endif
+
     // Use the profile name set on options if set
     input.profile = options.profileName ? options.profileName : input.profile;
 
@@ -1120,8 +1131,8 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         app.update();
         renderDocEndFrame();
         app.finalize();
-        return SLANG_OK;
 	}
+    return SLANG_OK;
 }
 
 SLANG_TEST_TOOL_API SlangResult innerMain(Slang::StdWriters* stdWriters, SlangSession* sharedSession, int inArgc, const char*const* inArgv)

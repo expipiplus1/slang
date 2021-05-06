@@ -11,7 +11,24 @@ class CUDAExtensionTracker : public RefObject
 {
 public:
 
+    typedef uint32_t BaseTypeFlags;
+
     SemanticVersion m_smVersion;
+
+    void requireBaseType(BaseType baseType) { m_baseTypeFlags |= _getFlag(baseType); }
+    bool isBaseTypeRequired(BaseType baseType) { return (m_baseTypeFlags & _getFlag(baseType)) != 0; }
+
+        /// Ensure that the generated code is compiled for at least CUDA SM `version`
+    void requireSMVersion(const SemanticVersion& smVersion) { m_smVersion = (smVersion > m_smVersion) ? smVersion : m_smVersion; }
+
+        /// Should be called before reading out values. 
+    void finalize();
+
+protected:
+
+    static BaseTypeFlags _getFlag(BaseType baseType) { return BaseTypeFlags(1) << int(baseType); }
+
+    BaseTypeFlags m_baseTypeFlags = 0; 
 };
 
 class CUDASourceEmitter : public CPPSourceEmitter
@@ -30,8 +47,8 @@ public:
         };
     };
 
-    static UnownedStringSlice getBuiltinTypeName(IROp op);
-    static UnownedStringSlice getVectorPrefix(IROp op);
+    UnownedStringSlice getBuiltinTypeName(IROp op);
+    UnownedStringSlice getVectorPrefix(IROp op);
 
     virtual RefObject* getExtensionTracker() SLANG_OVERRIDE { return m_extensionTracker; }
     virtual void emitTempModifiers(IRInst* temp) SLANG_OVERRIDE;
@@ -60,6 +77,8 @@ protected:
     virtual void emitFunctionPreambleImpl(IRInst* inst) SLANG_OVERRIDE;
     virtual String generateEntryPointNameImpl(IREntryPointDecoration* entryPointDecor) SLANG_OVERRIDE;
 
+    virtual const UnownedStringSlice* getVectorElementNames(BaseType baseType, Index elemCount) SLANG_OVERRIDE;
+
     virtual void emitGlobalRTTISymbolPrefix() SLANG_OVERRIDE;
 
     virtual void emitLoopControlDecorationImpl(IRLoopControlDecoration* decl) SLANG_OVERRIDE;
@@ -76,15 +95,16 @@ protected:
     // CPPSourceEmitter overrides 
     virtual SlangResult calcTypeName(IRType* type, CodeGenTarget target, StringBuilder& out) SLANG_OVERRIDE;
     virtual SlangResult calcScalarFuncName(HLSLIntrinsic::Op op, IRBasicType* type, StringBuilder& outBuilder) SLANG_OVERRIDE;
-    
+
+    virtual void emitSpecializedOperationDefinition(const HLSLIntrinsic* specOp) SLANG_OVERRIDE;
+
     SlangResult _calcCUDATextureTypeName(IRTextureTypeBase* texType, StringBuilder& outName);
 
     void _emitInitializerList(IRType* elementType, IRUse* operands, Index operandCount);
     void _emitInitializerListValue(IRType* elementType, IRInst* value);
 
-        /// Ensure that the generated code is compiled for at least CUDA SM `version`
-    void _requireCUDASMVersion(SemanticVersion const& version);
-
+    void _emitGetHalfVectorElement(IRInst* baseInst, Index index, Index vecSize, const EmitOpInfo& inOuterPrec);
+    
     RefPtr<CUDAExtensionTracker> m_extensionTracker;
 };
 

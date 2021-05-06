@@ -10,11 +10,10 @@
 #include "slang-compiler.h"
 #include "slang-profile.h"
 
-#include "slang-file-system.h"
-
 #include "slang-repro.h"
 #include "slang-serialize-ir.h"
 
+#include "../core/slang-file-system.h"
 #include "../core/slang-type-text-util.h"
 #include "../core/slang-hex-dump-util.h"
 
@@ -529,6 +528,10 @@ struct OptionsParser
                     requestImpl->getFrontEndReq()->shouldDumpIR = true;
                     requestImpl->getBackEndReq()->shouldDumpIR = true;
                 }
+                else if (argStr == "-E" || argStr == "-output-preprocessor")
+                {
+                    requestImpl->getFrontEndReq()->outputPreprocessor = true;
+                }
                 else if (argStr == "-dump-ast")
                 {
                     requestImpl->getFrontEndReq()->shouldDumpAST = true;
@@ -887,7 +890,7 @@ struct OptionsParser
                         SLANG_RETURN_ON_FAIL(tryReadCommandLineArgumentRaw(sink, arg, &argCursor, argEnd, &includeDirStr));
                     }
 
-                    compileRequest->addSearchPath(String(includeDirStr).begin());
+                    compileRequest->addSearchPath(includeDirStr);
                 }
                 //
                 // A `-o` option is used to specify a desired output file.
@@ -1608,6 +1611,7 @@ struct OptionsParser
                     switch (outputFormat)
                     {
                     case CodeGenTarget::CPPSource:
+                    case CodeGenTarget::PTX:
                         rawOutput.isWholeProgram = true;
                         break;
                     default:

@@ -10,7 +10,9 @@
 
 #include "slang-check.h"
 #include "slang-compiler.h"
-#include "slang-lexer.h"
+
+#include "../compiler-core/slang-lexer.h"
+
 #include "slang-lower-to-ir.h"
 #include "slang-mangle.h"
 #include "slang-parameter-binding.h"
@@ -183,11 +185,9 @@ namespace Slang
     // EntryPoint
     //
 
-    static const Guid IID_IEntryPoint = SLANG_UUID_IEntryPoint;
-
     ISlangUnknown* EntryPoint::getInterface(const Guid& guid)
     {
-        if(guid == IID_IEntryPoint)
+        if(guid == slang::IEntryPoint::getTypeGuid())
             return static_cast<slang::IEntryPoint*>(this);
 
         return Super::getInterface(guid);
@@ -1413,6 +1413,8 @@ SlangResult dissassembleDXILUsingDXC(
             // Look for the version
             if (auto cudaTracker = as<CUDAExtensionTracker>(source.extensionTracker))
             {
+                cudaTracker->finalize();
+
                 if (cudaTracker->m_smVersion.isSet())
                 {
                     DownstreamCompiler::CapabilityVersion version;
@@ -1420,6 +1422,11 @@ SlangResult dissassembleDXILUsingDXC(
                     version.version = cudaTracker->m_smVersion;
 
                     options.requiredCapabilityVersions.add(version);
+                }
+
+                if (cudaTracker->isBaseTypeRequired(BaseType::Half))
+                {
+                    options.flags |= CompileOptions::Flag::EnableFloat16;
                 }
             }
 
@@ -2309,6 +2316,9 @@ SlangResult dissassembleDXILUsingDXC(
             sink,
             m_program);
 
+        backEndRequest->shouldDumpIR =
+            (m_targetReq->getTargetFlags() & SLANG_TARGET_FLAG_DUMP_IR) != 0;
+
         return _createWholeProgramResult(
             backEndRequest,
             nullptr);
@@ -2338,6 +2348,9 @@ SlangResult dissassembleDXILUsingDXC(
             m_program->getLinkage(),
             sink,
             m_program);
+
+        backEndRequest->shouldDumpIR =
+            (m_targetReq->getTargetFlags() & SLANG_TARGET_FLAG_DUMP_IR) != 0;
 
         return _createEntryPointResult(
             entryPointIndex,

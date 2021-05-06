@@ -2,6 +2,9 @@
 
 #include "slang-blob.h"
 
+#include "slang-char-util.h"
+#include "slang-text-io.h"
+
 namespace Slang {
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! StringUtil !!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -53,6 +56,52 @@ namespace Slang {
 
         // Skip the split character, if at end we are okay anyway
         start = cur + 1;
+    }
+}
+
+/* static */void StringUtil::split(const UnownedStringSlice& in, const UnownedStringSlice& splitSlice, List<UnownedStringSlice>& outSlices)
+{
+    const Index splitLen = splitSlice.getLength();
+
+    if (splitLen == 1)
+    {
+        return split(in, splitSlice[0], outSlices);
+    }
+
+    outSlices.clear();
+
+    SLANG_ASSERT(splitLen > 0);
+    if (splitLen <= 0)
+    {
+        return;
+    }
+
+    const char* start = in.begin();
+    const char* end = in.end();
+
+    const char splitChar = splitSlice[0];
+
+    while (start < end)
+    {
+        // Move cur so it's either at the end or at next splitSlice
+        const char* cur = start;
+        while (cur < end)
+        {
+            if (*cur == splitChar &&
+                (cur + splitLen <= end && UnownedStringSlice(cur, splitLen) == splitSlice))
+            {
+                // We hit a split
+                break;
+            }
+
+            cur++;
+        }
+      
+        // Add to output
+        outSlices.add(UnownedStringSlice(start, cur));
+
+        // Skip the split, if at end we are okay anyway
+        start = cur + splitLen;
     }
 }
 

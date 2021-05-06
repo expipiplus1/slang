@@ -12,6 +12,7 @@
 #include "slang-com-helper.h"
 #include "../command-writer.h"
 #include "../renderer-shared.h"
+#include "../simple-transient-resource-heap.h"
 #include "../slang-context.h"
 
 #   ifdef RENDER_TEST_OPTIX
@@ -180,6 +181,13 @@ void _optixLogCallback(unsigned int level, const char* tag, const char* message,
 
 #    endif
 
+class CUDAContext : public RefObject
+{
+public:
+    CUcontext m_context = nullptr;
+    ~CUDAContext() { cuCtxDestroy(m_context); }
+};
+
 class MemoryCUDAResource : public BufferResource
 {
 public:
@@ -198,6 +206,8 @@ public:
     uint64_t getBindlessHandle() { return (uint64_t)m_cudaMemory; }
 
     void* m_cudaMemory = nullptr;
+
+    RefPtr<CUDAContext> m_cudaContext;
 };
 
 class TextureCUDAResource : public TextureResource
@@ -237,12 +247,14 @@ public:
 
     CUarray m_cudaArray = CUarray();
     CUmipmappedArray m_cudaMipMappedArray = CUmipmappedArray();
+
+    RefPtr<CUDAContext> m_cudaContext;
 };
 
-class CUDAResourceView : public IResourceView, public RefObject
+class CUDAResourceView : public IResourceView, public ComObject
 {
 public:
-    SLANG_REF_OBJECT_IUNKNOWN_ALL
+    SLANG_COM_OBJECT_IUNKNOWN_ALL
     IResourceView* getInterface(const Guid& guid)
     {
         if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IResourceView)
@@ -445,12 +457,15 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL initBuffer(IDevice* device, size_t bufferSize)
     {
         BufferResource::Desc bufferDesc;
-        bufferDesc.init(bufferSize);
+        bufferDesc.type = IResource::Type::Buffer;
+        bufferDesc.defaultState = ResourceState::ConstantBuffer;
+        bufferDesc.allowedStates =
+            ResourceStateSet(ResourceState::ConstantBuffer, ResourceState::CopyDestination);
+        bufferDesc.sizeInBytes = bufferSize;
         bufferDesc.cpuAccessFlags |= IResource::AccessFlag::Write;
         ComPtr<IBufferResource> constantBuffer;
-        SLANG_RETURN_ON_FAIL(device->createBufferResource(
-            IResource::Usage::ConstantBuffer, bufferDesc, nullptr, constantBuffer.writeRef()));
-        bufferResource = dynamic_cast<MemoryCUDAResource*>(constantBuffer.get());
+        SLANG_RETURN_ON_FAIL(device->createBufferResource(bufferDesc, nullptr, constantBuffer.writeRef()));
+        bufferResource = static_cast<MemoryCUDAResource*>(constantBuffer.get());
         return SLANG_OK;
     }
 
@@ -513,8 +528,7 @@ public:
             *object = nullptr;
             return SLANG_OK;
         }
-        objects[subObjectIndex]->addRef();
-        *object = objects[subObjectIndex].Ptr();
+        returnComPtr(object, objects[subObjectIndex]);
         return SLANG_OK;
     }
     virtual SLANG_NO_THROW Result SLANG_MCALL
@@ -647,7 +661,7 @@ public:
         auto& bindingRange = layout->m_bindingRanges[bindingRangeIndex];
 
         auto viewIndex = bindingRange.baseIndex + offset.bindingArrayIndex;
-        auto cudaView = dynamic_cast<CUDAResourceView*>(resourceView);
+        auto cudaView = static_cast<CUDAResourceView*>(resourceView);
 
         resources[viewIndex] = cudaView;
 
@@ -719,7 +733,6 @@ public:
                 // type, we need to make sure to use that type as the specialization argument.
 
                 // TODO: need to implement the case where the field is an array of existential values.
-                SLANG_ASSERT(bindingRange.count == 1);
                 ExtendedShaderObjectType specializedSubObjType;
                 SLANG_RETURN_ON_FAIL(objects[subObjIndex]->getSpecializedShaderObjectType(&specializedSubObjType));
                 args.add(specializedSubObjType);
@@ -800,6 +813,12 @@ public:
 class CUDARootShaderObject : public CUDAShaderObject
 {
 public:
+    // Override default reference counting behavior to disable lifetime management.
+    // Root objects are managed by command buffer and does not need to be freed by the user.
+    SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+    SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
+
+public:
     List<RefPtr<CUDAEntryPointShaderObject>> entryPointObjects;
     virtual SLANG_NO_THROW Result SLANG_MCALL
         init(IDevice* device, CUDAShaderObjectLayout* typeLayout) override;
@@ -807,8 +826,7 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL
         getEntryPoint(UInt index, IShaderObject** outEntryPoint) override
     {
-        *outEntryPoint = entryPointObjects[index].Ptr();
-        entryPointObjects[index]->addRef();
+        returnComPtr(outEntryPoint, entryPointObjects[index]);
         return SLANG_OK;
     }
     virtual Result collectSpecializationArgs(ExtendedShaderObjectTypeList& args) override
@@ -829,6 +847,7 @@ public:
     CUfunction cudaKernel;
     String kernelName;
     RefPtr<CUDAProgramLayout> layout;
+    RefPtr<CUDAContext> cudaContext;
     ~CUDAShaderProgram()
     {
         if (cudaModule)
@@ -968,7 +987,7 @@ private:
 private:
     int m_deviceIndex = -1;
     CUdevice m_device = 0;
-    CUcontext m_context = nullptr;
+    RefPtr<CUDAContext> m_context;
     DeviceInfo m_info;
     String m_adapterName;
 
@@ -978,10 +997,10 @@ public:
     class CommandBufferImpl
         : public ICommandBuffer
         , public CommandWriter
-        , public RefObject
+        , public ComObject
     {
     public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        SLANG_COM_OBJECT_IUNKNOWN_ALL
         ICommandBuffer* getInterface(const Guid& guid)
         {
             if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ICommandBuffer)
@@ -989,6 +1008,9 @@ public:
             return nullptr;
         }
     public:
+        CUDADevice* m_device;
+
+        void init(CUDADevice* device) { m_device = device; }
         virtual SLANG_NO_THROW void SLANG_MCALL encodeRenderCommands(
             IRenderPassLayout* renderPass,
             IFramebuffer* framebuffer,
@@ -1006,7 +1028,7 @@ public:
             virtual SLANG_NO_THROW SlangResult SLANG_MCALL
                 queryInterface(SlangUUID const& uuid, void** outObject) override
             {
-                if (uuid == GfxGUID::IID_ISlangUnknown ||
+                if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
                     uuid == GfxGUID::IID_IComputeCommandEncoder)
                 {
                     *outObject = static_cast<IComputeCommandEncoder*>(this);
@@ -1020,25 +1042,29 @@ public:
 
         public:
             CommandWriter* m_writer;
-
+            CommandBufferImpl* m_commandBuffer;
+            RefPtr<ShaderObjectBase> m_rootObject;
             virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
             void init(CommandBufferImpl* cmdBuffer)
             {
                 m_writer = cmdBuffer;
+                m_commandBuffer = cmdBuffer;
             }
 
-            virtual SLANG_NO_THROW void SLANG_MCALL setPipelineState(IPipelineState* state) override
+            virtual SLANG_NO_THROW Result SLANG_MCALL
+                bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override
             {
                 m_writer->setPipelineState(state);
-            }
-            virtual SLANG_NO_THROW void SLANG_MCALL
-                bindRootShaderObject(IShaderObject* object) override
-            {
-                m_writer->bindRootShaderObject(PipelineType::Compute, object);
+                PipelineStateBase* pipelineImpl = static_cast<PipelineStateBase*>(state);
+                SLANG_RETURN_ON_FAIL(m_commandBuffer->m_device->createRootShaderObject(
+                    pipelineImpl->m_program, m_rootObject.writeRef()));
+                returnComPtr(outRootObject, m_rootObject);
+                return SLANG_OK;
             }
 
             virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
             {
+                m_writer->bindRootShaderObject(m_rootObject);
                 m_writer->dispatchCompute(x, y, z);
             }
         };
@@ -1058,7 +1084,7 @@ public:
             virtual SLANG_NO_THROW SlangResult SLANG_MCALL
                 queryInterface(SlangUUID const& uuid, void** outObject) override
             {
-                if (uuid == GfxGUID::IID_ISlangUnknown ||
+                if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
                     uuid == GfxGUID::IID_IResourceCommandEncoder)
                 {
                     *outObject = static_cast<IResourceCommandEncoder*>(this);
@@ -1110,10 +1136,10 @@ public:
 
     class CommandQueueImpl
         : public ICommandQueue
-        , public RefObject
+        , public ComObject
     {
     public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        SLANG_COM_OBJECT_IUNKNOWN_ALL
         ICommandQueue* getInterface(const Guid& guid)
         {
             if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ICommandQueue)
@@ -1147,13 +1173,6 @@ public:
         {
             return m_desc;
         }
-        virtual SLANG_NO_THROW Result SLANG_MCALL
-            createCommandBuffer(ICommandBuffer** outCommandBuffer) override
-        {
-            RefPtr<CommandBufferImpl> result = new CommandBufferImpl();
-            *outCommandBuffer = result.detach();
-            return SLANG_OK;
-        }
 
         virtual SLANG_NO_THROW void SLANG_MCALL
             executeCommandBuffers(uint32_t count, ICommandBuffer* const* commandBuffers) override
@@ -1175,7 +1194,7 @@ public:
             currentPipeline = dynamic_cast<CUDAPipelineState*>(state);
         }
 
-        Result bindRootShaderObject(PipelineType pipelineType, IShaderObject* object)
+        Result bindRootShaderObject(IShaderObject* object)
         {
             currentRootObject = dynamic_cast<CUDARootShaderObject*>(object);
             if (currentRootObject)
@@ -1293,8 +1312,7 @@ public:
                     break;
                 case CommandName::BindRootShaderObject:
                     bindRootShaderObject(
-                        (PipelineType)cmd.operands[0],
-                        commandBuffer->getObject<IShaderObject>(cmd.operands[1]));
+                        commandBuffer->getObject<IShaderObject>(cmd.operands[0]));
                     break;
                 case CommandName::DispatchCompute:
                     dispatchCompute(
@@ -1320,14 +1338,9 @@ public:
         }
     };
 
+    using TransientResourceHeapImpl = SimpleTransientResourceHeap<CUDADevice, CommandBufferImpl>;
+
 public:
-    ~CUDADevice()
-    {
-        if (m_context)
-        {
-            cuCtxDestroy(m_context);
-        }
-    }
     virtual SLANG_NO_THROW SlangResult SLANG_MCALL initialize(const Desc& desc) override
     {
         SLANG_RETURN_ON_FAIL(slangContext.initialize(desc.slang, SLANG_PTX, "sm_5_1"));
@@ -1339,15 +1352,17 @@ public:
         SLANG_RETURN_ON_FAIL(_findMaxFlopsDeviceIndex(&m_deviceIndex));
         SLANG_CUDA_RETURN_WITH_REPORT_ON_FAIL(cudaSetDevice(m_deviceIndex), reportType);
 
-        if (m_context)
-        {
-            cuCtxDestroy(m_context);
-            m_context = nullptr;
-        }
+        m_context = new CUDAContext();
 
         SLANG_CUDA_RETURN_ON_FAIL(cuDeviceGet(&m_device, m_deviceIndex));
 
-        SLANG_CUDA_RETURN_WITH_REPORT_ON_FAIL(cuCtxCreate(&m_context, 0, m_device), reportType);
+        SLANG_CUDA_RETURN_WITH_REPORT_ON_FAIL(
+            cuCtxCreate(&m_context->m_context, 0, m_device), reportType);
+
+        // Not clear how to detect half support on CUDA. For now we'll assume we have it
+        {
+            m_features.add("half");
+        }
 
         // Initialize DeviceInfo
         {
@@ -1367,12 +1382,15 @@ public:
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureResource(
-        IResource::Usage initialUsage,
         const ITextureResource::Desc& desc,
         const ITextureResource::SubresourceData* initData,
         ITextureResource** outResource) override
     {
-        RefPtr<TextureCUDAResource> tex = new TextureCUDAResource(desc);
+        TextureResource::Desc srcDesc = fixupTextureDesc(desc);
+
+        RefPtr<TextureCUDAResource> tex = new TextureCUDAResource(srcDesc);
+        tex->m_cudaContext = m_context;
+
         CUresourcetype resourceType;
         size_t elementSize = 0;
 
@@ -1414,12 +1432,26 @@ public:
 
             switch (desc.format)
             {
+            case Format::RGBA_Float32:
+            case Format::RGB_Float32:
+            case Format::RG_Float32:
             case Format::R_Float32:
             case Format::D_Float32:
                 {
+                    const FormatInfo info = gfxGetFormatInfo(desc.format);
                     format = CU_AD_FORMAT_FLOAT;
-                    numChannels = 1;
+                    numChannels = info.channelCount;
                     elementSize = sizeof(float);
+                    break;
+                }
+            case Format::RGBA_Float16:
+            case Format::RG_Float16:
+            case Format::R_Float16:
+                {
+                    const FormatInfo info = gfxGetFormatInfo(desc.format);
+                    format = CU_AD_FORMAT_HALF;
+                    numChannels = info.channelCount;
+                    elementSize = sizeof(uint16_t);
                     break;
                 }
             case Format::RGBA_Unorm_UInt8:
@@ -1551,183 +1583,180 @@ public:
         }
 
         // Work space for holding data for uploading if it needs to be rearranged
-        List<uint8_t> workspace;
-        for (int mipLevel = 0; mipLevel < desc.numMipLevels; ++mipLevel)
+        if (initData)
         {
-            int mipWidth = width >> mipLevel;
-            int mipHeight = height >> mipLevel;
-            int mipDepth = depth >> mipLevel;
-
-            mipWidth = (mipWidth == 0) ? 1 : mipWidth;
-            mipHeight = (mipHeight == 0) ? 1 : mipHeight;
-            mipDepth = (mipDepth == 0) ? 1 : mipDepth;
-
-            // If it's a cubemap then the depth is always 6
-            if (desc.type == IResource::Type::TextureCube)
+            List<uint8_t> workspace;
+            for (int mipLevel = 0; mipLevel < desc.numMipLevels; ++mipLevel)
             {
-                mipDepth = 6;
-            }
+                int mipWidth = width >> mipLevel;
+                int mipHeight = height >> mipLevel;
+                int mipDepth = depth >> mipLevel;
 
-            auto dstArray = tex->m_cudaArray;
-            if (tex->m_cudaMipMappedArray)
-            {
-                // Get the array for the mip level
-                SLANG_CUDA_RETURN_ON_FAIL(
-                    cuMipmappedArrayGetLevel(&dstArray, tex->m_cudaMipMappedArray, mipLevel));
-            }
-            SLANG_ASSERT(dstArray);
+                mipWidth = (mipWidth == 0) ? 1 : mipWidth;
+                mipHeight = (mipHeight == 0) ? 1 : mipHeight;
+                mipDepth = (mipDepth == 0) ? 1 : mipDepth;
 
-            // Check using the desc to see if it's plausible
-            {
-                CUDA_ARRAY_DESCRIPTOR arrayDesc;
-                SLANG_CUDA_RETURN_ON_FAIL(cuArrayGetDescriptor(&arrayDesc, dstArray));
-
-                SLANG_ASSERT(mipWidth == arrayDesc.Width);
-                SLANG_ASSERT(
-                    mipHeight == arrayDesc.Height || (mipHeight == 1 && arrayDesc.Height == 0));
-            }
-
-            const void* srcDataPtr = nullptr;
-
-            if (desc.arraySize > 1)
-            {
-                SLANG_ASSERT(
-                    desc.type == IResource::Type::Texture1D ||
-                    desc.type == IResource::Type::Texture2D ||
-                    desc.type == IResource::Type::TextureCube);
-
-                // TODO(JS): Here I assume that arrays are just held contiguously within a 'face'
-                // This seems reasonable and works with the Copy3D.
-                const size_t faceSizeInBytes = elementSize * mipWidth * mipHeight;
-
-                Index faceCount = desc.arraySize;
+                // If it's a cubemap then the depth is always 6
                 if (desc.type == IResource::Type::TextureCube)
                 {
-                    faceCount *= 6;
+                    mipDepth = 6;
                 }
 
-                const size_t mipSizeInBytes = faceSizeInBytes * faceCount;
-                workspace.setCount(mipSizeInBytes);
-
-                // We need to add the face data from each mip
-                // We iterate over face count so we copy all of the cubemap faces
-                if (initData)
+                auto dstArray = tex->m_cudaArray;
+                if (tex->m_cudaMipMappedArray)
                 {
+                    // Get the array for the mip level
+                    SLANG_CUDA_RETURN_ON_FAIL(
+                        cuMipmappedArrayGetLevel(&dstArray, tex->m_cudaMipMappedArray, mipLevel));
+                }
+                SLANG_ASSERT(dstArray);
+
+                // Check using the desc to see if it's plausible
+                {
+                    CUDA_ARRAY_DESCRIPTOR arrayDesc;
+                    SLANG_CUDA_RETURN_ON_FAIL(cuArrayGetDescriptor(&arrayDesc, dstArray));
+
+                    SLANG_ASSERT(mipWidth == arrayDesc.Width);
+                    SLANG_ASSERT(
+                        mipHeight == arrayDesc.Height || (mipHeight == 1 && arrayDesc.Height == 0));
+                }
+
+                const void* srcDataPtr = nullptr;
+
+                if (desc.arraySize > 1)
+                {
+                    SLANG_ASSERT(
+                        desc.type == IResource::Type::Texture1D ||
+                        desc.type == IResource::Type::Texture2D ||
+                        desc.type == IResource::Type::TextureCube);
+
+                    // TODO(JS): Here I assume that arrays are just held contiguously within a
+                    // 'face' This seems reasonable and works with the Copy3D.
+                    const size_t faceSizeInBytes = elementSize * mipWidth * mipHeight;
+
+                    Index faceCount = desc.arraySize;
+                    if (desc.type == IResource::Type::TextureCube)
+                    {
+                        faceCount *= 6;
+                    }
+
+                    const size_t mipSizeInBytes = faceSizeInBytes * faceCount;
+                    workspace.setCount(mipSizeInBytes);
+
+                    // We need to add the face data from each mip
+                    // We iterate over face count so we copy all of the cubemap faces
                     for (Index j = 0; j < faceCount; j++)
                     {
                         const auto srcData = initData[mipLevel + j * desc.numMipLevels].data;
                         // Copy over to the workspace to make contiguous
                         ::memcpy(
-                            workspace.begin() + faceSizeInBytes * j, srcData,
-                            faceSizeInBytes);
-                    }
-                }
-
-                srcDataPtr = workspace.getBuffer();
-            }
-            else
-            {
-                if (desc.type == IResource::Type::TextureCube)
-                {
-                    size_t faceSizeInBytes = elementSize * mipWidth * mipHeight;
-
-                    workspace.setCount(faceSizeInBytes * 6);
-
-                    // Copy the data over to make contiguous
-                    for (Index j = 0; j < 6; j++)
-                    {
-                        const auto srcData =
-                            initData[mipLevel + j * desc.numMipLevels].data;
-                        ::memcpy(
-                            workspace.getBuffer() + faceSizeInBytes * j, srcData,
-                            faceSizeInBytes);
+                            workspace.begin() + faceSizeInBytes * j, srcData, faceSizeInBytes);
                     }
 
                     srcDataPtr = workspace.getBuffer();
                 }
                 else
                 {
-                    const auto srcData = initData[mipLevel].data;
-                    srcDataPtr = srcData;
-                }
-            }
+                    if (desc.type == IResource::Type::TextureCube)
+                    {
+                        size_t faceSizeInBytes = elementSize * mipWidth * mipHeight;
 
-            if (desc.arraySize > 1)
-            {
-                SLANG_ASSERT(
-                    desc.type == IResource::Type::Texture1D ||
-                    desc.type == IResource::Type::Texture2D ||
-                    desc.type == IResource::Type::TextureCube);
-
-                CUDA_MEMCPY3D copyParam;
-                memset(&copyParam, 0, sizeof(copyParam));
-
-                copyParam.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-                copyParam.dstArray = dstArray;
-
-                copyParam.srcMemoryType = CU_MEMORYTYPE_HOST;
-                copyParam.srcHost = srcDataPtr;
-                copyParam.srcPitch = mipWidth * elementSize;
-                copyParam.WidthInBytes = copyParam.srcPitch;
-                copyParam.Height = mipHeight;
-                // Set the depth to the array length
-                copyParam.Depth = desc.arraySize;
-
-                if (desc.type == IResource::Type::TextureCube)
-                {
-                    copyParam.Depth *= 6;
+                        workspace.setCount(faceSizeInBytes * 6);
+                        // Copy the data over to make contiguous
+                        for (Index j = 0; j < 6; j++)
+                        {
+                            const auto srcData =
+                                initData[mipLevel + j * desc.numMipLevels].data;
+                            ::memcpy(
+                                workspace.getBuffer() + faceSizeInBytes * j,
+                                srcData,
+                                faceSizeInBytes);
+                        }
+                        srcDataPtr = workspace.getBuffer();
+                    }
+                    else
+                    {
+                        const auto srcData = initData[mipLevel].data;
+                        srcDataPtr = srcData;
+                    }
                 }
 
-                SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy3D(&copyParam));
-            }
-            else
-            {
-                switch (desc.type)
+                if (desc.arraySize > 1)
                 {
-                case IResource::Type::Texture1D:
-                case IResource::Type::Texture2D:
+                    SLANG_ASSERT(
+                        desc.type == IResource::Type::Texture1D ||
+                        desc.type == IResource::Type::Texture2D ||
+                        desc.type == IResource::Type::TextureCube);
+
+                    CUDA_MEMCPY3D copyParam;
+                    memset(&copyParam, 0, sizeof(copyParam));
+
+                    copyParam.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+                    copyParam.dstArray = dstArray;
+
+                    copyParam.srcMemoryType = CU_MEMORYTYPE_HOST;
+                    copyParam.srcHost = srcDataPtr;
+                    copyParam.srcPitch = mipWidth * elementSize;
+                    copyParam.WidthInBytes = copyParam.srcPitch;
+                    copyParam.Height = mipHeight;
+                    // Set the depth to the array length
+                    copyParam.Depth = desc.arraySize;
+
+                    if (desc.type == IResource::Type::TextureCube)
                     {
-                        CUDA_MEMCPY2D copyParam;
-                        memset(&copyParam, 0, sizeof(copyParam));
-                        copyParam.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-                        copyParam.dstArray = dstArray;
-                        copyParam.srcMemoryType = CU_MEMORYTYPE_HOST;
-                        copyParam.srcHost = srcDataPtr;
-                        copyParam.srcPitch = mipWidth * elementSize;
-                        copyParam.WidthInBytes = copyParam.srcPitch;
-                        copyParam.Height = mipHeight;
-                        SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy2D(&copyParam));
-                        break;
-                    }
-                case IResource::Type::Texture3D:
-                case IResource::Type::TextureCube:
-                    {
-                        CUDA_MEMCPY3D copyParam;
-                        memset(&copyParam, 0, sizeof(copyParam));
-
-                        copyParam.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-                        copyParam.dstArray = dstArray;
-
-                        copyParam.srcMemoryType = CU_MEMORYTYPE_HOST;
-                        copyParam.srcHost = srcDataPtr;
-                        copyParam.srcPitch = mipWidth * elementSize;
-                        copyParam.WidthInBytes = copyParam.srcPitch;
-                        copyParam.Height = mipHeight;
-                        copyParam.Depth = mipDepth;
-
-                        SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy3D(&copyParam));
-                        break;
+                        copyParam.Depth *= 6;
                     }
 
-                default:
+                    SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy3D(&copyParam));
+                }
+                else
+                {
+                    switch (desc.type)
                     {
-                        SLANG_ASSERT(!"Not implemented");
-                        break;
+                    case IResource::Type::Texture1D:
+                    case IResource::Type::Texture2D:
+                        {
+                            CUDA_MEMCPY2D copyParam;
+                            memset(&copyParam, 0, sizeof(copyParam));
+                            copyParam.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+                            copyParam.dstArray = dstArray;
+                            copyParam.srcMemoryType = CU_MEMORYTYPE_HOST;
+                            copyParam.srcHost = srcDataPtr;
+                            copyParam.srcPitch = mipWidth * elementSize;
+                            copyParam.WidthInBytes = copyParam.srcPitch;
+                            copyParam.Height = mipHeight;
+                            SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy2D(&copyParam));
+                            break;
+                        }
+                    case IResource::Type::Texture3D:
+                    case IResource::Type::TextureCube:
+                        {
+                            CUDA_MEMCPY3D copyParam;
+                            memset(&copyParam, 0, sizeof(copyParam));
+
+                            copyParam.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+                            copyParam.dstArray = dstArray;
+
+                            copyParam.srcMemoryType = CU_MEMORYTYPE_HOST;
+                            copyParam.srcHost = srcDataPtr;
+                            copyParam.srcPitch = mipWidth * elementSize;
+                            copyParam.WidthInBytes = copyParam.srcPitch;
+                            copyParam.Height = mipHeight;
+                            copyParam.Depth = mipDepth;
+
+                            SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy3D(&copyParam));
+                            break;
+                        }
+
+                    default:
+                        {
+                            SLANG_ASSERT(!"Not implemented");
+                            break;
+                        }
                     }
                 }
             }
         }
-
         // Set up texture sampling parameters, and create final texture obj
 
         {
@@ -1755,7 +1784,7 @@ public:
             // time we create a resource, and then allocate the surface or
             // texture objects as part of view creation.
             //
-            if( desc.bindFlags & IResource::BindFlag::UnorderedAccess )
+            if (desc.allowedStates.contains(ResourceState::UnorderedAccess))
             {
                 SLANG_CUDA_RETURN_ON_FAIL(cuSurfObjectCreate(&tex->m_cudaSurfObj, &resDesc));
             }
@@ -1774,23 +1803,24 @@ public:
                 cuTexObjectCreate(&tex->m_cudaTexObj, &resDesc, &texDesc, nullptr));
         }
 
-        *outResource = tex.detach();
+        returnComPtr(outResource, tex);
         return SLANG_OK;
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferResource(
-        IResource::Usage initialUsage,
-        const IBufferResource::Desc& desc,
+        const IBufferResource::Desc& descIn,
         const void* initData,
         IBufferResource** outResource) override
     {
+        auto desc = fixupBufferDesc(descIn);
         RefPtr<MemoryCUDAResource> resource = new MemoryCUDAResource(desc);
+        resource->m_cudaContext = m_context;
         SLANG_CUDA_RETURN_ON_FAIL(cudaMallocManaged(&resource->m_cudaMemory, desc.sizeInBytes));
         if (initData)
         {
             SLANG_CUDA_RETURN_ON_FAIL(cudaMemcpy(resource->m_cudaMemory, initData, desc.sizeInBytes, cudaMemcpyHostToDevice));
         }
-        *outResource = resource.detach();
+        returnComPtr(outResource, resource);
         return SLANG_OK;
     }
 
@@ -1800,7 +1830,7 @@ public:
         RefPtr<CUDAResourceView> view = new CUDAResourceView();
         view->desc = desc;
         view->textureResource = dynamic_cast<TextureCUDAResource*>(texture);
-        *outView = view.detach();
+        returnComPtr(outView, view);
         return SLANG_OK;
     }
 
@@ -1810,7 +1840,7 @@ public:
         RefPtr<CUDAResourceView> view = new CUDAResourceView();
         view->desc = desc;
         view->memoryResource = dynamic_cast<MemoryCUDAResource*>(buffer);
-        *outView = view.detach();
+        returnComPtr(outView, view);
         return SLANG_OK;
     }
 
@@ -1820,7 +1850,7 @@ public:
     {
         RefPtr<CUDAShaderObjectLayout> cudaLayout;
         cudaLayout = new CUDAShaderObjectLayout(this, typeLayout);
-        *outLayout = cudaLayout.detach();
+        returnRefPtrMove(outLayout, cudaLayout);
         return SLANG_OK;
     }
 
@@ -1830,19 +1860,18 @@ public:
     {
         RefPtr<CUDAShaderObject> result = new CUDAShaderObject();
         SLANG_RETURN_ON_FAIL(result->init(this, dynamic_cast<CUDAShaderObjectLayout*>(layout)));
-        *outObject = result.detach();
+        returnComPtr(outObject, result);
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createRootShaderObject(IShaderProgram* program, IShaderObject** outObject) override
+    Result createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject)
     {
         auto cudaProgram = dynamic_cast<CUDAShaderProgram*>(program);
         auto cudaLayout = cudaProgram->layout;
 
         RefPtr<CUDARootShaderObject> result = new CUDARootShaderObject();
         SLANG_RETURN_ON_FAIL(result->init(this, cudaLayout));
-        *outObject = result.detach();
+        returnRefPtrMove(outObject, result);
         return SLANG_OK;
     }
 
@@ -1854,10 +1883,11 @@ public:
         // the shader object bindings.
         RefPtr<CUDAShaderProgram> cudaProgram = new CUDAShaderProgram();
         cudaProgram->slangProgram = desc.slangProgram;
+        cudaProgram->cudaContext = m_context;
         if (desc.slangProgram->getSpecializationParamCount() != 0)
         {
             cudaProgram->layout = new CUDAProgramLayout(this, desc.slangProgram->getLayout());
-            *outProgram = cudaProgram.detach();
+            returnComPtr(outProgram, cudaProgram);
             return SLANG_OK;
         }
 
@@ -1867,7 +1897,10 @@ public:
             (SlangInt)0, 0, kernelCode.writeRef(), diagnostics.writeRef());
         if (diagnostics)
         {
-            // TODO: report compile error.
+            getDebugCallback()->handleMessage(
+                compileResult == SLANG_OK ? DebugMessageType::Warning : DebugMessageType::Error,
+                DebugMessageSource::Slang,
+                (char*)diagnostics->getBufferPointer());
         }
         SLANG_RETURN_ON_FAIL(compileResult);
         
@@ -1891,7 +1924,7 @@ public:
             cudaProgram->layout = cudaLayout;
         }
 
-        *outProgram = cudaProgram.detach();
+        returnComPtr(outProgram, cudaProgram);
         return SLANG_OK;
     }
 
@@ -1899,9 +1932,9 @@ public:
         const ComputePipelineStateDesc& desc, IPipelineState** outState) override
     {
         RefPtr<CUDAPipelineState> state = new CUDAPipelineState();
-        state->shaderProgram = dynamic_cast<CUDAShaderProgram*>(desc.program);
+        state->shaderProgram = static_cast<CUDAShaderProgram*>(desc.program);
         state->init(desc);
-        *outState = state.detach();
+        returnComPtr(outState, state);
         return Result();
     }
 
@@ -1921,12 +1954,22 @@ public:
     }
 
 public:
+    virtual SLANG_NO_THROW Result SLANG_MCALL createTransientResourceHeap(
+        const ITransientResourceHeap::Desc& desc,
+        ITransientResourceHeap** outHeap) override
+    {
+        RefPtr<TransientResourceHeapImpl> result = new TransientResourceHeapImpl();
+        SLANG_RETURN_ON_FAIL(result->init(this, desc));
+        returnComPtr(outHeap, result);
+        return SLANG_OK;
+    }
+
     virtual SLANG_NO_THROW Result SLANG_MCALL
         createCommandQueue(const ICommandQueue::Desc& desc, ICommandQueue** outQueue) override
     {
         RefPtr<CommandQueueImpl> queue = new CommandQueueImpl();
         queue->init(this);
-        *outQueue = queue.detach();
+        returnComPtr(outQueue, queue);
         return SLANG_OK;
     }
     virtual SLANG_NO_THROW Result SLANG_MCALL createSwapchain(
@@ -2015,7 +2058,7 @@ public:
             (uint8_t*)bufferImpl->m_cudaMemory + offset,
             size,
             cudaMemcpyDefault);
-        *outBlob = blob.detach();
+        returnComPtr(outBlob, blob);
         return SLANG_OK;
     }
 };
@@ -2103,7 +2146,7 @@ SlangResult SLANG_MCALL createCUDADevice(const IDevice::Desc* desc, IDevice** ou
 {
     RefPtr<CUDADevice> result = new CUDADevice();
     SLANG_RETURN_ON_FAIL(result->initialize(*desc));
-    *outDevice = result.detach();
+    returnComPtr(outDevice, result);
     return SLANG_OK;
 }
 #else

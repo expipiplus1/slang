@@ -138,6 +138,12 @@ int main()
     IDevice::Desc deviceDesc = {};
     SLANG_RETURN_ON_FAIL(gfxCreateDevice(&deviceDesc, device.writeRef()));
 
+    Slang::ComPtr<gfx::ITransientResourceHeap> transientHeap;
+    ITransientResourceHeap::Desc transientHeapDesc = {};
+    transientHeapDesc.constantBufferSize = 4096;
+    SLANG_RETURN_ON_FAIL(
+        device->createTransientResourceHeap(transientHeapDesc, transientHeap.writeRef()));
+
     // Now we can load the shader code.
     // A `gfx::IShaderProgram` object for use in the `gfx` layer.
     ComPtr<gfx::IShaderProgram> shaderProgram;
@@ -159,13 +165,16 @@ int main()
     bufferDesc.sizeInBytes = numberCount * sizeof(float);
     bufferDesc.format = gfx::Format::Unknown;
     bufferDesc.elementSize = sizeof(float);
-    bufferDesc.bindFlags = gfx::IResource::BindFlag::NonPixelShaderResource |
-                           gfx::IResource::BindFlag::UnorderedAccess;
+    bufferDesc.allowedStates = ResourceStateSet(
+        ResourceState::ShaderResource,
+        ResourceState::UnorderedAccess,
+        ResourceState::CopyDestination,
+        ResourceState::CopySource);
+    bufferDesc.defaultState = ResourceState::UnorderedAccess;
     bufferDesc.cpuAccessFlags = IResource::AccessFlag::Write | IResource::AccessFlag::Read;
 
     ComPtr<gfx::IBufferResource> numbersBuffer;
     SLANG_RETURN_ON_FAIL(device->createBufferResource(
-        gfx::IResource::Usage::UnorderedAccess,
         bufferDesc,
         (void*)initialData,
         numbersBuffer.writeRef()));
@@ -177,45 +186,51 @@ int main()
     viewDesc.format = gfx::Format::Unknown;
     SLANG_RETURN_ON_FAIL(device->createBufferView(numbersBuffer, viewDesc, bufferView.writeRef()));
 
-    // Now comes the interesting part: binding the shader parameter for the
-    // compute kernel that we about to launch. We would like to construct
-    // a shader object that represents a `f(x)=x+1` transformation and apply
-    // it to the numbers in `numbersBuffer`.
-    // To start, we create a root shader object that represents the root level
-    // scope of the shader parameters.
-    ComPtr<gfx::IShaderObject> rootObject;
-    SLANG_RETURN_ON_FAIL(device->createRootShaderObject(shaderProgram, rootObject.writeRef()));
-    // We can set parameters directly with `rootObject`, but that requires us to use
-    // the Slang reflection API to obtain the proper offsets into the root object for each parameter.
-    // We implemented these logic in the `ShaderCursor` helper class, which simplifies the user
-    // code to find shader parameters. Here we demonstrate how to set parameters with `ShaderCursor`.
-    gfx::ShaderCursor entryPointCursor(rootObject->getEntryPoint(0)); // get a cursor the the first entry-point.
-    // Bind buffer view to the entry point.
-    entryPointCursor.getPath("buffer").setResource(bufferView);
-
-    // Next, we create a shader object that represents the transformer we want to use.
-    // To do so, we first need to lookup for the `AddTransformer` type defined in the shader code.
-    slang::TypeReflection* addTransformerType = slangReflection->findTypeByName("AddTransformer");
-
-    // Now we can use this type to create a shader object that can be bound to the root object.
-    ComPtr<gfx::IShaderObject> transformer;
-    SLANG_RETURN_ON_FAIL(device->createShaderObject(addTransformerType, transformer.writeRef()));
-    // Set the `c` field of the `AddTransformer`.
-    float c = 1.0f;
-    gfx::ShaderCursor(transformer).getPath("c").setData(&c, sizeof(float));
-
-    // Now the transformer object is ready, we can bind it to root object.
-    entryPointCursor.getPath("transformer").setObject(transformer);
-
-    // We have set up all required parameters in entry-point object, now it is time
-    // to bind the pipeline and root object and launch the kernel.
+    // We have done all the set up work, now it is time to start recording a command buffer for
+    // GPU execution.
     {
         ICommandQueue::Desc queueDesc = {ICommandQueue::QueueType::Graphics};
         auto queue = device->createCommandQueue(queueDesc);
-        auto commandBuffer = queue->createCommandBuffer();
+
+        auto commandBuffer = transientHeap->createCommandBuffer();
         auto encoder = commandBuffer->encodeComputeCommands();
-        encoder->setPipelineState(pipelineState);
-        encoder->bindRootShaderObject(rootObject);
+
+
+        // Now comes the interesting part: binding the shader parameter for the
+        // compute kernel that we about to launch. We would like to construct
+        // a shader object that represents a `f(x)=x+1` transformation and apply
+        // it to the numbers in `numbersBuffer`.
+
+        // First, obtain a root shader object from command encoder to start parameter binding.
+        auto rootObject = encoder->bindPipeline(pipelineState);
+
+        // Next, we create a shader object that represents the transformer we want to use.
+        // To do so, we first need to lookup for the `AddTransformer` type defined in the shader
+        // code.
+        slang::TypeReflection* addTransformerType =
+            slangReflection->findTypeByName("AddTransformer");
+
+        // Now we can use this type to create a shader object that can be bound to the root object.
+        ComPtr<gfx::IShaderObject> transformer;
+        SLANG_RETURN_ON_FAIL(
+            device->createShaderObject(addTransformerType, transformer.writeRef()));
+        // Set the `c` field of the `AddTransformer`.
+        float c = 1.0f;
+        gfx::ShaderCursor(transformer).getPath("c").setData(&c, sizeof(float));
+
+        // We can set parameters directly with `rootObject`, but that requires us to use
+        // the Slang reflection API to obtain the proper offsets into the root object for each
+        // parameter. We implemented these logic in the `ShaderCursor` helper class, which
+        // simplifies the user code to find shader parameters. Here we demonstrate how to set
+        // parameters with `ShaderCursor`.
+        gfx::ShaderCursor entryPointCursor(
+            rootObject->getEntryPoint(0)); // get a cursor the the first entry-point.
+        // Bind buffer view to the entry point.
+        entryPointCursor.getPath("buffer").setResource(bufferView);
+
+        // Bind the previously created transformer object to root object.
+        entryPointCursor.getPath("transformer").setObject(transformer);
+
         encoder->dispatchCompute(1, 1, 1);
         encoder->endEncoding();
         commandBuffer->close();
