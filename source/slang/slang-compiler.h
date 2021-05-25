@@ -8,6 +8,8 @@
 
 #include "../compiler-core/slang-downstream-compiler.h"
 #include "../compiler-core/slang-name.h"
+#include "../compiler-core/slang-include-system.h"
+#include "../compiler-core/slang-command-line-args.h"
 
 #include "../core/slang-std-writers.h"
 
@@ -20,8 +22,6 @@
 #include "slang-profile.h"
 #include "slang-syntax.h"
 
-
-#include "slang-include-system.h"
 
 #include "slang-serialize-ir-types.h"
 
@@ -76,6 +76,7 @@ namespace Slang
         HostCallable        = SLANG_HOST_CALLABLE,
         CUDASource          = SLANG_CUDA_SOURCE,
         PTX                 = SLANG_PTX,
+        ObjectCode          = SLANG_OBJECT_CODE,
         CountOf             = SLANG_TARGET_COUNT_OF,
     };
 
@@ -1198,13 +1199,9 @@ namespace Slang
         // TypeLayouts created on the fly by reflection API
         Dictionary<Type*, RefPtr<TypeLayout>> typeLayouts;
 
-        Dictionary<Type*, ParameterBlockType*> parameterBlockTypes;
-
         Dictionary<Type*, RefPtr<TypeLayout>>& getTypeLayouts() { return typeLayouts; }
 
         TypeLayout* getTypeLayout(Type* type);
-
-        TypeLayout* getParameterBlockLayout(Type* type);
 
     private:
         Linkage*                linkage = nullptr;
@@ -1250,6 +1247,21 @@ namespace Slang
     const char* getBuildTagString();
 
     struct TypeCheckingCache;
+
+    struct ContainerTypeKey
+    {
+        slang::TypeReflection* elementType;
+        slang::ContainerType containerType;
+        bool operator==(ContainerTypeKey other)
+        {
+            return elementType == other.elementType && containerType == other.containerType;
+        }
+        Slang::HashCode getHashCode()
+        {
+            return Slang::combineHash(
+                Slang::getHashCode(elementType), Slang::getHashCode(containerType));
+        }
+    };
     
         /// A context for loading and re-using code modules.
     class Linkage : public RefObject, public slang::ISession
@@ -1278,11 +1290,11 @@ namespace Slang
             SlangInt               targetIndex = 0,
             slang::LayoutRules     rules = slang::LayoutRules::Default,
             ISlangBlob**    outDiagnostics = nullptr) override;
-        SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL getParameterBlockLayout(
+        SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL getContainerType(
             slang::TypeReflection* elementType,
-            SlangInt targetIndex = 0,
-            slang::LayoutRules rules = slang::LayoutRules::Default,
+            slang::ContainerType containerType,
             ISlangBlob** outDiagnostics = nullptr) override;
+        SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL getDynamicType() override;
         SLANG_NO_THROW SlangResult SLANG_MCALL getTypeRTTIMangledName(
             slang::TypeReflection* type,
             ISlangBlob** outNameBlob) override;
@@ -1337,6 +1349,9 @@ namespace Slang
         // Determine whether to output heterogeneity-related code
         bool m_heterogeneous = false;
 
+        /// Holds any args that are destined for downstream compilers/tools etc
+        DownstreamArgs m_downstreamArgs;
+
         // Name pool for looking up names
         NamePool namePool;
 
@@ -1346,6 +1361,9 @@ namespace Slang
 
        
         RefPtr<ASTBuilder> m_astBuilder;
+
+        // Cache for container types.
+        Dictionary<ContainerTypeKey, Type*> m_containerTypes;
 
             // cache used by type checking, implemented in check.cpp
         TypeCheckingCache* getTypeCheckingCache();
@@ -2225,18 +2243,6 @@ namespace Slang
             /// Get the default compiler for a language
         DownstreamCompiler* getDefaultDownstreamCompiler(SourceLanguage sourceLanguage);
 
-        enum class SharedLibraryFuncType
-        {
-            Glslang_Compile_1_0,
-            Glslang_Compile_1_1,
-            Fxc_D3DCompile,
-            Fxc_D3DDisassemble,
-            Dxc_DxcCreateInstance,
-            CountOf,
-        };
-
-        //
-
         RefPtr<Scope>   baseLanguageScope;
         RefPtr<Scope>   coreLanguageScope;
         RefPtr<Scope>   hlslLanguageScope;
@@ -2290,8 +2296,6 @@ namespace Slang
             /// Will unload the specified shared library if it's currently loaded 
         void resetDownstreamCompiler(PassThroughMode type);
 
-        SlangFuncPtr getSharedLibraryFunc(SharedLibraryFuncType type, DiagnosticSink* sink);
-
             /// Get the prelude associated with the language
         const String& getPreludeForLanguage(SourceLanguage language) { return m_languagePreludes[int(language)]; }
 
@@ -2307,8 +2311,6 @@ namespace Slang
         ~Session();
 
         ComPtr<ISlangSharedLibraryLoader> m_sharedLibraryLoader;                    ///< The shared library loader (never null)
-
-        SlangFuncPtr m_sharedLibraryFunctions[int(SharedLibraryFuncType::CountOf)]; ///< Functions from shared libraries
 
         int m_downstreamCompilerInitialized = 0;                                        
 

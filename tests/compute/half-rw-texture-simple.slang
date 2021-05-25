@@ -9,7 +9,7 @@
 // TODO(JS): Doesn't work on vk currently, because createTextureView not implemented on vk renderer
 //DIABLE_TEST(compute, vulkan):COMPARE_COMPUTE_EX:-vk -compute -output-using-type -shaderobj
 // TODO(JS): Doesn't work on certain CI systems. 
-//TEST(compute):COMPARE_COMPUTE_EX:-cuda -compute -output-using-type -shaderobj -render-features half
+//DISABLE_TEST(compute):COMPARE_COMPUTE_EX:-cuda -compute -output-using-type -shaderobj -render-features half
 
 //TEST_INPUT: RWTexture2D(format=R_Float16, size=4, content = one, mipMaps = 1):name rwt2D
 RWTexture2D<half> rwt2D;
@@ -41,10 +41,10 @@ void computeMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // NOTE! This is disabled because on CUDA, whilst this has an effect it is not what is expected.
     // The value read back has changed but seems to always be 1.
     // rwt1D[idx] = idx;
-    //rwt2D[uint2(idx, idx)] = half(idx);    
+    rwt2D[uint2(idx, idx)] = half(idx);    
     
     //val += rwt1D[idx];
-    //val += rwt2D[uint2(idx, idx)];
+    val += rwt2D[uint2(idx, idx)];
     //val += rwt3D[uint3(idx, idx, idx)];
  
     outputBuffer[idx] = val;
