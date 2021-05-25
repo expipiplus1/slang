@@ -131,12 +131,15 @@ static void formatDiagnosticMessage(StringBuilder& sb, char const* format, int a
     }
 }
 
-static void formatDiagnostic(const HumaneSourceLoc& humaneLoc, Diagnostic const& diagnostic, StringBuilder& outBuilder)
+static void formatDiagnostic(const HumaneSourceLoc& humaneLoc, Diagnostic const& diagnostic, DiagnosticSink::Flags flags, StringBuilder& outBuilder)
 {
-    outBuilder << humaneLoc.pathInfo.foundPath;
-    outBuilder << "(";
-    outBuilder << Int32(humaneLoc.line);
-    outBuilder << "): ";
+    if (flags & DiagnosticSink::Flag::HumaneLoc)
+    {
+        outBuilder << humaneLoc.pathInfo.foundPath;
+        outBuilder << "(";
+        outBuilder << Int32(humaneLoc.line);
+        outBuilder << "): ";
+    }
 
     outBuilder << getSeverityName(diagnostic.severity);
 
@@ -236,7 +239,15 @@ static UnownedStringSlice _extractLineContainingPosition(const UnownedStringSlic
     return UnownedStringSlice(start, end);
 }
 
-static void _sourceLocationNoteDiagnostic(SourceView* sourceView, SourceLoc sourceLoc, DiagnosticSink::SourceLocationLexer lexer, StringBuilder& sb)
+static void _reduceLength(Index startIndex, const UnownedStringSlice& prefix, StringBuilder& ioBuf)
+{
+    StringBuilder buf;
+    buf << prefix;
+    buf.append(ioBuf.getUnownedSlice().tail(startIndex));
+    ioBuf = buf;
+}
+
+static void _sourceLocationNoteDiagnostic(DiagnosticSink* sink, SourceView* sourceView, SourceLoc sourceLoc, StringBuilder& sb)
 {
     SourceFile* sourceFile = sourceView->getSourceFile();
     if (!sourceFile)
@@ -266,7 +277,7 @@ static void _sourceLocationNoteDiagnostic(SourceView* sourceView, SourceLoc sour
     // TODO(JS): The tab size should ideally be configurable from command line.
     // For now just go with 4.
     const Index tabSize = 4;
-    
+
     StringBuilder sourceLine;
     StringBuilder caretLine;
 
@@ -282,10 +293,13 @@ static void _sourceLocationNoteDiagnostic(SourceView* sourceView, SourceLoc sour
         const Index length = caretLine.getLength();
         caretLine.Clear();
         caretLine.appendRepeatedChar(' ', length);
-        
+
+        Index caretIndex = caretLine.getLength();
+
         // Add caret
         caretLine << "^";
 
+        auto lexer = sink->getSourceLocationLexer();
         if (lexer)
         {
             UnownedStringSlice token = lexer(UnownedStringSlice(pos, line.end()));
@@ -293,6 +307,35 @@ static void _sourceLocationNoteDiagnostic(SourceView* sourceView, SourceLoc sour
             if (token.getLength() > 1)
             {
                 caretLine.appendRepeatedChar('~', token.getLength() - 1);
+            }
+        }
+
+        const Index maxLength = sink->getSourceLineMaxLength();
+        if (maxLength > 0)
+        {
+            const UnownedStringSlice ellipsis = UnownedStringSlice::fromLiteral("...");
+            const UnownedStringSlice spaces = UnownedStringSlice::fromLiteral("   ");
+            SLANG_ASSERT(ellipsis.getLength() == spaces.getLength());
+
+            // We use the caretLine length if we have a lexer, because it will have underscores such that it's end is the end of
+            // the item at issue.
+            // If we don't have the lexer, we guesstimate using 1/4 of the maximum length
+            const Index endIndex = lexer ? caretLine.getLength() : (caretIndex + (maxLength / 4));
+
+            if (endIndex > maxLength)
+            {
+                const Index startIndex = endIndex - (maxLength - ellipsis.getLength());
+
+                _reduceLength(startIndex, ellipsis, sourceLine);
+                _reduceLength(startIndex, spaces, caretLine);
+            }
+
+            if (sourceLine.getLength() > maxLength)
+            {
+                StringBuilder buf;
+                buf.append(sourceLine.getUnownedSlice().head(maxLength - ellipsis.getLength()));
+                buf << ellipsis;
+                sourceLine = buf;
             }
         }
     }
@@ -322,7 +365,7 @@ static void formatDiagnostic(
         {
             humaneLoc = sourceView->getHumaneLoc(sourceLoc);
         }
-        formatDiagnostic(humaneLoc, diagnostic, sb);
+        formatDiagnostic(humaneLoc, diagnostic, sink->getFlags(), sb);
 
         {
             SourceView* currentView = sourceView;
@@ -353,7 +396,7 @@ static void formatDiagnostic(
                 HumaneSourceLoc pasteHumaneLoc = initiatingView->getHumaneLoc(sourceView->getInitiatingSourceLoc());
 
                 // Okay we should output where the token paste took place
-                formatDiagnostic(pasteHumaneLoc, initiationDiagnostic, sb);
+                formatDiagnostic(pasteHumaneLoc, initiationDiagnostic, sink->getFlags(), sb);
 
                 // Make the initiatingView the current view
                 currentView = initiatingView;
@@ -365,7 +408,7 @@ static void formatDiagnostic(
     // of the other main severity types, and so the information should already be output on the initial line
     if (sourceView && sink->isFlagSet(DiagnosticSink::Flag::SourceLocationLine) && diagnostic.severity != Severity::Note)
     {
-       _sourceLocationNoteDiagnostic(sourceView, sourceLoc, sink->getSourceLocationLexer(), sb);
+        _sourceLocationNoteDiagnostic(sink, sourceView, sourceLoc, sb);
     }
 
     if (sourceView && sink->isFlagSet(DiagnosticSink::Flag::VerbosePath))
@@ -380,7 +423,7 @@ static void formatDiagnostic(
             actualHumaneLoc.line != humaneLoc.line ||
             actualHumaneLoc.column != humaneLoc.column)
         { 
-            formatDiagnostic(actualHumaneLoc, diagnostic, sb);
+            formatDiagnostic(actualHumaneLoc, diagnostic, sink->getFlags(), sb);
         }
     }
 }
@@ -390,10 +433,11 @@ void DiagnosticSink::init(SourceManager* sourceManager, SourceLocationLexer sour
     m_errorCount = 0;
     m_internalErrorLocsNoted = 0;
 
-    m_flags = 0;
-
     m_sourceManager = sourceManager;
     m_sourceLocationLexer = sourceLocationLexer;
+    m_sourceLineMaxLength = 0;
+
+    m_flags = Flag::HumaneLoc;
 
     // If we have a source location lexer, we'll by default enable source location output
     if (sourceLocationLexer)
@@ -402,43 +446,94 @@ void DiagnosticSink::init(SourceManager* sourceManager, SourceLocationLexer sour
     }
 }
 
-void DiagnosticSink::diagnoseImpl(SourceLoc const& pos, DiagnosticInfo const& info, int argCount, DiagnosticArg const* const* args)
+void DiagnosticSink::noteInternalErrorLoc(SourceLoc const& loc)
 {
-    StringBuilder sb;
-    formatDiagnosticMessage(sb, info.messageFormat, argCount, args);
+    // Don't consider invalid source locations.
+    if (!loc.isValid())
+        return;
 
-    Diagnostic diagnostic;
-    diagnostic.ErrorID = info.id;
-    diagnostic.Message = sb.ProduceString();
-    diagnostic.loc = pos;
-    diagnostic.severity = info.severity;
+    if (m_parentSink)
+    {
+        m_parentSink->noteInternalErrorLoc(loc);
+    }
 
-    if (diagnostic.severity >= Severity::Error)
+    // If this is the first source location being noted,
+    // then emit a message to help the user isolate what
+    // code might have confused the compiler.
+    if (m_internalErrorLocsNoted == 0)
+    {
+        diagnose(loc, MiscDiagnostics::noteLocationOfInternalError);
+    }
+    m_internalErrorLocsNoted++;
+}
+
+SlangResult DiagnosticSink::getBlobIfNeeded(ISlangBlob** outBlob)
+{
+    // If the client doesn't want an output blob, there is nothing to do.
+    //
+    if (!outBlob) return SLANG_OK;
+
+    // For outputBuffer to be valid and hold diagnostics, writer must not be set
+    SLANG_ASSERT(writer == nullptr);
+
+    // If there were no errors, and there was no diagnostic output, there is nothing to do.
+    if (getErrorCount() == 0 && outputBuffer.getLength() == 0)
+    {
+        return SLANG_OK;
+    }
+
+    Slang::ComPtr<ISlangBlob> blob = Slang::StringUtil::createStringBlob(outputBuffer);
+    *outBlob = blob.detach();
+
+    return SLANG_OK;
+}
+
+void DiagnosticSink::diagnoseImpl(DiagnosticInfo const& info, const UnownedStringSlice& formattedMessage)
+{
+    if (info.severity >= Severity::Error)
     {
         m_errorCount++;
     }
 
-    // Did the client supply a callback for us to use?
-    if( writer )
+    if (writer)
     {
-        // If so, pass the error string along to them
-        StringBuilder messageBuilder;
-        formatDiagnostic(this, diagnostic, messageBuilder);
-
-        writer->write(messageBuilder.getBuffer(), messageBuilder.getLength());
+        writer->write(formattedMessage.begin(), formattedMessage.getLength());
     }
     else
     {
-        // If the user doesn't have a callback, then just
-        // collect our diagnostic messages into a buffer
-        formatDiagnostic(this, diagnostic, outputBuffer);
+        outputBuffer.append(formattedMessage);
     }
 
-    if (diagnostic.severity >= Severity::Fatal)
+    if (m_parentSink)
+    {
+        m_parentSink->diagnoseImpl(info, formattedMessage);
+    }
+
+    if (info.severity >= Severity::Fatal)
     {
         // TODO: figure out a better policy for aborting compilation
         throw AbortCompilationException();
     }
+}
+
+void DiagnosticSink::diagnoseImpl(SourceLoc const& pos, DiagnosticInfo const& info, int argCount, DiagnosticArg const* const* args)
+{
+    StringBuilder messageBuilder;
+    {
+        StringBuilder sb;
+        formatDiagnosticMessage(sb, info.messageFormat, argCount, args);
+
+        Diagnostic diagnostic;
+        diagnostic.ErrorID = info.id;
+        diagnostic.Message = sb.ProduceString();
+        diagnostic.loc = pos;
+        diagnostic.severity = info.severity;
+
+        // If so, pass the error string along to them
+        formatDiagnostic(this, diagnostic, messageBuilder);
+    }
+
+    diagnoseImpl(info, messageBuilder.getUnownedSlice());
 }
 
 void DiagnosticSink::diagnoseRaw(
@@ -468,6 +563,11 @@ void DiagnosticSink::diagnoseRaw(
         // If the user doesn't have a callback, then just
         // collect our diagnostic messages into a buffer
         outputBuffer.append(message);
+    }
+
+    if (m_parentSink)
+    {
+        m_parentSink->diagnoseRaw(severity, message);
     }
 
     if (severity >= Severity::Fatal)

@@ -4,6 +4,7 @@
 #include "../core/slang-string-util.h"
 #include "../core/slang-shared-library.h"
 #include "../core/slang-archive-file-system.h"
+#include "../core/slang-type-text-util.h"
 
 #include "slang-check.h"
 #include "slang-parameter-binding.h"
@@ -125,9 +126,7 @@ void Session::init()
     getNamePool()->setRootNamePool(getRootNamePool());
 
     m_sharedLibraryLoader = DefaultSharedLibraryLoader::getSingleton();
-    // Set all the shared library function pointers to nullptr
-    ::memset(m_sharedLibraryFunctions, 0, sizeof(m_sharedLibraryFunctions));
-
+    
     // Set up shared AST builder
     m_sharedASTBuilder = new SharedASTBuilder;
     m_sharedASTBuilder->init(this);
@@ -732,6 +731,24 @@ Linkage::Linkage(Session* session, ASTBuilder* astBuilder, Linkage* builtinLinka
             mapNameToLoadedModules.Add(pair.Key, pair.Value);
         }
     }
+
+    {
+        RefPtr<CommandLineContext> context = new CommandLineContext;
+        m_downstreamArgs = DownstreamArgs(context);
+
+        // Add all of the possible names we allow for downstream tools
+        {
+            for (Index i = SLANG_PASS_THROUGH_NONE + 1; i < SLANG_PASS_THROUGH_COUNT_OF; ++i)
+            {
+                m_downstreamArgs.addName(TypeTextUtil::getPassThroughName(SlangPassThrough(i)));
+            }
+
+            // Generic downstream tool
+            m_downstreamArgs.addName("downstream");
+            // Generic downstream linker
+            m_downstreamArgs.addName("linker");
+        }
+    }
 }
 
 ISlangUnknown* Linkage::getInterface(const Guid& guid)
@@ -897,35 +914,65 @@ SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL Linkage::getTypeLayout(
     return asExternal(typeLayout);
 }
 
-SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL Linkage::getParameterBlockLayout(
+SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
     slang::TypeReflection* inType,
-    SlangInt targetIndex,
-    slang::LayoutRules rules,
+    slang::ContainerType containerType,
     ISlangBlob** outDiagnostics)
 {
     auto type = asInternal(inType);
 
-    if (targetIndex < 0 || targetIndex >= targets.getCount())
-        return nullptr;
+    Type* containerTypeReflection = nullptr;
+    ContainerTypeKey key = {inType, containerType};
+    if (!m_containerTypes.TryGetValue(key, containerTypeReflection))
+    {
+        switch (containerType)
+        {
+        case slang::ContainerType::ConstantBuffer:
+            {
+                ConstantBufferType* cbType = getASTBuilder()->create<ConstantBufferType>();
+                cbType->elementType = type;
+                containerTypeReflection = cbType;
+            }
+            break;
+        case slang::ContainerType::ParameterBlock:
+            {
+                ParameterBlockType* pbType = getASTBuilder()->create<ParameterBlockType>();
+                pbType->elementType = type;
+                containerTypeReflection = pbType;
+            }
+            break;
+        case slang::ContainerType::StructuredBuffer:
+            {
+                HLSLStructuredBufferType* sbType =
+                    getASTBuilder()->create<HLSLStructuredBufferType>();
+                sbType->elementType = type;
+                containerTypeReflection = sbType;
+            }
+            break;
+        case slang::ContainerType::UnsizedArray:
+            {
+                ArrayExpressionType* arrType = getASTBuilder()->create<ArrayExpressionType>();
+                arrType->baseType = type;
+                arrType->arrayLength = nullptr;
+                containerTypeReflection = arrType;
+            }
+            break;
+        default:
+            containerTypeReflection = type;
+            break;
+        }
+        
+        m_containerTypes.Add(key, containerTypeReflection);
+    }
 
-    auto target = targets[targetIndex];
-
-    // TODO: We need a way to pass through the layout rules
-    // that the user requested (e.g., constant buffers vs.
-    // structured buffer rules). Right now the API only
-    // exposes a single case, so this isn't a big deal.
-    //
-    SLANG_UNUSED(rules);
-
-    auto typeLayout = target->getParameterBlockLayout(type);
-
-    // TODO: We currently don't have a path for capturing
-    // errors that occur during layout (e.g., types that
-    // are invalid because of target-specific layout constraints).
-    //
     SLANG_UNUSED(outDiagnostics);
 
-    return asExternal(typeLayout);
+    return asExternal(containerTypeReflection);
+}
+
+SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getDynamicType()
+{
+    return asExternal(getASTBuilder()->getSharedASTBuilder()->getDynamicType());
 }
 
 SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::getTypeRTTIMangledName(
@@ -1132,19 +1179,6 @@ TypeLayout* TargetRequest::getTypeLayout(Type* type)
     getTypeLayouts()[type] = result;
     return result.Ptr();
 }
-
-TypeLayout* TargetRequest::getParameterBlockLayout(Type* type)
-{
-    ParameterBlockType* parameterBlockType = nullptr;
-    if (!parameterBlockTypes.TryGetValue(type, parameterBlockType))
-    {
-        parameterBlockType = getLinkage()->getASTBuilder()->create<ParameterBlockType>();
-        parameterBlockType->elementType = type;
-        parameterBlockTypes.Add(type, parameterBlockType);
-    }
-    return getTypeLayout(parameterBlockType);
-}
-
 
 //
 // TranslationUnitRequest
@@ -1377,7 +1411,7 @@ protected:
     // whether any macro values were set in a given source file
     // that are semantically relevant to other stages of compilation.
     //
-    void handleEndOfFile(Preprocessor* preprocessor) SLANG_OVERRIDE
+    void handleEndOfTranslationUnit(Preprocessor* preprocessor) SLANG_OVERRIDE
     {
         // We look at the preprocessor state after reading the entire
         // source file/string, in order to see if any macros have been
@@ -3620,42 +3654,7 @@ TargetProgram::TargetProgram(
 
 //
 
-void DiagnosticSink::noteInternalErrorLoc(SourceLoc const& loc)
-{
-    // Don't consider invalid source locations.
-    if(!loc.isValid())
-        return;
 
-    // If this is the first source location being noted,
-    // then emit a message to help the user isolate what
-    // code might have confused the compiler.
-    if(m_internalErrorLocsNoted == 0)
-    {
-        diagnose(loc, Diagnostics::noteLocationOfInternalError);
-    }
-    m_internalErrorLocsNoted++;
-}
-
-SlangResult DiagnosticSink::getBlobIfNeeded(ISlangBlob** outBlob)
-{
-    // If the client doesn't want an output blob, there is nothing to do.
-    //
-    if(!outBlob) return SLANG_OK;
-
-    // For outputBuffer to be valid and hold diagnostics, writer must not be set
-    SLANG_ASSERT(writer == nullptr);
-
-    // If there were no errors, and there was no diagnostic output, there is nothing to do.
-    if(getErrorCount() == 0 && outputBuffer.getLength() == 0)
-    {
-        return SLANG_OK;
-    }
-
-    Slang::ComPtr<ISlangBlob> blob = Slang::StringUtil::createStringBlob(outputBuffer);
-    *outBlob = blob.detach();
-
-    return SLANG_OK;
-}
 
 
 Session* CompileRequestBase::getSession()

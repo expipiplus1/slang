@@ -5,15 +5,18 @@
 #include "../core/slang-basic.h"
 
 #include "../compiler-core/slang-lexer.h"
-
-#include "slang-include-system.h"
+#include "../compiler-core/slang-include-system.h"
 
 namespace Slang {
 
 class DiagnosticSink;
 class Linkage;
 
-struct Preprocessor;
+namespace preprocessor
+{
+    struct Preprocessor;
+}
+using preprocessor::Preprocessor;
 
     /// A handler for callbacks invoked by the preprocessor.
     ///
@@ -23,7 +26,7 @@ struct Preprocessor;
     ///
 struct PreprocessorHandler
 {
-    virtual void handleEndOfFile(Preprocessor* preprocessor);
+    virtual void handleEndOfTranslationUnit(Preprocessor* preprocessor);
     virtual void handleFileDependency(String const& path);
 };
 
