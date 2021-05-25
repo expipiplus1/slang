@@ -24,6 +24,9 @@ struct StringUtil
         /// Split in, by specified splitChar into slices out
         /// Slices contents will directly address into in, so contents will only stay valid as long as in does.
     static void split(const UnownedStringSlice& in, char splitChar, List<UnownedStringSlice>& slicesOut);
+        /// Split in by the specified splitSlice
+        /// Slices contents will directly address into in, so contents will only stay valid as long as in does.
+    static void split(const UnownedStringSlice& in, const UnownedStringSlice& splitSlice, List<UnownedStringSlice>& slicesOut);
 
         /// Splits in into outSlices, up to maxSlices. May not consume all of in (for example if it runs out of space).
     static Index split(const UnownedStringSlice& in, char splitChar, Index maxSlices, UnownedStringSlice* outSlices);
@@ -66,6 +69,7 @@ struct StringUtil
         /// Given a string held in a blob, returns as a String
         /// Returns an empty string if blob is nullptr 
     static String getString(ISlangBlob* blob);
+    static UnownedStringSlice getSlice(ISlangBlob* blob);
 
         /// Given a string or slice, replaces all instances of fromChar with toChar
     static String calcCharReplaced(const UnownedStringSlice& slice, char fromChar, char toChar);
@@ -96,10 +100,6 @@ struct StringUtil
 
         /// Convert in to int. Returns SLANG_FAIL on error
     static SlangResult parseInt(const UnownedStringSlice& in, Int& outValue);
-
-        /// Takes slice and adds C++/C type escaping for special characters (like '\', '"' and if not ascii will write out as hex sequence)
-        /// Does not append double quotes around the output
-    static void appendEscaped(const UnownedStringSlice& slice, StringBuilder& out);
 };
 
 /* A helper class that allows parsing of lines from text with iteration. Uses StringUtil::extractLine for the actual underlying implementation. */

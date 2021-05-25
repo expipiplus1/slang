@@ -138,11 +138,14 @@ static void dumpIRIfEnabled(
     if(compileRequest->shouldDumpIR)
     {
         DiagnosticSinkWriter writer(compileRequest->getSink());
-
+        //FILE* f = nullptr;
+        //fopen_s(&f, (String("dump-") + label + ".txt").getBuffer(), "wt");
+        //FileWriter writer(f, 0);
         IRDumpOptions options;
         options.sourceManager = compileRequest->getSourceManager();
 
         dumpIR(irModule, options, label, &writer);
+        //fclose(f);
     }
 }
 
@@ -309,8 +312,10 @@ Result linkAndOptimizeIR(
     // perform specialization of functions based on parameter
     // values that need to be compile-time constants.
     //
+    dumpIRIfEnabled(compileRequest, irModule, "BEFORE-SPECIALIZE");
     if (!compileRequest->disableSpecialization)
         specializeModule(irModule);
+    dumpIRIfEnabled(compileRequest, irModule, "AFTER-SPECIALIZE");
 
     eliminateDeadCode(irModule);
 
@@ -319,7 +324,7 @@ Result linkAndOptimizeIR(
     // function pointers.
     dumpIRIfEnabled(compileRequest, irModule, "BEFORE-LOWER-GENERICS");
     lowerGenerics(targetRequest, irModule, sink);
-    dumpIRIfEnabled(compileRequest, irModule, "LOWER-GENERICS");
+    dumpIRIfEnabled(compileRequest, irModule, "AFTER-LOWER-GENERICS");
 
     if (sink->getErrorCount() != 0)
         return SLANG_FAIL;
@@ -844,7 +849,13 @@ SlangResult emitEntryPointsSourceFromIR(
     }
 
     // There may be global-scope modifiers that we should emit now
+    // Supress emitting line directives when emitting preprocessor directives since
+    // these preprocessor directives may be required to appear in the first line
+    // of the output. An example is that the "#version" line in a GLSL source must
+    // appear before anything else.
+    sourceWriter.supressLineDirective();
     sourceEmitter->emitPreprocessorDirectives();
+    sourceWriter.resumeLineDirective();
 
     RefObject* extensionTracker = sourceEmitter->getExtensionTracker();
 

@@ -165,13 +165,16 @@ int main()
     bufferDesc.sizeInBytes = numberCount * sizeof(float);
     bufferDesc.format = gfx::Format::Unknown;
     bufferDesc.elementSize = sizeof(float);
-    bufferDesc.bindFlags = gfx::IResource::BindFlag::NonPixelShaderResource |
-                           gfx::IResource::BindFlag::UnorderedAccess;
+    bufferDesc.allowedStates = ResourceStateSet(
+        ResourceState::ShaderResource,
+        ResourceState::UnorderedAccess,
+        ResourceState::CopyDestination,
+        ResourceState::CopySource);
+    bufferDesc.defaultState = ResourceState::UnorderedAccess;
     bufferDesc.cpuAccessFlags = IResource::AccessFlag::Write | IResource::AccessFlag::Read;
 
     ComPtr<gfx::IBufferResource> numbersBuffer;
     SLANG_RETURN_ON_FAIL(device->createBufferResource(
-        gfx::IResource::Usage::UnorderedAccess,
         bufferDesc,
         (void*)initialData,
         numbersBuffer.writeRef()));
@@ -209,8 +212,8 @@ int main()
 
         // Now we can use this type to create a shader object that can be bound to the root object.
         ComPtr<gfx::IShaderObject> transformer;
-        SLANG_RETURN_ON_FAIL(
-            device->createShaderObject(addTransformerType, transformer.writeRef()));
+        SLANG_RETURN_ON_FAIL(device->createShaderObject(
+            addTransformerType, ShaderObjectContainerType::None, transformer.writeRef()));
         // Set the `c` field of the `AddTransformer`.
         float c = 1.0f;
         gfx::ShaderCursor(transformer).getPath("c").setData(&c, sizeof(float));

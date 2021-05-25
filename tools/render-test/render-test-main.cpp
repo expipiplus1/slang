@@ -99,9 +99,9 @@ public:
 
     Result applyBinding(PipelineType pipelineType, ICommandEncoder* encoder);
     void setProjectionMatrix(IShaderObject* rootObject);
-    Result writeBindingOutput(const char* fileName);
+    Result writeBindingOutput(const String& fileName);
 
-    Result writeScreen(const char* filename);
+    Result writeScreen(const String& filename);
 
 protected:
     /// Called in initialize
@@ -117,7 +117,7 @@ protected:
     // variables for state to be used for rendering...
     uintptr_t m_constantBufferSize;
 
-    ComPtr<IDevice> m_device;
+    IDevice* m_device;
     ComPtr<ICommandQueue> m_queue;
     ComPtr<ITransientResourceHeap> m_transientHeap;
     ComPtr<IRenderPassLayout> m_renderPass;
@@ -213,7 +213,7 @@ struct AssignValsFromLayoutContext
 
         ComPtr<ITextureResource> texture;
         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(
-            textureEntry->textureDesc, textureBindFlags, device, texture));
+            textureEntry->textureDesc, ResourceState::ShaderResource, device, texture));
 
         auto sampler = _createSamplerState(device, samplerEntry->samplerDesc);
 
@@ -229,18 +229,23 @@ struct AssignValsFromLayoutContext
         return SLANG_OK;
     }
 
-    static const int textureBindFlags = IResource::BindFlag::NonPixelShaderResource | IResource::BindFlag::PixelShaderResource;
-
     SlangResult assignTexture(ShaderCursor const& dstCursor, ShaderInputLayout::TextureVal* srcVal)
     {
         ComPtr<ITextureResource> texture;
-        SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(
-            srcVal->textureDesc, textureBindFlags, device, texture));
+        ResourceState defaultState = ResourceState::ShaderResource;
+        IResourceView::Type viewType = IResourceView::Type::ShaderResource;
 
-        // TODO: support UAV textures...
+        if (srcVal->textureDesc.isRWTexture)
+        {
+            defaultState = ResourceState::UnorderedAccess;
+            viewType = IResourceView::Type::UnorderedAccess;
+        }
+
+        SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(
+            srcVal->textureDesc, defaultState, device, texture));
 
         IResourceView::Desc viewDesc;
-        viewDesc.type = IResourceView::Type::ShaderResource;
+        viewDesc.type = viewType;
         viewDesc.format = texture->getDesc()->format;
         auto textureView = device->createTextureView(
             texture,
@@ -494,10 +499,13 @@ SlangResult RenderTestApp::initialize(
                     inputElements, SLANG_COUNT_OF(inputElements), inputLayout.writeRef()));
 
                 IBufferResource::Desc vertexBufferDesc;
-                vertexBufferDesc.init(kVertexCount * sizeof(Vertex));
+                vertexBufferDesc.type = IResource::Type::Buffer;
+                vertexBufferDesc.sizeInBytes = kVertexCount * sizeof(Vertex);
+                vertexBufferDesc.cpuAccessFlags = IResource::AccessFlag::Write;
+                vertexBufferDesc.defaultState = ResourceState::VertexBuffer;
+                vertexBufferDesc.allowedStates = ResourceStateSet(ResourceState::VertexBuffer);
 
                 SLANG_RETURN_ON_FAIL(device->createBufferResource(
-                    IResource::Usage::VertexBuffer,
                     vertexBufferDesc,
                     kVertexData,
                     m_vertexBuffer.writeRef()));
@@ -537,27 +545,28 @@ void RenderTestApp::_initializeRenderPass()
     m_queue = m_device->createCommandQueue(queueDesc);
     
     gfx::ITextureResource::Desc depthBufferDesc;
-    depthBufferDesc.setDefaults(gfx::IResource::Usage::DepthWrite);
-    depthBufferDesc.init2D(
-        gfx::IResource::Type::Texture2D,
-        gfx::Format::D_Float32,
-        gWindowWidth,
-        gWindowHeight,
-        0);
+    depthBufferDesc.type = IResource::Type::Texture2D;
+    depthBufferDesc.size.width = gWindowWidth;
+    depthBufferDesc.size.height = gWindowHeight;
+    depthBufferDesc.size.depth = 1;
+    depthBufferDesc.numMipLevels = 1;
+    depthBufferDesc.format = Format::D_Float32;
+    depthBufferDesc.defaultState = ResourceState::DepthWrite;
+    depthBufferDesc.allowedStates = ResourceState::DepthWrite;
 
-    ComPtr<gfx::ITextureResource> depthBufferResource = m_device->createTextureResource(
-        gfx::IResource::Usage::DepthWrite, depthBufferDesc, nullptr);
+    ComPtr<gfx::ITextureResource> depthBufferResource =
+        m_device->createTextureResource(depthBufferDesc, nullptr);
 
     gfx::ITextureResource::Desc colorBufferDesc;
-    colorBufferDesc.setDefaults(gfx::IResource::Usage::RenderTarget);
-    colorBufferDesc.init2D(
-        gfx::IResource::Type::Texture2D,
-        gfx::Format::RGBA_Unorm_UInt8,
-        gWindowWidth,
-        gWindowHeight,
-        0);
-    m_colorBuffer = m_device->createTextureResource(
-        gfx::IResource::Usage::RenderTarget, colorBufferDesc, nullptr);
+    colorBufferDesc.type = IResource::Type::Texture2D;
+    colorBufferDesc.size.width = gWindowWidth;
+    colorBufferDesc.size.height = gWindowHeight;
+    colorBufferDesc.size.depth = 1;
+    colorBufferDesc.numMipLevels = 1;
+    colorBufferDesc.format = Format::RGBA_Unorm_UInt8;
+    colorBufferDesc.defaultState = ResourceState::RenderTarget;
+    colorBufferDesc.allowedStates = ResourceState::RenderTarget;
+    m_colorBuffer = m_device->createTextureResource(colorBufferDesc, nullptr);
 
     gfx::IResourceView::Desc colorBufferViewDesc;
     memset(&colorBufferViewDesc, 0, sizeof(colorBufferViewDesc));
@@ -641,24 +650,14 @@ void RenderTestApp::runCompute(IComputeCommandEncoder* encoder)
 
 void RenderTestApp::finalize()
 {
-    m_inputLayout = nullptr;
-    m_vertexBuffer = nullptr;
-    m_shaderProgram = nullptr;
-    m_pipelineState = nullptr;
-    m_renderPass = nullptr;
-    m_framebuffer = nullptr;
-    m_framebufferLayout = nullptr;
-    m_colorBuffer = nullptr;
-    m_queue = nullptr;
-    m_device = nullptr;
 }
 
-Result RenderTestApp::writeBindingOutput(const char* fileName)
+Result RenderTestApp::writeBindingOutput(const String& fileName)
 {
     // Wait until everything is complete
     m_queue->wait();
 
-    FILE * f = fopen(fileName, "wb");
+    FILE * f = fopen(fileName.getBuffer(), "wb");
     if (!f)
     {
         return SLANG_FAIL;
@@ -687,10 +686,12 @@ Result RenderTestApp::writeBindingOutput(const char* fileName)
 
                 auto stagingBufferDesc = bufferDesc;
                 stagingBufferDesc.cpuAccessFlags = IResource::AccessFlag::Read;
-                stagingBufferDesc.bindFlags = 0;
+                stagingBufferDesc.allowedStates =
+                    ResourceStateSet(ResourceState::CopyDestination, ResourceState::CopySource);
+                stagingBufferDesc.defaultState = ResourceState::CopyDestination;
 
                 ComPtr<IBufferResource> stagingBuffer;
-                SLANG_RETURN_ON_FAIL(m_device->createBufferResource(IResource::Usage::CopyDest, stagingBufferDesc, nullptr, stagingBuffer.writeRef()));
+                SLANG_RETURN_ON_FAIL(m_device->createBufferResource(stagingBufferDesc, nullptr, stagingBuffer.writeRef()));
 
                 ComPtr<ICommandBuffer> commandBuffer;
                 SLANG_RETURN_ON_FAIL(
@@ -728,7 +729,7 @@ Result RenderTestApp::writeBindingOutput(const char* fileName)
     return SLANG_OK;
 }
 
-Result RenderTestApp::writeScreen(const char* filename)
+Result RenderTestApp::writeScreen(const String& filename)
 {
     size_t rowPitch, pixelSize;
     ComPtr<ISlangBlob> blob;
@@ -737,7 +738,7 @@ Result RenderTestApp::writeScreen(const char* filename)
     auto bufferSize = blob->getBufferSize();
     uint32_t width = static_cast<uint32_t>(rowPitch / pixelSize);
     uint32_t height = static_cast<uint32_t>(bufferSize / rowPitch);
-    return PngSerializeUtil::write(filename, blob, width, height);
+    return PngSerializeUtil::write(filename.getBuffer(), blob, width, height);
 }
 
 Result RenderTestApp::update()
@@ -767,7 +768,7 @@ Result RenderTestApp::update()
     m_queue->wait();
 
     // If we are in a mode where output is requested, we need to snapshot the back buffer here
-    if (m_options.outputPath || m_options.performanceProfile)
+    if (m_options.outputPath.getLength() || m_options.performanceProfile)
     {
         // Wait until everything is complete
 
@@ -806,7 +807,7 @@ Result RenderTestApp::update()
             _outputProfileTime(m_startTicks, endTicks);
         }
 
-        if (m_options.outputPath)
+        if (m_options.outputPath.getLength())
         {
             if (m_options.shaderType == Options::ShaderProgramType::Compute || m_options.shaderType == Options::ShaderProgramType::GraphicsCompute)
             {
@@ -840,7 +841,11 @@ static SlangResult _setSessionPrelude(const Options& options, const char* exePat
         SLANG_RETURN_ON_FAIL(TestToolUtil::getRootPath(exePath, rootPath));
 
         String includePath;
-        SLANG_RETURN_ON_FAIL(TestToolUtil::getIncludePath(rootPath, "external/nvapi/nvHLSLExtns.h", includePath));
+        if (TestToolUtil::getIncludePath(rootPath, "external/nvapi/nvHLSLExtns.h", includePath) !=
+            SLANG_OK)
+        {
+            return SLANG_FAIL;
+        }
 
         StringBuilder buf;
         // We have to choose a slot that NVAPI will use. 
@@ -904,8 +909,6 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
     
     input.profile = "";
     input.target = SLANG_TARGET_NONE;
-    input.args = &options.slangArgs[0];
-    input.argCount = options.slangArgCount;
 
 	SlangSourceLanguage nativeLanguage = SLANG_SOURCE_LANGUAGE_UNKNOWN;
 	SlangPassThrough slangPassThrough = SLANG_PASS_THROUGH_NONE;
@@ -1010,8 +1013,12 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         }
     }
 
+#ifdef _DEBUG
+    gfxEnableDebugLayer();
+#endif
+
     // Use the profile name set on options if set
-    input.profile = options.profileName ? options.profileName : input.profile;
+    input.profile = options.profileName.getLength() ? options.profileName : input.profile;
 
     StringBuilder rendererName;
     auto info = 
@@ -1077,6 +1084,19 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         desc.requiredFeatures = requiredFeatureList.getBuffer();
         desc.requiredFeatureCount = (int)requiredFeatureList.getCount();
 
+        // Look for args going to slang
+        {
+            const auto& args = options.downstreamArgs.getArgsByName("slang");
+            for (const auto& arg : args)
+            {
+                if (arg.value == "-matrix-layout-column-major")
+                {
+                    desc.slang.defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR;
+                    break;
+                }
+            }
+        }
+        
         desc.nvapiExtnSlot = int(nvapiExtnSlot);
         desc.slang.slangGlobalSession = session;
 
@@ -1129,8 +1149,8 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         app.update();
         renderDocEndFrame();
         app.finalize();
-        return SLANG_OK;
 	}
+    return SLANG_OK;
 }
 
 SLANG_TEST_TOOL_API SlangResult innerMain(Slang::StdWriters* stdWriters, SlangSession* sharedSession, int inArgc, const char*const* inArgv)

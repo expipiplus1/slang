@@ -526,7 +526,8 @@ extern "C"
         SLANG_SHARED_LIBRARY,       ///< A shared library/Dll (for hosting CPU/OS)
         SLANG_HOST_CALLABLE,        ///< A CPU target that makes the compiled code available to be run immediately
         SLANG_CUDA_SOURCE,          ///< Cuda source
-        SLANG_PTX,                  ///< PTX 
+        SLANG_PTX,                  ///< PTX
+        SLANG_OBJECT_CODE,          ///< Object code that can be used for later linking
         SLANG_TARGET_COUNT_OF,
     };
 
@@ -609,7 +610,10 @@ extern "C"
            in the input source or specified via the `spAddEntryPoint` function in a
            single output module (library/source file).
         */
-        SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM = 1 << 8
+        SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM = 1 << 8,
+
+        /* When set, will dump out the IR between intermediate compilation steps.*/
+        SLANG_TARGET_FLAG_DUMP_IR = 1 << 9
     };
 
     /*!
@@ -1003,22 +1007,26 @@ extern "C"
 
         /** Get a uniqueIdentity which uniquely identifies an object of the file system.
            
-        Given a path, returns a 'uniqueIdentity' which ideally is the same value for the same file on the file system.
+        Given a path, returns a 'uniqueIdentity' which ideally is the same value for the same object on the file system.
 
-        The uniqueIdentity is used to compare if files are the same - which allows slang to cache source contents internally. It is also used
-        for #pragma once functionality.
+        The uniqueIdentity is used to compare if two paths are the same - which amongst other things allows Slang to
+        cache source contents internally. It is also used for #pragma once functionality.
 
         A *requirement* is for any implementation is that two paths can only return the same uniqueIdentity if the
-        contents of the two files are *identical*. If an implementation breaks this constraint it can produce incorrect compilation.
+        contents of the two files are *identical*h. If an implementation breaks this constraint it can produce incorrect compilation.
         If an implementation cannot *strictly* identify *the same* files, this will only have an effect on #pragma once behavior.
 
         The string for the uniqueIdentity is held zero terminated in the ISlangBlob of outUniqueIdentity.
    
         Note that there are many ways a uniqueIdentity may be generated for a file. For example it could be the
-        'canonical path' - assuming it is available and unambitious for a file system. Another possible mechanism
+        'canonical path' - assuming it is available and unambiguous for a file system. Another possible mechanism
         could be to store the filename combined with the file date time to uniquely identify it.
      
         The client must ensure the blob be released when no longer used, otherwise memory will leak.
+
+        NOTE! Ideally this method would be called 'getPathUniqueIdentity' but for historical reasons and
+        backward compatibility it's name remains with 'File' even though an implementation should be made to work
+        with directories too.
 
         @param path
         @param outUniqueIdentity
@@ -1961,6 +1969,7 @@ extern "C"
     SLANG_API SlangReflectionType* spReflectionTypeLayout_GetType(SlangReflectionTypeLayout* type);
     SLANG_API SlangTypeKind spReflectionTypeLayout_getKind(SlangReflectionTypeLayout* type);
     SLANG_API size_t spReflectionTypeLayout_GetSize(SlangReflectionTypeLayout* type, SlangParameterCategory category);
+    SLANG_API size_t spReflectionTypeLayout_GetStride(SlangReflectionTypeLayout* type, SlangParameterCategory category);
     SLANG_API int32_t spReflectionTypeLayout_getAlignment(SlangReflectionTypeLayout* type, SlangParameterCategory category);
 
     SLANG_API SlangReflectionVariableLayout* spReflectionTypeLayout_GetFieldByIndex(SlangReflectionTypeLayout* type, unsigned index);
@@ -1984,6 +1993,8 @@ extern "C"
     SLANG_API SlangReflectionTypeLayout* spReflectionTypeLayout_getPendingDataTypeLayout(SlangReflectionTypeLayout* type);
 
     SLANG_API SlangReflectionVariableLayout* spReflectionTypeLayout_getSpecializedTypePendingDataVarLayout(SlangReflectionTypeLayout* type);
+    SLANG_API SlangInt spReflectionType_getSpecializedTypeArgCount(SlangReflectionType* type);
+    SLANG_API SlangReflectionType* spReflectionType_getSpecializedTypeArgType(SlangReflectionType* type, SlangInt index);
 
     SLANG_API SlangInt spReflectionTypeLayout_getBindingRangeCount(SlangReflectionTypeLayout* typeLayout);
     SLANG_API SlangBindingType spReflectionTypeLayout_getBindingRangeType(SlangReflectionTypeLayout* typeLayout, SlangInt index);
@@ -2005,6 +2016,8 @@ extern "C"
 
     SLANG_API SlangInt spReflectionTypeLayout_getSubObjectRangeCount(SlangReflectionTypeLayout* typeLayout);
     SLANG_API SlangInt spReflectionTypeLayout_getSubObjectRangeBindingRangeIndex(SlangReflectionTypeLayout* typeLayout, SlangInt subObjectRangeIndex);
+    SLANG_API SlangInt spReflectionTypeLayout_getSubObjectRangeSpaceOffset(SlangReflectionTypeLayout* typeLayout, SlangInt subObjectRangeIndex);
+    SLANG_API SlangReflectionVariableLayout* spReflectionTypeLayout_getSubObjectRangeOffset(SlangReflectionTypeLayout* typeLayout, SlangInt subObjectRangeIndex);
 
 #if 0
     SLANG_API SlangInt spReflectionTypeLayout_getSubObjectRangeCount(SlangReflectionTypeLayout* typeLayout);
@@ -2408,6 +2421,11 @@ namespace slang
             return spReflectionTypeLayout_GetSize((SlangReflectionTypeLayout*) this, category);
         }
 
+        size_t getStride(SlangParameterCategory category = SLANG_PARAMETER_CATEGORY_UNIFORM)
+        {
+            return spReflectionTypeLayout_GetStride((SlangReflectionTypeLayout*) this, category);
+        }
+
         int32_t getAlignment(SlangParameterCategory category = SLANG_PARAMETER_CATEGORY_UNIFORM)
         {
             return spReflectionTypeLayout_getAlignment((SlangReflectionTypeLayout*) this, category);
@@ -2677,6 +2695,20 @@ namespace slang
         SlangInt getSubObjectRangeBindingRangeIndex(SlangInt subObjectRangeIndex)
         {
             return spReflectionTypeLayout_getSubObjectRangeBindingRangeIndex(
+                (SlangReflectionTypeLayout*) this,
+                subObjectRangeIndex);
+        }
+
+        SlangInt getSubObjectRangeSpaceOffset(SlangInt subObjectRangeIndex)
+        {
+            return spReflectionTypeLayout_getSubObjectRangeSpaceOffset(
+                (SlangReflectionTypeLayout*) this,
+                subObjectRangeIndex);
+        }
+
+        VariableLayoutReflection* getSubObjectRangeOffset(SlangInt subObjectRangeIndex)
+        {
+            return (VariableLayoutReflection*) spReflectionTypeLayout_getSubObjectRangeOffset(
                 (SlangReflectionTypeLayout*) this,
                 subObjectRangeIndex);
         }
@@ -3827,6 +3859,11 @@ namespace slang
 
     };
 
+    enum class ContainerType
+    {
+        None, UnsizedArray, StructuredBuffer, ConstantBuffer, ParameterBlock
+    };
+
         /** A session provides a scope for code that is loaded.
 
         A session can be used to load modules of Slang source code,
@@ -3917,6 +3954,24 @@ namespace slang
             SlangInt        targetIndex = 0,
             LayoutRules     rules = LayoutRules::Default,
             ISlangBlob**    outDiagnostics = nullptr) = 0;
+
+            /** Get a container type from `elementType`. For example, given type `T`, returns
+                a type that represents `StructuredBuffer<T>`.
+
+                @param `elementType`: the element type to wrap around.
+                @param `containerType`: the type of the container to wrap `elementType` in.
+                @param `outDiagnostics`: a blob to receive diagnostic messages.
+            */
+        virtual SLANG_NO_THROW TypeReflection* SLANG_MCALL getContainerType(
+            TypeReflection* elementType,
+            ContainerType containerType,
+            ISlangBlob** outDiagnostics = nullptr) = 0;
+
+            /** Return a `TypeReflection` that represents the `__Dynamic` type.
+                This type can be used as a specialization argument to indicate using
+                dynamic dispatch.
+            */
+        virtual SLANG_NO_THROW TypeReflection* SLANG_MCALL getDynamicType() = 0;
 
             /** Get the mangled name for a type RTTI object.
             */
@@ -4164,6 +4219,14 @@ namespace slang
             /** A type specialization argument, used for `Kind::Type`. */
             TypeReflection* type;
         };
+
+        static SpecializationArg fromType(TypeReflection* inType)
+        {
+            SpecializationArg rs;
+            rs.kind = Kind::Type;
+            rs.type = inType;
+            return rs;
+        }
     };
 }
 
