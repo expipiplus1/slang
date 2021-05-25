@@ -14,6 +14,11 @@ namespace gfx {
         case Format::RGB_Float32:       return VK_FORMAT_R32G32B32_SFLOAT;
         case Format::RG_Float32:        return VK_FORMAT_R32G32_SFLOAT;
         case Format::R_Float32:         return VK_FORMAT_R32_SFLOAT;
+
+        case Format::RGBA_Float16:      return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case Format::RG_Float16:        return VK_FORMAT_R16G16_SFLOAT;
+        case Format::R_Float16:         return VK_FORMAT_R16_SFLOAT;
+
         case Format::RGBA_Unorm_UInt8:  return VK_FORMAT_R8G8B8A8_UNORM;
         case Format::BGRA_Unorm_UInt8:  return VK_FORMAT_B8G8R8A8_UNORM;
         case Format::R_UInt32:          return VK_FORMAT_R32_UINT;
@@ -75,6 +80,36 @@ VkPipelineBindPoint VulkanUtil::getPipelineBindPoint(PipelineType pipelineType)
     default:
         return VkPipelineBindPoint(-1);
     }
+}
+
+VkImageLayout VulkanUtil::getImageLayoutFromState(ResourceState state)
+{
+    switch (state)
+    {
+    case ResourceState::ShaderResource:
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    case ResourceState::UnorderedAccess:
+        return VK_IMAGE_LAYOUT_GENERAL;
+    case ResourceState::Present:
+        return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    case ResourceState::CopySource:
+        return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    case ResourceState::CopyDestination:
+        return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    case ResourceState::RenderTarget:
+        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    case ResourceState::DepthWrite:
+        return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    case ResourceState::DepthRead:
+        return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    case ResourceState::ResolveSource:
+        return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    case ResourceState::ResolveDestination:
+        return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    default:
+        return VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    return VkImageLayout();
 }
 
 /* static */Slang::Result VulkanUtil::handleFail(VkResult res)

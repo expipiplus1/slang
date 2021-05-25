@@ -2,6 +2,9 @@
 
 #include "slang-blob.h"
 
+#include "slang-char-util.h"
+#include "slang-text-io.h"
+
 namespace Slang {
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! StringUtil !!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -53,6 +56,52 @@ namespace Slang {
 
         // Skip the split character, if at end we are okay anyway
         start = cur + 1;
+    }
+}
+
+/* static */void StringUtil::split(const UnownedStringSlice& in, const UnownedStringSlice& splitSlice, List<UnownedStringSlice>& outSlices)
+{
+    const Index splitLen = splitSlice.getLength();
+
+    if (splitLen == 1)
+    {
+        return split(in, splitSlice[0], outSlices);
+    }
+
+    outSlices.clear();
+
+    SLANG_ASSERT(splitLen > 0);
+    if (splitLen <= 0)
+    {
+        return;
+    }
+
+    const char* start = in.begin();
+    const char* end = in.end();
+
+    const char splitChar = splitSlice[0];
+
+    while (start < end)
+    {
+        // Move cur so it's either at the end or at next splitSlice
+        const char* cur = start;
+        while (cur < end)
+        {
+            if (*cur == splitChar &&
+                (cur + splitLen <= end && UnownedStringSlice(cur, splitLen) == splitSlice))
+            {
+                // We hit a split
+                break;
+            }
+
+            cur++;
+        }
+      
+        // Add to output
+        outSlices.add(UnownedStringSlice(start, cur));
+
+        // Skip the split, if at end we are okay anyway
+        start = cur + splitLen;
     }
 }
 
@@ -244,7 +293,7 @@ UnownedStringSlice StringUtil::getAtInSplit(const UnownedStringSlice& in, char s
     return builder;
 }
 
-/* static */String StringUtil::getString(ISlangBlob* blob)
+/* static */UnownedStringSlice StringUtil::getSlice(ISlangBlob* blob)
 {
     if (blob)
     {
@@ -252,15 +301,20 @@ UnownedStringSlice StringUtil::getAtInSplit(const UnownedStringSlice& in, char s
         if (size > 0)
         {
             const char* contents = (const char*)blob->getBufferPointer();
-            // Check it has terminating 0, if not we must construct as if it does
+            // Check it has terminating 0, if it has we skip it, because slices do not need zero termination 
             if (contents[size - 1] == 0)
             {
                 size--;
             }
-            return String(contents, contents + size);
+            return UnownedStringSlice(contents, contents + size);
         }
     }
-    return String();
+    return UnownedStringSlice();
+}
+
+/* static */String StringUtil::getString(ISlangBlob* blob)
+{
+    return getSlice(blob);
 }
 
 ComPtr<ISlangBlob> StringUtil::createStringBlob(const String& string)
@@ -444,77 +498,5 @@ SLANG_FORCE_INLINE static bool _isDigit(char c)
     outValue = value;
     return SLANG_OK;
 }
-
-static char _getHexChar(int v)
-{
-    return (v <= 9) ? char(v + '0') : char(v - 10 + 'A');
-}
-
-static char _getEscapedChar(char c)
-{
-    switch (c)
-    {
-        case '\b':      return 'b';
-        case '\f':      return 'f';
-        case '\n':      return 'n';
-        case '\r':      return 'r';
-        case '\a':      return 'a';
-        case '\t':      return 't';
-        case '\v':      return 'v';
-        case '\'':      return '\'';
-        case '\"':      return '"';
-        case '\\':      return '\\';
-        default:        return 0;
-    }
-}
-
-/* static */void StringUtil::appendEscaped(const UnownedStringSlice& slice, StringBuilder& out)
-{
-    const char* start = slice.begin();
-    const char* cur = start;
-    const char*const end = slice.end();
-
-    for (; cur < end; ++cur)
-    {
-        const char c = *cur;
-        const char escapedChar = _getEscapedChar(c);
-
-        if (escapedChar)
-        {
-            // Flush
-            if (start < cur)
-            {
-                out.append(start, end);
-            }
-            out.appendChar('\\');
-            out.appendChar(escapedChar);
-
-            start = cur + 1;
-        }
-        else if ( c < ' ' || c > 126)
-        {
-            // Flush
-            if (start < cur)
-            {
-                out.append(start, end);
-            }
-
-            char buf[5] = "\\0x0";
-
-            buf[3] = _getHexChar((int(c) >> 4) & 0xf);
-            buf[4] = _getHexChar(c & 0xf);
-
-            out.append(buf, buf + 4);
-
-            start = cur + 1;
-        }
-    }
-
-    if (start < end)
-    {
-        out.append(start, end);
-    }
-}
-
 
 } // namespace Slang

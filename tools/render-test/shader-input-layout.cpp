@@ -16,6 +16,15 @@ namespace renderer_test
     x("uint", UINT32) \
     x("float", FLOAT32)
 
+
+    Format _getFormatFromName(const UnownedStringSlice& slice)
+    {
+#define SLANG_FORMAT_CASE(name, size) if (slice == #name) return Format::name; else 
+
+        GFX_FORMAT(SLANG_FORMAT_CASE)
+        return Format::Unknown;
+    }
+
     struct TypeInfo
     {
         UnownedStringSlice name;
@@ -73,7 +82,7 @@ namespace renderer_test
         RefPtr<ShaderInputLayout::ParentVal> parentVal;
         List<RefPtr<ShaderInputLayout::ParentVal>> parentValStack;
 
-        SlangResult parseOption(TokenReader& parser, String const& word, ShaderInputLayout::TextureVal* val)
+        SlangResult parseOption(Misc::TokenReader& parser, String const& word, ShaderInputLayout::TextureVal* val)
         {
             if (word == "depth")
             {
@@ -111,6 +120,11 @@ namespace renderer_test
             else if(word == "format")
             {
                 val->textureDesc.format = parseFormatOption(parser);
+
+                if (val->textureDesc.format == Format::Unknown)
+                {
+                    return SLANG_FAIL;
+                }
             }
             else
             {
@@ -119,7 +133,7 @@ namespace renderer_test
             return SLANG_OK;
         }
 
-        SlangResult parseOption(TokenReader& parser, String const& word, ShaderInputLayout::SamplerVal* val)
+        SlangResult parseOption(Misc::TokenReader& parser, String const& word, ShaderInputLayout::SamplerVal* val)
         {
             if (word == "depthCompare")
             {
@@ -132,7 +146,7 @@ namespace renderer_test
             return SLANG_OK;
         }
 
-        SlangResult parseOption(TokenReader& parser, String const& word, ShaderInputLayout::DataValBase* val)
+        SlangResult parseOption(Misc::TokenReader& parser, String const& word, ShaderInputLayout::DataValBase* val)
         {
             if (word == "data")
             {
@@ -143,13 +157,13 @@ namespace renderer_test
                 while (!parser.IsEnd() && !parser.LookAhead("]"))
                 {
                     bool negate = false;
-                    if(parser.NextToken().Type == TokenType::OpSub)
+                    if(parser.NextToken().Type == Misc::TokenType::OpSub)
                     {
                         parser.ReadToken();
                         negate = true;
                     }
 
-                    if (parser.NextToken().Type == TokenType::IntLiteral)
+                    if (parser.NextToken().Type == Misc::TokenType::IntLiteral)
                     {
                         uint32_t value = parser.ReadUInt();
                         if(negate) value = uint32_t(-int32_t(value));
@@ -172,7 +186,7 @@ namespace renderer_test
             return SLANG_OK;
         }
 
-        SlangResult parseOption(TokenReader& parser, String const& word, ShaderInputLayout::BufferVal* val)
+        SlangResult parseOption(Misc::TokenReader& parser, String const& word, ShaderInputLayout::BufferVal* val)
         {
             if (word == "stride")
             {
@@ -318,7 +332,7 @@ namespace renderer_test
             return SLANG_OK;
         }
 
-        SlangResult parseOption(TokenReader& parser, String const& word, ShaderInputLayout::ObjectVal* val)
+        SlangResult parseOption(Misc::TokenReader& parser, String const& word, ShaderInputLayout::ObjectVal* val)
         {
             if( word == "type" )
             {
@@ -332,33 +346,16 @@ namespace renderer_test
             return SLANG_OK;
         }
 
-        Format parseFormatOption(TokenReader& parser)
+        Format parseFormatOption(Misc::TokenReader& parser)
         {
-            Format format = Format::Unknown;
-
             parser.Read("=");
             auto formatWord = parser.ReadWord();
-            if(formatWord == "R_UInt32")
-            {
-                format = Format::R_UInt32;
-            }
-            else if (formatWord == "R_Float32")
-            {
-                format = Format::R_Float32;
-            }
-            else if (formatWord == "RGBA_Unorm_UInt8")
-            {
-                format = Format::RGBA_Unorm_UInt8;
-            }
-            else
-            {
-                // TODO: an error message here
-            }
-            return format;
+
+            return _getFormatFromName(formatWord.getUnownedSlice());
         }
 
         template<typename T>
-        void maybeParseOptions(TokenReader& parser, T* val)
+        void maybeParseOptions(Misc::TokenReader& parser, T* val)
         {
             // parse options
             if (parser.LookAhead("("))
@@ -381,11 +378,11 @@ namespace renderer_test
             }
         }
 
-        RefPtr<ShaderInputLayout::Val> parseNumericValExpr(TokenReader& parser, bool negate = false)
+        RefPtr<ShaderInputLayout::Val> parseNumericValExpr(Misc::TokenReader& parser, bool negate = false)
         {
             switch(parser.NextToken().Type)
             {
-            case TokenType::IntLiteral:
+            case Misc::TokenType::IntLiteral:
                 {
                     RefPtr<ShaderInputLayout::DataVal> val = new ShaderInputLayout::DataVal;
 
@@ -397,7 +394,7 @@ namespace renderer_test
                 }
                 break;
 
-            case TokenType::DoubleLiteral:
+            case Misc::TokenType::DoubleLiteral:
                 {
                     RefPtr<ShaderInputLayout::DataVal> val = new ShaderInputLayout::DataVal;
 
@@ -417,13 +414,25 @@ namespace renderer_test
             }
         }
 
-        String parseTypeName(TokenReader& parser)
+        String parseTypeName(Misc::TokenReader& parser)
         {
-            return parser.ReadWord();
+            String typeName = parser.ReadWord();
+            if (parser.AdvanceIf("<"))
+            {
+                StringBuilder sb;
+                sb << typeName << "<";
+                sb << parseTypeName(parser);
+                sb << ">";
+                parser.Read(">");
+                return sb.ProduceString();
+            }
+            return typeName;
         }
 
-        RefPtr<ShaderInputLayout::Val> parseValExpr(TokenReader& parser)
+        RefPtr<ShaderInputLayout::Val> parseValExpr(Misc::TokenReader& parser)
         {
+            typedef Misc::TokenType TokenType;
+
             switch(parser.NextToken().Type)
             {
             case TokenType::OpSub:
@@ -524,7 +533,7 @@ namespace renderer_test
             }
         }
 
-        RefPtr<ShaderInputLayout::Val> parseVal(TokenReader& parser)
+        RefPtr<ShaderInputLayout::Val> parseVal(Misc::TokenReader& parser)
         {
             auto word = parser.NextToken().Content;
             if (parser.AdvanceIf("begin_array"))
@@ -650,8 +659,11 @@ namespace renderer_test
             parser.ReadToken();
         }
 
-        String parseName(TokenReader& parser)
+        String parseName(Misc::TokenReader& parser)
         {
+            typedef Misc::Token Token;
+            typedef Misc::TokenType TokenType;
+
             StringBuilder builder;
 
             Token nameToken = parser.ReadToken();
@@ -688,7 +700,7 @@ namespace renderer_test
             }
         }
 
-        void parseFieldBindings(TokenReader& parser, ShaderInputLayout::Field& ioField)
+        void parseFieldBindings(Misc::TokenReader& parser, ShaderInputLayout::Field& ioField)
         {
             // parse bindings
             if (parser.LookAhead(":"))
@@ -703,7 +715,7 @@ namespace renderer_test
                     else if (parser.AdvanceIf("name"))
                     {
                         // Optionally consume '=' 
-                        if (parser.NextToken().Type == TokenType::OpAssign)
+                        if (parser.NextToken().Type == Misc::TokenType::OpAssign)
                         {
                             parser.ReadToken();
                         }
@@ -728,7 +740,7 @@ namespace renderer_test
             parentVal = val;
         }
 
-        void parseValEntry(TokenReader& parser)
+        void parseValEntry(Misc::TokenReader& parser)
         {
             auto parentForNewVal = parentVal;
 
@@ -739,19 +751,19 @@ namespace renderer_test
             parentForNewVal->addField(field);
         }
 
-        void parseSetEntry(TokenReader& parser)
+        void parseSetEntry(Misc::TokenReader& parser)
         {
             auto parentForNewVal = parentVal;
 
             ShaderInputLayout::Field field;
             field.name = parseName(parser);
-            parser.Read(TokenType::OpAssign);
+            parser.Read(Misc::TokenType::OpAssign);
             field.val = parseValExpr(parser);
 
             parentForNewVal->addField(field);
         }
 
-        void parseLine(TokenReader& parser)
+        void parseLine(Misc::TokenReader& parser)
         {
             if (parser.LookAhead("entryPointSpecializationArg")
                 || parser.LookAhead("type")
@@ -797,18 +809,18 @@ namespace renderer_test
             RefPtr<ShaderInputLayout::AggVal> rootVal = new ShaderInputLayout::AggVal;
             parentVal = rootVal;
 
-            auto lines = Split(source, '\n');
+            auto lines = Misc::Split(source, '\n');
             for (auto & line : lines)
             {
                 if (line.startsWith("//TEST_INPUT:"))
                 {
                     auto lineContent = line.subString(13, line.getLength() - 13);
-                    TokenReader parser(lineContent);
+                    Misc::TokenReader parser(lineContent);
                     try
                     {
                         parseLine(parser);
                     }
-                    catch (const TextFormatException&)
+                    catch (const Misc::TextFormatException&)
                     {
                         StringBuilder msg;
                         msg << "Invalid input syntax at line " << parser.NextToken().Position.Line;
@@ -991,6 +1003,9 @@ namespace renderer_test
 
     void generateTextureData(TextureData& output, const InputTextureDesc& desc)
     {
+        const gfx::FormatInfo formatInfo = gfxGetFormatInfo(desc.format);
+
+
         switch (desc.format)
         {
             case Format::RGBA_Unorm_UInt8:
@@ -998,35 +1013,155 @@ namespace renderer_test
                 generateTextureDataRGB8(output, desc);
                 break;
             }
-            case Format::R_Float32:
+            case Format::R_Float16:
+            case Format::RG_Float16:
+            case Format::RGBA_Float16:
             {
                 TextureData work;
                 generateTextureDataRGB8(work, desc);
 
-                output.textureSize = work.textureSize;
-                output.mipLevels = work.mipLevels;
-                output.arraySize = work.arraySize;
+                output.init(desc.format);
 
-                List<List<unsigned int>>& dstBuffer = output.dataBuffer;
+                output.m_textureSize = work.m_textureSize;
+                output.m_mipLevels = work.m_mipLevels;
+                output.m_arraySize = work.m_arraySize;
 
-                Index numMips = work.dataBuffer.getCount();
-                dstBuffer.setCount(numMips);
+                List<TextureData::Slice>& dstSlices = output.m_slices;
 
-                for (int i = 0; i < numMips; ++i)
+                Index numSlices = work.m_slices.getCount();
+                dstSlices.setCount(numSlices);
+
+                for (int i = 0; i < numSlices; ++i)
                 {
-                    const Index numPixels = work.dataBuffer[i].getCount();
-                    const unsigned int* srcPixels = work.dataBuffer[i].getBuffer();
+                    const TextureData::Slice& srcSlice = work.m_slices[i];
 
-                    dstBuffer[i].setCount(numPixels);
+                    const Index pixelCount = srcSlice.valuesCount;
+                    const uint8_t* srcPixels = (const uint8_t*)srcSlice.values;
 
-                    float* dstPixels = (float*)dstBuffer[i].getBuffer();
-
-                    for (Index j = 0; j < numPixels; ++j)
+                    int16_t* dstPixels = (int16_t*)output.setSliceCount(i, pixelCount);
+                    
+                    switch (formatInfo.channelCount)
                     {
-                        // Copy out red
-                        const unsigned int srcPixel = srcPixels[j];
-                        const float value = (srcPixel & 0xff) * 1.0f / 255;
-                        dstPixels[j] = value;
+                        case 1:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 1)
+                            {
+                                // Copy out r
+                                dstPixels[0] = FloatToHalf(srcPixels[0] * (1.0f / 255));
+                            }
+                            break;
+                        }
+                        case 2:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 2)
+                            {
+                                // Copy out rg
+                                dstPixels[0] = FloatToHalf(srcPixels[0] * (1.0f / 255));
+                                dstPixels[1] = FloatToHalf(srcPixels[1] * (1.0f / 255));
+                            }
+                            break;
+                        }
+                        case 3:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 3)
+                            {
+                                // Copy out rgb
+                                dstPixels[0] = FloatToHalf(srcPixels[0] * (1.0f / 255));
+                                dstPixels[1] = FloatToHalf(srcPixels[1] * (1.0f / 255));
+                                dstPixels[2] = FloatToHalf(srcPixels[2] * (1.0f / 255));
+                            }
+                            break;
+                        }
+                        case 4:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 4)
+                            {
+                                // Copy out rgba
+                                dstPixels[0] = FloatToHalf(srcPixels[0] * (1.0f / 255));
+                                dstPixels[1] = FloatToHalf(srcPixels[1] * (1.0f / 255));
+                                dstPixels[2] = FloatToHalf(srcPixels[2] * (1.0f / 255));
+                                dstPixels[3] = FloatToHalf(srcPixels[3] * (1.0f / 255));
+                            }
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+            case Format::R_Float32:
+            case Format::RG_Float32:
+            case Format::RGB_Float32:
+            case Format::RGBA_Float32:
+            case Format::D_Float32:
+            {
+                TextureData work;
+                generateTextureDataRGB8(work, desc);
+
+                output.init(desc.format);
+
+                output.m_textureSize = work.m_textureSize;
+                output.m_mipLevels = work.m_mipLevels;
+                output.m_arraySize = work.m_arraySize;
+
+                List<TextureData::Slice>& dstSlices = output.m_slices;
+
+                Index numSlices = work.m_slices.getCount();
+                dstSlices.setCount(numSlices);
+
+                for (int i = 0; i < numSlices; ++i)
+                {
+                    const TextureData::Slice& srcSlice = work.m_slices[i];
+
+                    const Index pixelCount = srcSlice.valuesCount;
+                    const uint8_t* srcPixels = (const uint8_t*)srcSlice.values;
+
+                    float* dstPixels = (float*)output.setSliceCount(i, pixelCount);
+
+                    switch (formatInfo.channelCount)
+                    {
+                        case 1:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels++)
+                            {
+                                // Copy out r
+                                dstPixels[0] = srcPixels[0] * (1.0f / 255);
+                            }
+                            break;
+                        }
+                        case 2:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 2)
+                            {
+                                // Copy out rg
+                                dstPixels[0] = srcPixels[0] * (1.0f / 255);
+                                dstPixels[1] = srcPixels[1] * (1.0f / 255);
+                            }
+                            break;
+                        }
+                        case 3:
+                        {
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 3)
+                            {
+                                // Copy out rgb
+                                dstPixels[0] = srcPixels[0] * (1.0f / 255);
+                                dstPixels[1] = srcPixels[1] * (1.0f / 255);
+                                dstPixels[2] = srcPixels[2] * (1.0f / 255);
+                            }
+                            break;
+                        }
+                        case 4:
+                        {
+
+                            for (Index j = 0; j < pixelCount; ++j, srcPixels += 4, dstPixels += 4)
+                            {
+                                // Copy out rgba
+                                dstPixels[0] = FloatToHalf(srcPixels[0] * 1.0f / 255);
+                                dstPixels[1] = FloatToHalf(srcPixels[1] * 1.0f / 255);
+                                dstPixels[2] = FloatToHalf(srcPixels[2] * 1.0f / 255);
+                                dstPixels[3] = FloatToHalf(srcPixels[3] * 1.0f / 255);
+                            }
+                            break;
+                        }
                     }
                 }
                 break;
@@ -1061,34 +1196,38 @@ namespace renderer_test
         int arrLen = inputDesc.arrayLength;
         if (arrLen == 0)
             arrLen = 1;
-        List<List<unsigned int>>& dataBuffer = output.dataBuffer;
+
+        output.init(Format::RGBA_Unorm_UInt8);
+
+        //List<List<unsigned int>>& dataBuffer = output.dataBuffer;
         int arraySize = arrLen;
         if (inputDesc.isCube)
             arraySize *= 6;
-        output.arraySize = arraySize;
-        output.textureSize = inputDesc.size;
+        output.m_arraySize = arraySize;
+        output.m_textureSize = inputDesc.size;
 
-        const Index maxMipLevels = Math::Log2Floor(output.textureSize) + 1;
+        const Index maxMipLevels = Math::Log2Floor(output.m_textureSize) + 1;
         Index mipLevels = (inputDesc.mipMapCount <= 0) ? maxMipLevels : inputDesc.mipMapCount;
         mipLevels = (mipLevels > maxMipLevels) ? maxMipLevels : mipLevels;
 
-        output.mipLevels = int(mipLevels); 
-        output.dataBuffer.setCount(output.mipLevels * output.arraySize);
+        output.m_mipLevels = int(mipLevels); 
+        output.m_slices.setCount(output.m_mipLevels * output.m_arraySize);
 
         int slice = 0;
         for (int i = 0; i < arraySize; i++)
         {
-            for (int j = 0; j < output.mipLevels; j++)
+            for (int j = 0; j < output.m_mipLevels; j++)
             {
-                int size = output.textureSize >> j;
+                int size = output.m_textureSize >> j;
                 int bufferLen = size;
                 if (inputDesc.dimension == 2)
                     bufferLen *= size;
                 else if (inputDesc.dimension == 3)
                     bufferLen *= size*size;
-                dataBuffer[slice].setCount(bufferLen);
 
-                _iteratePixels(inputDesc.dimension, size, dataBuffer[slice].getBuffer(), [&](int x, int y, int z) -> unsigned int
+                uint32_t* dst = (uint32_t*)output.setSliceCount(slice, bufferLen);
+
+                _iteratePixels(inputDesc.dimension, size, dst, [&](int x, int y, int z) -> unsigned int
                 {
                     if (inputDesc.content == InputTextureContent::Zero)
                     {

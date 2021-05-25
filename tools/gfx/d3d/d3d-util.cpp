@@ -115,6 +115,10 @@ D3D12_DEPTH_STENCILOP_DESC D3DUtil::translateStencilOpDesc(DepthStencilOpDesc de
         case Format::RGBA_Unorm_UInt8:      return DXGI_FORMAT_R8G8B8A8_UNORM;
         case Format::BGRA_Unorm_UInt8:      return DXGI_FORMAT_B8G8R8A8_UNORM;
 
+        case Format::RGBA_Float16:          return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case Format::RG_Float16:            return DXGI_FORMAT_R16G16_FLOAT;
+        case Format::R_Float16:             return DXGI_FORMAT_R16_FLOAT;
+
         case Format::R_UInt16:              return DXGI_FORMAT_R16_UINT;
         case Format::R_UInt32:              return DXGI_FORMAT_R32_UINT;
 
@@ -135,8 +139,7 @@ D3D12_RESOURCE_STATES D3DUtil::translateResourceState(ResourceState state)
         return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     case gfx::ResourceState::UnorderedAccess:
-        return D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     case gfx::ResourceState::RenderTarget:
         return D3D12_RESOURCE_STATE_RENDER_TARGET;
     case gfx::ResourceState::DepthRead:

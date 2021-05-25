@@ -16,6 +16,8 @@
 namespace Slang
 {
 
+struct SourceManager;
+
 struct DownstreamDiagnostic
 {
     typedef DownstreamDiagnostic ThisType;
@@ -54,6 +56,17 @@ struct DownstreamDiagnostic
 
     static UnownedStringSlice getSeverityText(Severity severity);
 
+        /// Given a path, that holds line number and potentially column number in () after path, writes result into outDiagnostic
+    static SlangResult splitPathLocation(const UnownedStringSlice& pathLocation, DownstreamDiagnostic& outDiagnostic);
+
+        /// Split the line (separated by :), where a path is at pathIndex 
+    static SlangResult splitColonDelimitedLine(const UnownedStringSlice& line, Int pathIndex, List<UnownedStringSlice>& outSlices);
+
+    typedef SlangResult (*LineParser)(const UnownedStringSlice& line, List<UnownedStringSlice>& lineSlices, DownstreamDiagnostic& outDiagnostic);
+
+        /// Given diagnostics in inText that are colon delimited, use lineParser to do per line parsing.
+    static SlangResult parseColonDelimitedDiagnostics(const UnownedStringSlice& inText, Int pathIndex, LineParser lineParser, List<DownstreamDiagnostic>& outDiagnostics);
+
     Severity severity;              ///< The severity of error
     Stage stage;                    ///< The stage the error came from
     String text;                    ///< The text of the error
@@ -84,6 +97,14 @@ struct DownstreamDiagnostics
 
         /// Remove all diagnostics of the type
     void removeBySeverity(Diagnostic::Severity severity);
+
+        /// Add a note
+    void addNote(const UnownedStringSlice& in);
+
+        /// If there are no error diagnostics, adds a generic error diagnostic
+    void requireErrorDiagnostic();
+
+    static void addNote(const UnownedStringSlice& in, List<DownstreamDiagnostic>& ioDiagnostics);
 
     String rawDiagnostics;
 
@@ -140,9 +161,9 @@ public:
     {
         enum Enum : SourceLanguageFlags
         {
-            Unknown = SourceLanguageFlags(1) <<  SLANG_SOURCE_LANGUAGE_UNKNOWN,
-            Slang   = SourceLanguageFlags(1) <<  SLANG_SOURCE_LANGUAGE_SLANG,
-            HLSL    = SourceLanguageFlags(1) <<  SLANG_SOURCE_LANGUAGE_HLSL,
+            Unknown = SourceLanguageFlags(1) << SLANG_SOURCE_LANGUAGE_UNKNOWN,
+            Slang   = SourceLanguageFlags(1) << SLANG_SOURCE_LANGUAGE_SLANG,
+            HLSL    = SourceLanguageFlags(1) << SLANG_SOURCE_LANGUAGE_HLSL,
             GLSL    = SourceLanguageFlags(1) << SLANG_SOURCE_LANGUAGE_GLSL,
             C       = SourceLanguageFlags(1) << SLANG_SOURCE_LANGUAGE_C,
             CPP     = SourceLanguageFlags(1) << SLANG_SOURCE_LANGUAGE_CPP,
@@ -209,13 +230,6 @@ public:
         Precise,
     };
 
-    enum TargetType
-    {
-        Executable,         ///< Produce an executable
-        SharedLibrary,      ///< Produce a shared library object/dll 
-        Object,             ///< Produce an object file
-    };
-
     enum PipelineType
     {
         Unknown,
@@ -235,6 +249,7 @@ public:
         enum class Kind
         {
             CUDASM,                     ///< What the version is for
+            SPIRV,
         };
         Kind kind;
         SemanticVersion version;
@@ -247,18 +262,20 @@ public:
         {
             enum Enum : Flags
             {
-                EnableExceptionHandling = 0x01,
-                Verbose                 = 0x02,
-                EnableSecurityChecks    = 0x04,
+                EnableExceptionHandling = 0x01,             ///< Enables exception handling support (say as optionally supported by C++)
+                Verbose                 = 0x02,             ///< Give more verbose diagnostics
+                EnableSecurityChecks    = 0x04,             ///< Enable runtime security checks (such as for buffer overruns) - enabling typically decreases performance
+                EnableFloat16           = 0x08,             ///< If set compiles with support for float16/half
             };
         };
 
         OptimizationLevel optimizationLevel = OptimizationLevel::Default;
         DebugInfoType debugInfoType = DebugInfoType::Standard;
-        TargetType targetType = TargetType::Executable;
+        SlangCompileTarget targetType = SLANG_EXECUTABLE;
         SlangSourceLanguage sourceLanguage = SLANG_SOURCE_LANGUAGE_CPP;
         FloatingPointMode floatingPointMode = FloatingPointMode::Default;
         PipelineType pipelineType = PipelineType::Unknown;
+        SlangMatrixLayoutMode matrixLayout = SLANG_MATRIX_LAYOUT_MODE_UNKNOWN;
 
         Flags flags = Flag::EnableExceptionHandling;
 
@@ -283,6 +300,22 @@ public:
         List<String> libraryPaths;
 
         List<CapabilityVersion> requiredCapabilityVersions;
+
+            /// For compilers/compiles that require an entry point name, else can be empty
+        String entryPointName;
+            /// Profile name to use, only required for compiles that need to compile against a a specific profiles.
+            /// Profile names are tied to compilers and targets.
+        String profileName;
+
+            /// The stage being compiled for 
+        SlangStage stage = SLANG_STAGE_NONE;
+
+            /// Arguments that are specific to a particular compiler implementation.
+        List<String> compilerSpecificArguments;
+
+            /// NOTE! Not all downstream compilers can use the fileSystemExt/sourceManager. This option will be ignored in those scenarios.
+        ISlangFileSystemExt* fileSystemExt = nullptr;
+        SourceManager* sourceManager = nullptr;
     };
 
     typedef uint32_t ProductFlags;
@@ -313,8 +346,11 @@ public:
     const Desc& getDesc() const { return m_desc;  }
         /// Compile using the specified options. The result is in resOut
     virtual SlangResult compile(const CompileOptions& options, RefPtr<DownstreamCompileResult>& outResult) = 0;
-        /// Some downstream compilers are backed by a shared library. This allows access to the shared library to access internal functions. 
-    virtual ISlangSharedLibrary* getSharedLibrary() { return nullptr; }
+        /// Some compilers have support converting a binary blob into disassembly. Output disassembly is held in the output blob
+    virtual SlangResult disassemble(SlangCompileTarget sourceBlobTarget, const void* blob, size_t blobSize, ISlangBlob** out);
+
+        /// True if underlying compiler uses file system to communicate source
+    virtual bool isFileBased() = 0;
 
         /// Get info for a compiler type
     static const Info& getInfo(SlangPassThrough compiler) { return s_infos.infos[int(compiler)]; }
@@ -368,7 +404,8 @@ public:
 
     // DownstreamCompiler
     virtual SlangResult compile(const CompileOptions& options, RefPtr<DownstreamCompileResult>& outResult) SLANG_OVERRIDE;
-    
+    virtual bool isFileBased() SLANG_OVERRIDE { return true; }
+
     // Functions to be implemented for a specific CommandLine
 
         /// Given the compilation options and the module name, determines the actual file name used for output
@@ -395,24 +432,6 @@ public:
     CommandLineDownstreamCompiler(const Desc& desc):Super(desc) {}
 
     CommandLine m_cmdLine;
-};
-
-class SharedLibraryDownstreamCompiler: public DownstreamCompiler
-{
-public:
-    typedef DownstreamCompiler Super;
-
-    // DownstreamCompiler
-    virtual SlangResult compile(const CompileOptions& options, RefPtr<DownstreamCompileResult>& outResult) SLANG_OVERRIDE { SLANG_UNUSED(options); SLANG_UNUSED(outResult); return SLANG_E_NOT_IMPLEMENTED; }
-    virtual ISlangSharedLibrary* getSharedLibrary() SLANG_OVERRIDE { return m_library; }
-
-    SharedLibraryDownstreamCompiler(const Desc& desc, ISlangSharedLibrary* library):
-        Super(desc),
-        m_library(library)
-    {
-    }
-protected:
-    ComPtr<ISlangSharedLibrary> m_library;
 };
 
 class DownstreamCompilerSet : public RefObject
@@ -460,7 +479,6 @@ struct DownstreamCompilerBaseUtil
 {
     typedef DownstreamCompiler::CompileOptions CompileOptions;
     typedef DownstreamCompiler::OptimizationLevel OptimizationLevel;
-    typedef DownstreamCompiler::TargetType TargetType;
     typedef DownstreamCompiler::DebugInfoType DebugInfoType;
     
     typedef DownstreamDiagnostics::Diagnostic Diagnostic;

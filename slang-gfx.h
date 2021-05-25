@@ -6,7 +6,6 @@
 
 #include "slang.h"
 #include "slang-com-ptr.h"
-#include "slang-com-helper.h"
 
 
 #if defined(SLANG_GFX_DYNAMIC)
@@ -124,8 +123,30 @@ public:
         0x9d32d0ad, 0x915c, 0x4ffd, { 0x91, 0xe2, 0x50, 0x85, 0x54, 0xa0, 0x4a, 0x76 } \
     }
 
+// Dont' change without keeping in sync with Format
+#define GFX_FORMAT(x) \
+    x( Unknown, 0) \
+    \
+    x(RGBA_Float32, sizeof(float) * 4) \
+    x(RGB_Float32, sizeof(float) * 3) \
+    x(RG_Float32, sizeof(float) * 2) \
+    x(R_Float32, sizeof(float)) \
+    \
+    x(RGBA_Float16, sizeof(uint16_t) * 4) \
+    x(RG_Float16, sizeof(uint16_t) * 2) \
+    x(R_Float16, sizeof(uint16_t)) \
+    \
+    x(RGBA_Unorm_UInt8, sizeof(uint32_t)) \
+    x(BGRA_Unorm_UInt8, sizeof(uint32_t)) \
+    \
+    x(R_UInt16, sizeof(uint16_t)) \
+    x(R_UInt32, sizeof(uint32_t)) \
+    \
+    x(D_Float32, sizeof(float)) \
+    x(D_Unorm24_S8, sizeof(uint32_t))
+
 /// Different formats of things like pixels or elements of vertices
-/// NOTE! Any change to this type (adding, removing, changing order) - must also be reflected in changes to RendererUtil
+/// NOTE! Any change to this type (adding, removing, changing order) - must also be reflected in changes GFX_FORMAT
 enum class Format
 {
     Unknown,
@@ -134,6 +155,10 @@ enum class Format
     RGB_Float32,
     RG_Float32,
     R_Float32,
+
+    RGBA_Float16,
+    RG_Float16,
+    R_Float16,
 
     RGBA_Unorm_UInt8,
     BGRA_Unorm_UInt8,
@@ -145,6 +170,12 @@ enum class Format
     D_Unorm24_S8,
 
     CountOf,
+};
+
+struct FormatInfo
+{
+    uint8_t channelCount;       ///< The amount of channels in the format. Only set if the channelType is set 
+    uint8_t channelType;        ///< One of SlangScalarType None if type isn't made up of elements of type.
 };
 
 struct InputElementDesc
@@ -165,6 +196,51 @@ enum class PrimitiveTopology
     TriangleList,
 };
 
+enum class ResourceState
+{
+    Undefined,
+    VertexBuffer,
+    IndexBuffer,
+    ConstantBuffer,
+    StreamOutput,
+    ShaderResource,
+    UnorderedAccess,
+    RenderTarget,
+    DepthRead,
+    DepthWrite,
+    Present,
+    CopySource,
+    CopyDestination,
+    ResolveSource,
+    ResolveDestination,
+    _Count
+};
+
+struct ResourceStateSet
+{
+public:
+    void add(ResourceState state) { m_bitFields |= (1LL << (uint32_t)state); }
+    template <typename... TResourceState> void add(ResourceState s, TResourceState... states)
+    {
+        add(s);
+        add(states...);
+    }
+    bool contains(ResourceState state) const { return (m_bitFields & (1LL << (uint32_t)state)) != 0; }
+    ResourceStateSet()
+        : m_bitFields(0)
+    {}
+    ResourceStateSet(const ResourceStateSet& other) = default;
+    ResourceStateSet(ResourceState state) { add(state); }
+    template <typename... TResourceState> ResourceStateSet(TResourceState... states)
+    {
+        add(states...);
+    }
+
+private:
+    uint64_t m_bitFields = 0;
+    void add() {}
+};
+
 class IResource: public ISlangUnknown
 {
 public:
@@ -181,44 +257,6 @@ public:
         CountOf,
     };
 
-        /// Describes how a resource is to be used
-    enum class Usage
-    {
-        Unknown = 0,
-        VertexBuffer,
-        IndexBuffer,
-        ConstantBuffer,
-        StreamOutput,
-        RenderTarget,
-        DepthRead,
-        DepthWrite,
-        UnorderedAccess,
-        PixelShaderResource,
-        NonPixelShaderResource,
-        ShaderResource,
-        GenericRead,
-        CopySource,
-        CopyDest,
-        CountOf,
-    };
-
-        /// Binding flags describe all of the ways a resource can be bound - and therefore used
-    struct BindFlag
-    {
-        enum Enum
-        {
-            VertexBuffer            = 0x001,
-            IndexBuffer             = 0x002,
-            ConstantBuffer          = 0x004,
-            StreamOutput            = 0x008,
-            RenderTarget            = 0x010,
-            DepthStencil            = 0x020,
-            UnorderedAccess         = 0x040,
-            PixelShaderResource     = 0x080,
-            NonPixelShaderResource  = 0x100,
-        };
-    };
-
         /// Combinations describe how a resource can be accessed (typically by the host/cpu)
     struct AccessFlag
     {
@@ -232,52 +270,13 @@ public:
         /// Base class for Descs
     struct DescBase
     {
-        bool canBind(BindFlag::Enum bindFlag) const { return (bindFlags & bindFlag) != 0; }
         bool hasCpuAccessFlag(AccessFlag::Enum accessFlag) { return (cpuAccessFlags & accessFlag) != 0; }
 
         Type type = Type::Unknown;
-
-        int bindFlags = 0;          ///< Combination of Resource::BindFlag or 0 (and will use initialUsage to set)
+        ResourceState defaultState = ResourceState::Undefined;
+        ResourceStateSet allowedStates = ResourceStateSet();
         int cpuAccessFlags = 0;     ///< Combination of Resource::AccessFlag
     };
-
-    inline static BindFlag::Enum getDefaultBindFlagsFromUsage(IResource::Usage usage)
-    {
-        switch (usage)
-        {
-        case Usage::VertexBuffer:
-            return BindFlag::VertexBuffer;
-        case Usage::IndexBuffer:
-            return BindFlag::IndexBuffer;
-        case Usage::ConstantBuffer:
-            return BindFlag::ConstantBuffer;
-        case Usage::StreamOutput:
-            return BindFlag::StreamOutput;
-        case Usage::RenderTarget:
-            return BindFlag::RenderTarget;
-        case Usage::DepthRead:
-        case Usage::DepthWrite:
-            return BindFlag::DepthStencil;
-        case Usage::UnorderedAccess:
-            return BindFlag::Enum(BindFlag::UnorderedAccess | BindFlag::PixelShaderResource |
-                BindFlag::NonPixelShaderResource);
-        case Usage::PixelShaderResource:
-            return BindFlag::PixelShaderResource;
-        case Usage::NonPixelShaderResource:
-            return BindFlag::NonPixelShaderResource;
-        case Usage::ShaderResource:
-        case Usage::GenericRead:
-            return BindFlag::Enum(
-                BindFlag::PixelShaderResource |
-                BindFlag::NonPixelShaderResource);
-        case Usage::CopySource:
-            return BindFlag::Enum(0);
-        case Usage::CopyDest:
-            return BindFlag::Enum(0);
-        default:
-            return BindFlag::Enum(-1);
-        }
-    }
 
     virtual SLANG_NO_THROW Type SLANG_MCALL getType() = 0;
 };
@@ -291,22 +290,9 @@ class IBufferResource: public IResource
 public:
     struct Desc: public DescBase
     {
-        void init(size_t sizeInBytesIn)
-        {
-            sizeInBytes = sizeInBytesIn;
-            elementSize = 0;
-            format = Format::Unknown;
-        }
-        void setDefaults(Usage initialUsage)
-        {
-            if (bindFlags == 0)
-            {
-                bindFlags = getDefaultBindFlagsFromUsage(initialUsage);
-            }
-        }
-        size_t sizeInBytes;     ///< Total size in bytes
-        int elementSize;        ///< Get the element stride. If > 0, this is a structured buffer
-        Format format;
+        size_t sizeInBytes = 0;     ///< Total size in bytes
+        int elementSize = 0;        ///< Get the element stride. If > 0, this is a structured buffer
+        Format format = Format::Unknown;
     };
     virtual SLANG_NO_THROW Desc* SLANG_MCALL getDesc() = 0;
 };
@@ -314,32 +300,6 @@ public:
     {                                                                                  \
         0x1b274efe, 0x5e37, 0x492b, { 0x82, 0x6e, 0x7e, 0xe7, 0xe8, 0xf5, 0xa4, 0x9b } \
     }
-
-template <typename T> T _slang_gfx_max(T v0, T v1) { return v0 > v1 ? v0 : v1; }
-
-static inline unsigned int _slang_gfx_ones32(unsigned int x)
-{
-    /* 32-bit recursive reduction using SWAR...
-            but first step is mapping 2-bit values
-            into sum of 2 1-bit values in sneaky way
-    */
-    x -= ((x >> 1) & 0x55555555);
-    x = (((x >> 2) & 0x33333333) + (x & 0x33333333));
-    x = (((x >> 4) + x) & 0x0f0f0f0f);
-    x += (x >> 8);
-    x += (x >> 16);
-    return (x & 0x0000003f);
-}
-
-static inline unsigned int _slang_gfx_log2Floor(unsigned int x)
-{
-    x |= (x >> 1);
-    x |= (x >> 2);
-    x |= (x >> 4);
-    x |= (x >> 8);
-    x |= (x >> 16);
-    return (_slang_gfx_ones32(x >> 1));
-}
 
 struct DepthStencilClearValue
 {
@@ -362,234 +322,27 @@ class ITextureResource: public IResource
 public:
     struct SampleDesc
     {
-        void init()
-        {
-            numSamples = 1;
-            quality = 0;
-        }
-        int numSamples;                     ///< Number of samples per pixel
-        int quality;                        ///< The quality measure for the samples
+        int numSamples = 1;                     ///< Number of samples per pixel
+        int quality = 0;                        ///< The quality measure for the samples
     };
 
     struct Size
     {
-        void init()
-        {
-            width = height = depth = 1;
-        }
-        void init(int widthIn, int heightIn = 1, int depthIn = 1)
-        {
-            width = widthIn;
-            height = heightIn;
-            depth = depthIn;
-        }
-            /// Given the type works out the maximum dimension size
-        int calcMaxDimension(Type type) const
-        {
-            switch (type)
-            {
-            case IResource::Type::Texture1D:
-                return this->width;
-            case IResource::Type::Texture3D:
-                return _slang_gfx_max(_slang_gfx_max(this->width, this->height), this->depth);
-            case IResource::Type::TextureCube: // fallthru
-            case IResource::Type::Texture2D:
-                {
-                    return _slang_gfx_max(this->width, this->height);
-                }
-            default:
-                return 0;
-            }
-        }
-
-        SLANG_FORCE_INLINE static int calcMipSize(int width, int mipLevel)
-        {
-            width = width >> mipLevel;
-            return width > 0 ? width : 1;
-        }
-            /// Given a size, calculates the size at a mip level
-        Size calcMipSize(int mipLevel) const
-        {
-            Size size;
-            size.width = calcMipSize(this->width, mipLevel);
-            size.height = calcMipSize(this->height, mipLevel);
-            size.depth = calcMipSize(this->depth, mipLevel);
-            return size;
-        }
-
-        int width;              ///< Width in pixels
-        int height;             ///< Height in pixels (if 2d or 3d)
-        int depth;              ///< Depth (if 3d)
+        int width = 0;              ///< Width in pixels
+        int height = 0;             ///< Height in pixels (if 2d or 3d)
+        int depth = 0;              ///< Depth (if 3d)
     };
 
     struct Desc: public DescBase
     {
-            /// Initialize with default values
-        void init(Type typeIn)
-        {
-            this->type = typeIn;
-            this->size.init();
-
-            this->format = Format::Unknown;
-            this->arraySize = 0;
-            this->numMipLevels = 0;
-            this->sampleDesc.init();
-
-            this->bindFlags = 0;
-            this->cpuAccessFlags = 0;
-        }
-            /// Initialize different dimensions. For cubemap, use init2D
-        void init1D(Format formatIn, int widthIn, int numMipMapsIn = 0)
-        {
-            this->type = Type::Texture1D;
-            this->size.init(widthIn);
-
-            this->format = formatIn;
-            this->arraySize = 0;
-            this->numMipLevels = numMipMapsIn;
-            this->sampleDesc.init();
-
-            this->bindFlags = 0;
-            this->cpuAccessFlags = 0;
-        }
-
-        void init2D(Type typeIn, Format formatIn, int widthIn, int heightIn, int numMipMapsIn = 0)
-        {
-            assert(typeIn == Type::Texture2D || typeIn == Type::TextureCube);
-
-            this->type = typeIn;
-            this->size.init(widthIn, heightIn);
-
-            this->format = formatIn;
-            this->arraySize = 0;
-            this->numMipLevels = numMipMapsIn;
-            this->sampleDesc.init();
-
-            this->bindFlags = 0;
-            this->cpuAccessFlags = 0;
-        }
-
-        void init3D(Format formatIn, int widthIn, int heightIn, int depthIn, int numMipMapsIn = 0)
-        {
-            this->type = Type::Texture3D;
-            this->size.init(widthIn, heightIn, depthIn);
-
-            this->format = formatIn;
-            this->arraySize = 0;
-            this->numMipLevels = numMipMapsIn;
-            this->sampleDesc.init();
-
-            this->bindFlags = 0;
-            this->cpuAccessFlags = 0;
-        }
-
-            /// Given the type, calculates the number of mip maps. 0 on error
-        int calcNumMipLevels() const
-        {
-            const int maxDimensionSize = this->size.calcMaxDimension(type);
-            return (maxDimensionSize > 0) ? (_slang_gfx_log2Floor(maxDimensionSize) + 1) : 0;
-        }
-            /// Calculate the total number of sub resources. 0 on error.
-        int calcNumSubResources() const
-        {
-            const int numMipMaps =
-                (this->numMipLevels > 0) ? this->numMipLevels : calcNumMipLevels();
-            const int arrSize = (this->arraySize > 0) ? this->arraySize : 1;
-
-            switch (type)
-            {
-            case IResource::Type::Texture1D:
-            case IResource::Type::Texture2D:
-            case IResource::Type::Texture3D:
-                {
-                    return numMipMaps * arrSize;
-                }
-            case IResource::Type::TextureCube:
-                {
-                    // There are 6 faces to a cubemap
-                    return numMipMaps * arrSize * 6;
-                }
-            default:
-                return 0;
-            }
-        }
-
-            /// Calculate the effective array size - in essence the amount if mip map sets needed.
-            /// In practice takes into account if the arraySize is 0 (it's not an array, but it will still have at least one mip set)
-            /// and if the type is a cubemap (multiplies the amount of mip sets by 6)
-        int calcEffectiveArraySize() const
-        {
-            const int arrSize = (this->arraySize > 0) ? this->arraySize : 1;
-
-            switch (type)
-            {
-            case IResource::Type::Texture1D: // fallthru
-            case IResource::Type::Texture2D:
-                {
-                    return arrSize;
-                }
-            case IResource::Type::TextureCube:
-                return arrSize * 6;
-            case IResource::Type::Texture3D:
-                return 1;
-            default:
-                return 0;
-            }
-        }
-
-            /// Use type to fix the size values (and array size).
-            /// For example a 1d texture, should have height and depth set to 1.
-        void fixSize()
-        {
-            switch (type)
-            {
-            case IResource::Type::Texture1D:
-                {
-                    this->size.height = 1;
-                    this->size.depth = 1;
-                    break;
-                }
-            case IResource::Type::TextureCube:
-            case IResource::Type::Texture2D:
-                {
-                    this->size.depth = 1;
-                    break;
-                }
-            case IResource::Type::Texture3D:
-                {
-                    // Can't have an array
-                    this->arraySize = 0;
-                    break;
-                }
-            default:
-                break;
-            }
-        }
-
-            /// Set up default parameters based on type and usage
-        void setDefaults(Usage usage)
-        {
-            this->initialUsage = usage;
-            fixSize();
-            if (this->bindFlags == 0)
-            {
-                this->bindFlags = getDefaultBindFlagsFromUsage(initialUsage);
-            }
-            if (this->numMipLevels <= 0)
-            {
-                this->numMipLevels = calcNumMipLevels();
-            }
-        }
-
         Size size;
 
-        int arraySize;          ///< Array size
+        int arraySize = 0;          ///< Array size
 
-        int numMipLevels;       ///< Number of mip levels - if 0 will create all mip levels
-        Format format;          ///< The resources format
-        SampleDesc sampleDesc;  ///< How the resource is sampled
+        int numMipLevels = 0;       ///< Number of mip levels - if 0 will create all mip levels
+        Format format;              ///< The resources format
+        SampleDesc sampleDesc;      ///< How the resource is sampled
         ClearValue optimalClearValue;
-        Usage initialUsage;
     };
 
         /// Data for a single subresource of a texture.
@@ -752,6 +505,11 @@ struct ShaderOffset
     SlangInt bindingArrayIndex = 0;
 };
 
+enum class ShaderObjectContainerType
+{
+    None, Array, StructuredBuffer
+};
+
 class IShaderObject : public ISlangUnknown
 {
 public:
@@ -763,6 +521,7 @@ public:
     }
 
     virtual SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL getElementTypeLayout() = 0;
+    virtual SLANG_NO_THROW ShaderObjectContainerType SLANG_MCALL getContainerType() = 0;
     virtual SLANG_NO_THROW UInt SLANG_MCALL getEntryPointCount() = 0;
 
     ComPtr<IShaderObject> getEntryPoint(UInt index)
@@ -1039,21 +798,6 @@ struct WindowHandle
         handle.handleValues[1] = xwindow;
         return handle;
     }
-};
-
-enum class ResourceState
-{
-    Undefined,
-    ShaderResource,
-    UnorderedAccess,
-    RenderTarget,
-    DepthRead,
-    DepthWrite,
-    Present,
-    CopySource,
-    CopyDestination,
-    ResolveSource,
-    ResolveDestination,
 };
 
 struct FaceMask
@@ -1354,6 +1098,21 @@ struct DeviceInfo
     const char* adapterName = nullptr;
 };
 
+enum class DebugMessageType
+{
+    Info, Warning, Error
+};
+enum class DebugMessageSource
+{
+    Layer, Driver, Slang
+};
+class IDebugCallback
+{
+public:
+    virtual SLANG_NO_THROW void SLANG_MCALL
+        handleMessage(DebugMessageType type, DebugMessageSource source, const char* message) = 0;
+};
+
 class IDevice: public ISlangUnknown
 {
 public:
@@ -1372,17 +1131,26 @@ public:
         const char* targetProfile = nullptr; // (optional) Target shader profile. If null this will be set to platform dependent default.
         SlangFloatingPointMode floatingPointMode = SLANG_FLOATING_POINT_MODE_DEFAULT;
         SlangOptimizationLevel optimizationLevel = SLANG_OPTIMIZATION_LEVEL_DEFAULT;
+        SlangTargetFlags targetFlags = 0;
     };
 
     struct Desc
     {
-        DeviceType deviceType = DeviceType::Default;    // The underlying API/Platform of the device.
-        const char* adapter = nullptr;                  // Name to identify the adapter to use
-        int requiredFeatureCount = 0;                   // Number of required features.
-        const char** requiredFeatures = nullptr;        // Array of required feature names, whose size is `requiredFeatureCount`.
-        int nvapiExtnSlot = -1;                         // The slot (typically UAV) used to identify NVAPI intrinsics. If >=0 NVAPI is required.
-        ISlangFileSystem* shaderCacheFileSystem = nullptr; // The file system for loading cached shader kernels.
-        SlangDesc slang = {};                           // Configurations for Slang.
+        // The underlying API/Platform of the device.
+        DeviceType deviceType = DeviceType::Default;
+        // Name to identify the adapter to use
+        const char* adapter = nullptr;
+        // Number of required features.
+        int requiredFeatureCount = 0;
+        // Array of required feature names, whose size is `requiredFeatureCount`.
+        const char** requiredFeatures = nullptr;
+        // The slot (typically UAV) used to identify NVAPI intrinsics. If >=0 NVAPI is required.
+        int nvapiExtnSlot = -1;
+        // The file system for loading cached shader kernels. The layer does not maintain a strong reference to the object,
+        // instead the user is responsible for holding the object alive during the lifetime of an `IDevice`.
+        ISlangFileSystem* shaderCacheFileSystem = nullptr;
+        // Configurations for Slang compiler.
+        SlangDesc slang = {};
     };
 
     virtual SLANG_NO_THROW bool SLANG_MCALL hasFeature(const char* feature) = 0;
@@ -1425,36 +1193,32 @@ public:
         ///     effectiveElementCount = (isArray ? arrayElementCount : 1) * (isCube ? 6 : 1);
         ///
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureResource(
-        IResource::Usage initialUsage,
         const ITextureResource::Desc& desc,
         const ITextureResource::SubresourceData* initData,
         ITextureResource** outResource) = 0;
 
         /// Create a texture resource. initData holds the initialize data to set the contents of the texture when constructed.
     inline SLANG_NO_THROW ComPtr<ITextureResource> createTextureResource(
-        IResource::Usage initialUsage,
         const ITextureResource::Desc& desc,
         const ITextureResource::SubresourceData* initData = nullptr)
     {
         ComPtr<ITextureResource> resource;
-        SLANG_RETURN_NULL_ON_FAIL(createTextureResource(initialUsage, desc, initData, resource.writeRef()));
+        SLANG_RETURN_NULL_ON_FAIL(createTextureResource(desc, initData, resource.writeRef()));
         return resource;
     }
 
         /// Create a buffer resource
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferResource(
-        IResource::Usage initialUsage,
         const IBufferResource::Desc& desc,
         const void* initData,
         IBufferResource** outResource) = 0;
 
     inline SLANG_NO_THROW ComPtr<IBufferResource> createBufferResource(
-        IResource::Usage initialUsage,
         const IBufferResource::Desc& desc,
         const void* initData = nullptr)
     {
         ComPtr<IBufferResource> resource;
-        SLANG_RETURN_NULL_ON_FAIL(createBufferResource(initialUsage, desc, initData, resource.writeRef()));
+        SLANG_RETURN_NULL_ON_FAIL(createBufferResource(desc, initData, resource.writeRef()));
         return resource;
     }
 
@@ -1544,12 +1308,15 @@ public:
         return queue;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObject(slang::TypeReflection* type, IShaderObject** outObject) = 0;
+    virtual SLANG_NO_THROW Result SLANG_MCALL createShaderObject(
+        slang::TypeReflection* type,
+        ShaderObjectContainerType container,
+        IShaderObject** outObject) = 0;
 
     inline ComPtr<IShaderObject> createShaderObject(slang::TypeReflection* type)
     {
         ComPtr<IShaderObject> object;
-        SLANG_RETURN_NULL_ON_FAIL(createShaderObject(type, object.writeRef()));
+        SLANG_RETURN_NULL_ON_FAIL(createShaderObject(type, ShaderObjectContainerType::None, object.writeRef()));
         return object;
     }
 
@@ -1604,7 +1371,7 @@ public:
     virtual SLANG_NO_THROW const DeviceInfo& SLANG_MCALL getDeviceInfo() const = 0;
 };
 
-#define SLANG_UUID_IRenderer                                                             \
+#define SLANG_UUID_IDevice                                                             \
     {                                                                                    \
           0x715bdf26, 0x5135, 0x11eb, { 0xAE, 0x93, 0x02, 0x42, 0xAC, 0x13, 0x00, 0x02 } \
     }
@@ -1616,9 +1383,21 @@ extern "C"
     /// Gets the size in bytes of a Format type. Returns 0 if a size is not defined/invalid
     SLANG_GFX_API size_t SLANG_MCALL gfxGetFormatSize(Format format);
 
+    /// Gets information about the format 
+    SLANG_GFX_API FormatInfo gfxGetFormatInfo(Format format);
+
     /// Given a type returns a function that can construct it, or nullptr if there isn't one
     SLANG_GFX_API SlangResult SLANG_MCALL
         gfxCreateDevice(const IDevice::Desc* desc, IDevice** outDevice);
+
+    /// Sets a callback for receiving debug messages.
+    /// The layer does not hold a strong reference to the callback object.
+    /// The user is responsible for holding the callback object alive.
+    SLANG_GFX_API SlangResult SLANG_MCALL
+        gfxSetDebugCallback(IDebugCallback* callback);
+
+    /// Enables debug layer. The debug layer will check all `gfx` calls and verify that uses are valid.
+    SLANG_GFX_API void SLANG_MCALL gfxEnableDebugLayer();
 
     SLANG_GFX_API const char* SLANG_MCALL gfxGetDeviceTypeName(DeviceType type);
 }

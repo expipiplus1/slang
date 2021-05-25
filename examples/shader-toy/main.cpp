@@ -76,21 +76,6 @@ struct Uniforms
     float iTime;
 };
 
-// Many Slang API functions return detailed diagnostic information
-// (error messages, warnings, etc.) as a "blob" of data, or return
-// a null blob pointer instead if there were no issues.
-//
-// For convenience, we define a subroutine that will dump the information
-// in a diagnostic blob if one is produced, and skip it otherwise.
-//
-void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
-{
-    if( diagnosticsBlob != nullptr )
-    {
-        printf("%s", (const char*) diagnosticsBlob->getBufferPointer());
-    }
-}
-
 // The main interesting part of the host application code is where we
 // load, compile, inspect, and compose the Slang shader code.
 //
@@ -305,10 +290,10 @@ Result initialize()
     if(!inputLayout) return SLANG_FAIL;
 
     IBufferResource::Desc vertexBufferDesc;
-    vertexBufferDesc.init(FullScreenTriangle::kVertexCount * sizeof(FullScreenTriangle::Vertex));
-    vertexBufferDesc.setDefaults(IResource::Usage::VertexBuffer);
+    vertexBufferDesc.type = IResource::Type::Buffer;
+    vertexBufferDesc.sizeInBytes = FullScreenTriangle::kVertexCount * sizeof(FullScreenTriangle::Vertex);
+    vertexBufferDesc.defaultState = ResourceState::VertexBuffer;
     gVertexBuffer = gDevice->createBufferResource(
-        IResource::Usage::VertexBuffer,
         vertexBufferDesc,
         &FullScreenTriangle::kVertices[0]);
     if(!gVertexBuffer) return SLANG_FAIL;
