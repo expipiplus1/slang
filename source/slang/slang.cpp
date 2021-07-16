@@ -114,6 +114,7 @@ const char* getBuildTagString()
     return SLANG_TAG_VERSION;
 }
 
+
 void Session::init()
 {
     SLANG_ASSERT(BaseTypeInfo::check());
@@ -158,20 +159,20 @@ void Session::init()
     // TODO: load these on-demand to avoid parsing
     // stdlib code for languages the user won't use.
 
-    baseLanguageScope = new Scope();
+    baseLanguageScope = builtinAstBuilder->create<Scope>();
 
     // Will stay in scope as long as ASTBuilder
     baseModuleDecl = populateBaseLanguageModule(
         m_builtinLinkage->getASTBuilder(),
         baseLanguageScope);
 
-    coreLanguageScope = new Scope();
+    coreLanguageScope = builtinAstBuilder->create<Scope>();
     coreLanguageScope->nextSibling = baseLanguageScope;
 
-    hlslLanguageScope = new Scope();
+    hlslLanguageScope = builtinAstBuilder->create<Scope>();
     hlslLanguageScope->nextSibling = coreLanguageScope;
 
-    slangLanguageScope = new Scope();
+    slangLanguageScope = builtinAstBuilder->create<Scope>();
     slangLanguageScope->nextSibling = hlslLanguageScope;
 
     {
@@ -416,7 +417,7 @@ SlangResult Session::_readBuiltinModule(ISlangFileSystem* fileSystem, Scope* sco
         else
         {
             // We need to create a new scope to link into the whole thing
-            auto subScope = new Scope();
+            auto subScope = linkage->getASTBuilder()->create<Scope>();
             subScope->containerDecl = moduleDecl;
             subScope->nextSibling = scope->nextSibling;
             scope->nextSibling = subScope;
@@ -446,7 +447,7 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Session::createSession(
 
     Int targetCount = desc.targetCount;
     const uint8_t* targetDescPtr = reinterpret_cast<const uint8_t*>(desc.targets);
-    for(Int ii = 0; ii < targetCount; ++ii)
+    for (Int ii = 0; ii < targetCount; ++ii)
     {
         slang::TargetDesc targetDesc;
         // Copy the size field first.
@@ -939,6 +940,8 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
             {
                 ConstantBufferType* cbType = getASTBuilder()->create<ConstantBufferType>();
                 cbType->elementType = type;
+                cbType->declRef = getASTBuilder()->getBuiltinDeclRef(
+                    "ConstantBuffer", makeConstArrayView<Val*>(static_cast<Val*>(type)));
                 containerTypeReflection = cbType;
             }
             break;
@@ -946,6 +949,8 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
             {
                 ParameterBlockType* pbType = getASTBuilder()->create<ParameterBlockType>();
                 pbType->elementType = type;
+                pbType->declRef = getASTBuilder()->getBuiltinDeclRef(
+                    "ParameterBlock", makeConstArrayView<Val*>(static_cast<Val*>(type)));
                 containerTypeReflection = pbType;
             }
             break;
@@ -954,14 +959,14 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
                 HLSLStructuredBufferType* sbType =
                     getASTBuilder()->create<HLSLStructuredBufferType>();
                 sbType->elementType = type;
+                sbType->declRef = getASTBuilder()->getBuiltinDeclRef(
+                    "HLSLStructuredBufferType", makeConstArrayView<Val*>(static_cast<Val*>(type)));
                 containerTypeReflection = sbType;
             }
             break;
         case slang::ContainerType::UnsizedArray:
             {
-                ArrayExpressionType* arrType = getASTBuilder()->create<ArrayExpressionType>();
-                arrType->baseType = type;
-                arrType->arrayLength = nullptr;
+                ArrayExpressionType* arrType = getASTBuilder()->getArrayType(type, nullptr);
                 containerTypeReflection = arrType;
             }
             break;
@@ -1286,7 +1291,7 @@ SlangResult Linkage::loadFile(String const& path, PathInfo& outPathInfo, ISlangB
     return SLANG_OK;
 }
 
-Expr* Linkage::parseTermString(String typeStr, RefPtr<Scope> scope)
+Expr* Linkage::parseTermString(String typeStr, Scope* scope)
 {
     // Create a SourceManager on the stack, so any allocations for 'SourceFile'/'SourceView' etc will be cleaned up
     SourceManager localSourceManager;
@@ -1349,11 +1354,21 @@ Type* ComponentType::getTypeFromString(
     if(m_types.TryGetValue(typeStr, type))
         return type;
 
+
+    // TODO(JS): For now just used the linkages ASTBuilder to keep on scope
+    //
+    // The parseTermString uses the linkage ASTBuilder for it's parsing.
+    // 
+    // It might be possible to just create a temporary ASTBuilder - the worry though is
+    // that the parsing sets a member variable in AST node to one of these scopes, and then
+    // it become a dangling pointer. So for now we go with the linkages.
+    auto astBuilder = getLinkage()->getASTBuilder();
+
     // Otherwise, we need to start looking in
     // the modules that were directly or
     // indirectly referenced.
     //
-    RefPtr<Scope> scope = _createScopeForLegacyLookup();
+    Scope* scope = _createScopeForLegacyLookup(astBuilder);
 
     auto linkage = getLinkage();
     Expr* typeExpr = linkage->parseTermString(
@@ -1532,7 +1547,7 @@ static void _calcViewInitiatingHierarchy(SourceManager* sourceManager, ViewIniti
     // This assumes they increase in SourceLoc implies an later within a source file - this is true currently.
     for (auto& pair : outHierarchy)
     {
-        pair.Value.sort([](SourceView* a, SourceView* b) { return a->getInitiatingSourceLoc().getRaw() < b->getInitiatingSourceLoc().getRaw(); });
+        pair.Value.sort([](SourceView* a, SourceView* b) -> bool { return a->getInitiatingSourceLoc().getRaw() < b->getInitiatingSourceLoc().getRaw(); });
     }
 }
 
@@ -1670,7 +1685,7 @@ void FrontEndCompileRequest::parseTranslationUnit(
     // would be checked too (after those on the FrontEndCompileRequest). 
     IncludeSystem includeSystem(&linkage->searchDirectories, linkage->getFileSystemExt(), linkage->getSourceManager());
 
-    RefPtr<Scope> languageScope;
+    Scope* languageScope = nullptr;
     switch (translationUnit->sourceLanguage)
     {
     case SourceLanguage::HLSL:
@@ -2202,6 +2217,7 @@ SlangResult EndToEndCompileRequest::executeActionsInner()
 SlangResult EndToEndCompileRequest::executeActions()
 {
     SlangResult res = executeActionsInner();
+
     m_diagnosticOutput = getSink()->outputBuffer.ProduceString();
     return res;
 }
@@ -3757,7 +3773,7 @@ RefPtr<Module> findOrImportModule(
 }
 
 void Session::addBuiltinSource(
-    RefPtr<Scope> const&    scope,
+    Scope*                  scope,
     String const&           path,
     String const&           source)
 {
@@ -3779,7 +3795,6 @@ void Session::addBuiltinSource(
     Name* moduleName = getNamePool()->getName(path);
     auto translationUnitIndex = compileRequest->addTranslationUnit(SourceLanguage::Slang, moduleName);
 
-    
     compileRequest->addTranslationUnitSourceString(
         translationUnitIndex,
         path,
@@ -3814,7 +3829,7 @@ void Session::addBuiltinSource(
     else
     {
         // We need to create a new scope to link into the whole thing
-        auto subScope = new Scope();
+        auto subScope = module->getASTBuilder()->create<Scope>();
         subScope->containerDecl = moduleDecl;
         subScope->nextSibling = scope->nextSibling;
         scope->nextSibling = subScope;
@@ -4242,7 +4257,7 @@ SlangResult EndToEndCompileRequest::EndToEndCompileRequest::compile()
                 return saveRes;
             }
         }
-        else if (m_dumpReproOnError && SLANG_FAILED(res))
+        else if (m_dumpReproOnError && SLANG_FAILED(res)) 
         {
             String reproFileName;
             SlangResult saveRes = SLANG_FAIL;

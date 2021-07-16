@@ -91,6 +91,10 @@ namespace gfx {
     x(vkCmdCopyBufferToImage)\
     x(vkCmdPushConstants) \
     x(vkCmdSetStencilReference) \
+    x(vkCmdWriteTimestamp) \
+    x(vkCmdBeginQuery) \
+    x(vkCmdEndQuery) \
+    x(vkCmdResetQueryPool) \
     \
     x(vkCreateFence) \
     x(vkDestroyFence) \
@@ -116,6 +120,10 @@ namespace gfx {
     \
     x(vkBindImageMemory) \
     x(vkBindBufferMemory) \
+    \
+    x(vkCreateQueryPool) \
+    x(vkGetQueryPoolResults) \
+    x(vkDestroyQueryPool) \
     /* */
 
 #if SLANG_WINDOWS_FAMILY
@@ -135,6 +143,7 @@ namespace gfx {
     x(vkGetPhysicalDeviceSurfacePresentModesKHR) \
     x(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     x(vkDestroySurfaceKHR) \
+
     /* */
 
 #define VK_API_DEVICE_KHR_PROCS(x) \
@@ -147,6 +156,17 @@ namespace gfx {
 
 #define VK_API_DEVICE_OPT_PROCS(x) \
     x(vkCmdSetPrimitiveTopologyEXT) \
+    x(vkGetBufferDeviceAddress) \
+    x(vkGetBufferDeviceAddressKHR) \
+    x(vkGetBufferDeviceAddressEXT) \
+    x(vkCmdBuildAccelerationStructuresKHR) \
+    x(vkCmdCopyAccelerationStructureKHR) \
+    x(vkCmdCopyAccelerationStructureToMemoryKHR) \
+    x(vkCmdCopyMemoryToAccelerationStructureKHR) \
+    x(vkCmdWriteAccelerationStructuresPropertiesKHR) \
+    x(vkCreateAccelerationStructureKHR) \
+    x(vkDestroyAccelerationStructureKHR) \
+    x(vkGetAccelerationStructureBuildSizesKHR) \
     /* */
 
 #define VK_API_ALL_GLOBAL_PROCS(x) \
@@ -170,6 +190,44 @@ namespace gfx {
     /* */
 
 #define VK_API_DECLARE_PROC(NAME) PFN_##NAME NAME = nullptr;
+
+
+struct VulkanExtendedFeatureProperties
+{
+    // Float16 features
+    VkPhysicalDeviceFloat16Int8FeaturesKHR float16Features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR};
+    // 16 bit storage features
+    VkPhysicalDevice16BitStorageFeatures storage16BitFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES_KHR};
+    // AtomicInt64 features
+    VkPhysicalDeviceShaderAtomicInt64FeaturesKHR atomicInt64Features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR};
+    // Atomic Float features
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+    // Timeline Semaphore features
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+    // Extended dynamic state features
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+    // Subgroup extended type features
+    VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures shaderSubgroupExtendedTypeFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES};
+    // Acceleration structure features
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    // Ray query (inline ray-tracing) features
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    // Buffer device address features
+    VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+    // Inline uniform block features
+    VkPhysicalDeviceInlineUniformBlockFeaturesEXT inlineUniformBlockFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+};
 
 struct VulkanApi
 {
@@ -212,6 +270,7 @@ struct VulkanApi
     VkPhysicalDeviceProperties          m_deviceProperties;
     VkPhysicalDeviceFeatures            m_deviceFeatures;
     VkPhysicalDeviceMemoryProperties    m_deviceMemoryProperties;
+    VulkanExtendedFeatureProperties     m_extendedFeatures;
 };
 
 } // renderer_test
