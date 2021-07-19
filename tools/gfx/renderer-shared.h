@@ -33,8 +33,11 @@ struct GfxGUID
     static const Slang::Guid IID_IRenderCommandEncoder;
     static const Slang::Guid IID_IComputeCommandEncoder;
     static const Slang::Guid IID_IResourceCommandEncoder;
+    static const Slang::Guid IID_IRayTracingCommandEncoder;
     static const Slang::Guid IID_ICommandBuffer;
     static const Slang::Guid IID_ICommandQueue;
+    static const Slang::Guid IID_IQueryPool;
+    static const Slang::Guid IID_IAccelerationStructure;
 };
 
 // We use a `BreakableReference` to avoid the cyclic reference situation in gfx implementation.
@@ -242,13 +245,30 @@ protected:
     Desc m_desc;
 };
 
+class ResourceViewInternalBase : public Slang::ComObject
+{};
+
 class ResourceViewBase
     : public IResourceView
-    , public Slang::ComObject
+    , public ResourceViewInternalBase
 {
 public:
+    Desc m_desc = {};
     SLANG_COM_OBJECT_IUNKNOWN_ALL
     IResourceView* getInterface(const Slang::Guid& guid);
+    virtual SLANG_NO_THROW Desc* SLANG_MCALL getViewDesc() override { return &m_desc; }
+};
+
+class AccelerationStructureBase
+    : public IAccelerationStructure
+    , public ResourceViewInternalBase
+{
+public:
+    IResourceView::Desc m_desc = {};
+
+    SLANG_COM_OBJECT_IUNKNOWN_ALL
+    IAccelerationStructure* getInterface(const Slang::Guid& guid);
+    virtual SLANG_NO_THROW Desc* SLANG_MCALL getViewDesc() override { return &m_desc; }
 };
 
 class RendererBase;
@@ -1059,6 +1079,18 @@ public:
         slang::TypeReflection* type,
         ShaderObjectContainerType containerType,
         IShaderObject** outObject) SLANG_OVERRIDE;
+
+    // Provides a default implementation that returns SLANG_E_NOT_AVAILABLE for platforms
+    // without ray tracing support.
+    virtual SLANG_NO_THROW Result SLANG_MCALL getAccelerationStructurePrebuildInfo(
+        const IAccelerationStructure::BuildInputs& buildInputs,
+        IAccelerationStructure::PrebuildInfo* outPrebuildInfo) override;
+
+    // Provides a default implementation that returns SLANG_E_NOT_AVAILABLE for platforms
+    // without ray tracing support.
+    virtual SLANG_NO_THROW Result SLANG_MCALL createAccelerationStructure(
+        const IAccelerationStructure::CreateDesc& desc,
+        IAccelerationStructure** outView) override;
 
     Result getShaderObjectLayout(
         slang::TypeReflection*      type,
