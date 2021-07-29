@@ -303,6 +303,13 @@ Result RendererBase::createAccelerationStructure(
     return SLANG_E_NOT_AVAILABLE;
 }
 
+Result RendererBase::createRayTracingPipelineState(const RayTracingPipelineStateDesc& desc, IPipelineState** outState)
+{
+    SLANG_UNUSED(desc);
+    SLANG_UNUSED(outState);
+    return SLANG_E_NOT_AVAILABLE;
+}
+
 Result RendererBase::getShaderObjectLayout(
     slang::TypeReflection* type,
     ShaderObjectContainerType container,
@@ -595,6 +602,14 @@ Result RendererBase::maybeSpecializePipeline(
                 auto pipelineDesc = currentPipeline->desc.graphics;
                 pipelineDesc.program = specializedProgram;
                 SLANG_RETURN_ON_FAIL(createGraphicsPipelineState(
+                    pipelineDesc, specializedPipelineComPtr.writeRef()));
+                break;
+            }
+            case PipelineType::RayTracing:
+            {
+                auto pipelineDesc = currentPipeline->desc.rayTracing;
+                pipelineDesc.program = specializedProgram;
+                SLANG_RETURN_ON_FAIL(createRayTracingPipelineState(
                     pipelineDesc, specializedPipelineComPtr.writeRef()));
                 break;
             }

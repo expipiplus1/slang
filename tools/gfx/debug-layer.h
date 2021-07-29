@@ -102,6 +102,9 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL createComputePipelineState(
         const ComputePipelineStateDesc& desc,
         IPipelineState** outState) override;
+    virtual SLANG_NO_THROW Result SLANG_MCALL createRayTracingPipelineState(
+        const RayTracingPipelineStateDesc& desc,
+        IPipelineState** outState) override;
     virtual SLANG_NO_THROW SlangResult SLANG_MCALL readTextureResource(
         ITextureResource* resource,
         ResourceState state,
@@ -348,6 +351,13 @@ public:
         IAccelerationStructure* const* structures,
         AccessFlag::Enum sourceAccess,
         AccessFlag::Enum destAccess) override;
+    virtual SLANG_NO_THROW void SLANG_MCALL
+        bindPipeline(IPipelineState* state, IShaderObject** outRootObject) override;
+    virtual SLANG_NO_THROW void SLANG_MCALL dispatchRays(
+        const char* rayGenShaderName,
+        int32_t width,
+        int32_t height,
+        int32_t depth) override;
 
 public:
     DebugCommandBuffer* commandBuffer;
