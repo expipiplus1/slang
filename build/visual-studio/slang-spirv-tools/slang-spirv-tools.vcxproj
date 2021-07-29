@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
       <Configuration>Debug</Configuration>
@@ -29,25 +29,25 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v142</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v142</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v142</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v142</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -225,6 +225,7 @@
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\instruction.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\instruction_list.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\instrument_pass.h" />
+    <ClInclude Include="..\..\..\external\spirv-tools\source\opt\interp_fixup_pass.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\ir_builder.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\ir_context.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\ir_loader.h" />
@@ -260,6 +261,7 @@
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\register_pressure.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\relax_float_ops_pass.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\remove_duplicates_pass.h" />
+    <ClInclude Include="..\..\..\external\spirv-tools\source\opt\remove_unused_interface_variables_pass.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\replace_invalid_opc.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\scalar_analysis.h" />
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\scalar_analysis_nodes.h" />
@@ -328,9 +330,7 @@
     <ClCompile Include="..\..\..\external\spirv-tools\source\operand.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\aggressive_dead_code_elim_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\amd_ext_to_khr.cpp" />
-    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\basic_block.cpp">
-      <ObjectFileName>$(IntDir)\basic_block1.obj</ObjectFileName>
-    </ClCompile>
+    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\basic_block.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\block_merge_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\block_merge_util.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\build_module.cpp" />
@@ -365,7 +365,9 @@
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\fold_spec_constant_op_and_composite_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\folding_rules.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\freeze_spec_constant_value_pass.cpp" />
-    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\function.cpp" />
+    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\function.cpp">
+      <ObjectFileName>$(IntDir)\function1.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\graphics_robust_access_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\if_conversion.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\inline_exhaustive_pass.cpp" />
@@ -379,6 +381,7 @@
     </ClCompile>
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\instruction_list.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\instrument_pass.cpp" />
+    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\interp_fixup_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\ir_context.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\ir_loader.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\licm_pass.cpp" />
@@ -410,6 +413,7 @@
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\register_pressure.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\relax_float_ops_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\remove_duplicates_pass.cpp" />
+    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\remove_unused_interface_variables_pass.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\replace_invalid_opc.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\scalar_analysis.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\scalar_analysis_simplification.cpp" />
@@ -446,11 +450,11 @@
     <ClCompile Include="..\..\..\external\spirv-tools\source\util\parse_number.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\util\string_utils.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\util\timer.cpp" />
-    <ClCompile Include="..\..\..\external\spirv-tools\source\val\basic_block.cpp" />
-    <ClCompile Include="..\..\..\external\spirv-tools\source\val\construct.cpp" />
-    <ClCompile Include="..\..\..\external\spirv-tools\source\val\function.cpp">
-      <ObjectFileName>$(IntDir)\function1.obj</ObjectFileName>
+    <ClCompile Include="..\..\..\external\spirv-tools\source\val\basic_block.cpp">
+      <ObjectFileName>$(IntDir)\basic_block1.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\..\..\external\spirv-tools\source\val\construct.cpp" />
+    <ClCompile Include="..\..\..\external\spirv-tools\source\val\function.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\val\instruction.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\val\validate.cpp" />
     <ClCompile Include="..\..\..\external\spirv-tools\source\val\validate_adjacency.cpp" />
