@@ -98,7 +98,7 @@ static SlangResult _handleCUDAError(cudaError_t error, const char* file, int lin
     return CUDAErrorInfo(file, line, cudaGetErrorName(error), cudaGetErrorString(error)).handle();
 }
 
-#    define SLANG_CUDA_HANDLE_ERROR(x) _handleCUDAError(_res, __FILE__, __LINE__)
+#    define SLANG_CUDA_HANDLE_ERROR(x) _handleCUDAError(x, __FILE__, __LINE__)
 
 #    define SLANG_CUDA_RETURN_ON_FAIL(x)              \
         {                                             \
@@ -188,6 +188,11 @@ public:
     void* m_cudaMemory = nullptr;
 
     RefPtr<CUDAContext> m_cudaContext;
+
+    virtual SLANG_NO_THROW DeviceAddress SLANG_MCALL getDeviceAddress() override
+    {
+        return (DeviceAddress)m_cudaMemory;
+    }
 };
 
 class TextureCUDAResource : public TextureResource
@@ -234,7 +239,6 @@ public:
 class CUDAResourceView : public ResourceViewBase
 {
 public:
-    Desc desc;
     RefPtr<MemoryCUDAResource> memoryResource = nullptr;
     RefPtr<TextureCUDAResource> textureResource = nullptr;
     void* proxyBuffer = nullptr;
@@ -431,7 +435,7 @@ public:
     Slang::RefPtr<MemoryCUDAResource> m_bufferResource;
     Slang::RefPtr<CUDAResourceView> m_bufferView;
     Slang::List<uint8_t> m_cpuBuffer;
-    void setCount(Index count)
+    Result setCount(Index count)
     {
         if (isHostOnly)
         {
@@ -442,9 +446,9 @@ public:
                 viewDesc.type = IResourceView::Type::UnorderedAccess;
                 m_bufferView = new CUDAResourceView();
                 m_bufferView->proxyBuffer = m_cpuBuffer.getBuffer();
-                m_bufferView->desc = viewDesc;
+                m_bufferView->m_desc = viewDesc;
             }
-            return;
+            return SLANG_OK;
         }
 
         if (!m_bufferResource)
@@ -454,12 +458,14 @@ public:
             desc.sizeInBytes = count;
             m_bufferResource = new MemoryCUDAResource(desc);
             if (count)
-                cudaMalloc(&m_bufferResource->m_cudaMemory, (size_t)count);
+            {
+                SLANG_CUDA_RETURN_ON_FAIL(cudaMalloc(&m_bufferResource->m_cudaMemory, (size_t)count));
+            }
             IResourceView::Desc viewDesc = {};
             viewDesc.type = IResourceView::Type::UnorderedAccess;
             m_bufferView = new CUDAResourceView();
             m_bufferView->memoryResource = m_bufferResource;
-            m_bufferView->desc = viewDesc;
+            m_bufferView->m_desc = viewDesc;
         }
         auto oldSize = m_bufferResource->getDesc()->sizeInBytes;
         if ((size_t)count != oldSize)
@@ -467,20 +473,21 @@ public:
             void* newMemory = nullptr;
             if (count)
             {
-                cudaMalloc(&newMemory, (size_t)count);
+                SLANG_CUDA_RETURN_ON_FAIL(cudaMalloc(&newMemory, (size_t)count));
             }
             if (oldSize)
             {
-                cudaMemcpy(
+                SLANG_CUDA_RETURN_ON_FAIL(cudaMemcpy(
                     newMemory,
                     m_bufferResource->m_cudaMemory,
                     Math::Min((size_t)count, oldSize),
-                    cudaMemcpyDefault);
+                    cudaMemcpyDefault));
             }
             cudaFree(m_bufferResource->m_cudaMemory);
             m_bufferResource->m_cudaMemory = newMemory;
             m_bufferResource->getDesc()->sizeInBytes = count;
         }
+        return SLANG_OK;
     }
 
     Slang::Index getCount()
@@ -563,7 +570,7 @@ public:
 
         if (cudaView->textureResource)
         {
-            if (cudaView->desc.type == IResourceView::Type::UnorderedAccess)
+            if (cudaView->m_desc.type == IResourceView::Type::UnorderedAccess)
             {
                 auto handle = cudaView->textureResource->m_cudaSurfObj;
                 setData(offset, &handle, sizeof(uint64_t));
@@ -701,6 +708,58 @@ public:
         pipelineDesc.type = PipelineType::Compute;
         pipelineDesc.compute = inDesc;
         initializeBase(pipelineDesc);
+    }
+};
+
+class CUDAQueryPool : public IQueryPool, public ComObject
+{
+public:
+    SLANG_COM_OBJECT_IUNKNOWN_ALL;
+    IQueryPool* getInterface(const Guid& guid)
+    {
+        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IQueryPool)
+            return static_cast<IQueryPool*>(this);
+        return nullptr;
+    }
+public:
+    // The event object for each query. Owned by the pool.
+    List<CUevent> m_events;
+
+    // The event that marks the starting point.
+    CUevent m_startEvent;
+
+    Result init(const IQueryPool::Desc& desc)
+    {
+        cuEventCreate(&m_startEvent, 0);
+        cuEventRecord(m_startEvent, 0);
+        m_events.setCount(desc.count);
+        for (SlangInt i = 0; i < m_events.getCount(); i++)
+        {
+            cuEventCreate(&m_events[i], 0);
+        }
+        return SLANG_OK;
+    }
+
+    ~CUDAQueryPool()
+    {
+        for (auto& e : m_events)
+        {
+            cuEventDestroy(e);
+        }
+        cuEventDestroy(m_startEvent);
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL getResult(
+        SlangInt queryIndex, SlangInt count, uint64_t* data) override
+    {
+        for (SlangInt i = 0; i < count; i++)
+        {
+            float time = 0.0f;
+            cuEventSynchronize(m_events[i + queryIndex]);
+            cuEventElapsedTime(&time, m_startEvent, m_events[i + queryIndex]);
+            data[i] = (uint64_t)((double)time * 1000.0f);
+        }
+        return SLANG_OK;
     }
 };
 
@@ -861,22 +920,6 @@ public:
             : public IComputeCommandEncoder
         {
         public:
-            virtual SLANG_NO_THROW SlangResult SLANG_MCALL
-                queryInterface(SlangUUID const& uuid, void** outObject) override
-            {
-                if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
-                    uuid == GfxGUID::IID_IComputeCommandEncoder)
-                {
-                    *outObject = static_cast<IComputeCommandEncoder*>(this);
-                    return SLANG_OK;
-                }
-                *outObject = nullptr;
-                return SLANG_E_NO_INTERFACE;
-            }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-
-        public:
             CommandWriter* m_writer;
             CommandBufferImpl* m_commandBuffer;
             RefPtr<ShaderObjectBase> m_rootObject;
@@ -903,6 +946,11 @@ public:
                 m_writer->bindRootShaderObject(m_rootObject);
                 m_writer->dispatchCompute(x, y, z);
             }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL writeTimestamp(IQueryPool* pool, SlangInt index) override
+            {
+                m_writer->writeTimestamp(pool, index);
+            }
         };
 
         ComputeCommandEncoderImpl m_computeCommandEncoder;
@@ -916,22 +964,6 @@ public:
         class ResourceCommandEncoderImpl
             : public IResourceCommandEncoder
         {
-        public:
-            virtual SLANG_NO_THROW SlangResult SLANG_MCALL
-                queryInterface(SlangUUID const& uuid, void** outObject) override
-            {
-                if (uuid == GfxGUID::IID_ISlangUnknown || uuid == GfxGUID::IID_ICommandEncoder ||
-                    uuid == GfxGUID::IID_IResourceCommandEncoder)
-                {
-                    *outObject = static_cast<IResourceCommandEncoder*>(this);
-                    return SLANG_OK;
-                }
-                *outObject = nullptr;
-                return SLANG_E_NO_INTERFACE;
-            }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-            virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-
         public:
             CommandWriter* m_writer;
 
@@ -956,6 +988,11 @@ public:
             {
                 m_writer->uploadBufferData(dst, offset, size, data);
             }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL writeTimestamp(IQueryPool* pool, SlangInt index) override
+            {
+                m_writer->writeTimestamp(pool, index);
+            }
         };
 
         ResourceCommandEncoderImpl m_resourceCommandEncoder;
@@ -965,6 +1002,12 @@ public:
         {
             m_resourceCommandEncoder.init(this);
             *outEncoder = &m_resourceCommandEncoder;
+        }
+
+        virtual SLANG_NO_THROW void SLANG_MCALL
+            encodeRayTracingCommands(IRayTracingCommandEncoder** outEncoder) override
+        {
+            *outEncoder = nullptr;
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL close() override {}
@@ -1021,7 +1064,9 @@ public:
 
         virtual SLANG_NO_THROW void SLANG_MCALL wait() override
         {
-            cuStreamSynchronize(stream);
+            auto resultCode = cuStreamSynchronize(stream);
+            if (resultCode != cudaSuccess)
+                SLANG_CUDA_HANDLE_ERROR(resultCode);
         }
 
     public:
@@ -1134,6 +1179,12 @@ public:
             cudaMemcpy((uint8_t*)dstImpl->m_cudaMemory + offset, data, size, cudaMemcpyDefault);
         }
 
+        void writeTimestamp(IQueryPool* pool, SlangInt index)
+        {
+            auto poolImpl = static_cast<CUDAQueryPool*>(pool);
+            cuEventRecord(poolImpl->m_events[index], stream);
+        }
+
         void execute(CommandBufferImpl* commandBuffer)
         {
             for (auto& cmd : commandBuffer->m_commands)
@@ -1166,6 +1217,10 @@ public:
                         cmd.operands[2],
                         commandBuffer->getData<uint8_t>(cmd.operands[3]));
                     break;
+                case CommandName::WriteTimestamp:
+                    writeTimestamp(
+                        commandBuffer->getObject<IQueryPool>(cmd.operands[0]),
+                        (SlangInt)cmd.operands[1]);
                 }
             }
         }
@@ -1213,6 +1268,7 @@ public:
             cudaGetDeviceProperties(&deviceProperties, m_deviceIndex);
             m_adapterName = deviceProperties.name;
             m_info.adapterName = m_adapterName.begin();
+            m_info.timestampFrequency = 1000000;
         }
 
         return SLANG_OK;
@@ -1625,6 +1681,9 @@ public:
             //
             if (desc.allowedStates.contains(ResourceState::UnorderedAccess))
             {
+                // On CUDA surfaces only support a single MIP map
+                SLANG_ASSERT(desc.numMipLevels == 1);
+
                 SLANG_CUDA_RETURN_ON_FAIL(cuSurfObjectCreate(&tex->m_cudaSurfObj, &resDesc));
             }
 
@@ -1667,7 +1726,7 @@ public:
         ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView) override
     {
         RefPtr<CUDAResourceView> view = new CUDAResourceView();
-        view->desc = desc;
+        view->m_desc = desc;
         view->textureResource = dynamic_cast<TextureCUDAResource*>(texture);
         returnComPtr(outView, view);
         return SLANG_OK;
@@ -1677,9 +1736,19 @@ public:
         IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView) override
     {
         RefPtr<CUDAResourceView> view = new CUDAResourceView();
-        view->desc = desc;
+        view->m_desc = desc;
         view->memoryResource = dynamic_cast<MemoryCUDAResource*>(buffer);
         returnComPtr(outView, view);
+        return SLANG_OK;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL createQueryPool(
+        const IQueryPool::Desc& desc,
+        IQueryPool** outPool) override
+    {
+        RefPtr<CUDAQueryPool> pool = new CUDAQueryPool();
+        SLANG_RETURN_ON_FAIL(pool->init(desc));
+        returnComPtr(outPool, pool);
         return SLANG_OK;
     }
 
