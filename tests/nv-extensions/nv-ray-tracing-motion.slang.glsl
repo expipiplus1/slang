@@ -54,7 +54,6 @@ struct RayDesc_0
 
 void TraceMotionRay_0(accelerationStructureEXT AccelerationStructure_0, uint RayFlags_0, uint InstanceInclusionMask_0, uint RayContributionToHitGroupIndex_0, uint MultiplierForGeometryContributionToHitGroupIndex_0, uint MissShaderIndex_0, RayDesc_0 Ray_0, float CurrentTime_0, inout ShadowRay_0 Payload_0)
 {
-
     p_0 = Payload_0;
 
     traceMotionNV(AccelerationStructure_0, RayFlags_0, InstanceInclusionMask_0, RayContributionToHitGroupIndex_0, MultiplierForGeometryContributionToHitGroupIndex_0, MissShaderIndex_0, Ray_0.Origin_0, Ray_0.TMin_0, Ray_0.Direction_0, Ray_0.TMax_0, CurrentTime_0, (0));
@@ -69,7 +68,6 @@ uniform accelerationStructureEXT as_0;
 
 float saturate_0(float x_0)
 {
-
     float _S2 = clamp(x_0, float(0), float(1));
 
     return _S2;
@@ -86,7 +84,6 @@ ReflectionRay_0 p_1;
 
 void TraceRay_0(accelerationStructureEXT AccelerationStructure_1, uint RayFlags_1, uint InstanceInclusionMask_1, uint RayContributionToHitGroupIndex_1, uint MultiplierForGeometryContributionToHitGroupIndex_1, uint MissShaderIndex_1, RayDesc_0 Ray_1, inout ReflectionRay_0 Payload_1)
 {
-
     p_1 = Payload_1;
 
     traceRayEXT(AccelerationStructure_1, RayFlags_1, InstanceInclusionMask_1, RayContributionToHitGroupIndex_1, MultiplierForGeometryContributionToHitGroupIndex_1, MissShaderIndex_1, Ray_1.Origin_0, Ray_1.TMin_0, Ray_1.Direction_0, Ray_1.TMax_0, (1));
@@ -141,12 +138,10 @@ void main()
 
     if(shadowRay_0.hitDistance_0 < lightDist_0)
     {
-
         atten_0 = 0.00000000000000000000;
     }
     else
     {
-
         atten_0 = _S9;
     }
 
@@ -164,4 +159,3 @@ void main()
     imageStore((outputImage_0), ivec2((uvec2(launchID_0))), vec4(color_2 + reflectionRay_0.color_1, 1.00000000000000000000));
     return;
 }
-
