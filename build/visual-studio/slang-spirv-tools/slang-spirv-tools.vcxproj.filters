@@ -210,6 +210,9 @@
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\instrument_pass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\external\spirv-tools\source\opt\interp_fixup_pass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\ir_builder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -313,6 +316,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\remove_duplicates_pass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\external\spirv-tools\source\opt\remove_unused_interface_variables_pass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\external\spirv-tools\source\opt\replace_invalid_opc.h">
@@ -656,6 +662,9 @@
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\instrument_pass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\interp_fixup_pass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\ir_context.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -747,6 +756,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\remove_duplicates_pass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\external\spirv-tools\source\opt\remove_unused_interface_variables_pass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\external\spirv-tools\source\opt\replace_invalid_opc.cpp">

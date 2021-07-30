@@ -654,6 +654,7 @@ example "hello-world"
 example "triangle"
 
 example "ray-tracing"
+example "ray-tracing-pipeline"
 
 example "gpu-printing"
     kind "ConsoleApp"
