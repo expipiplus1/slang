@@ -171,7 +171,7 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
         // Use a minimal set of performance settings
         // If we run CreateInlineExhaustivePass, We need to run CreateMergeReturnPass first.
 
-#if 0
+#if 1
         // This is the previous 'default optimization' passes setting for glslang
         {
             optimizer.RegisterPass(spvtools::CreateMergeReturnPass());
@@ -182,7 +182,7 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
             optimizer.RegisterPass(spvtools::CreateLocalAccessChainConvertPass());
             optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
         }
-#endif
+#else
         // The following selection of passes was created by
         // 1) Taking the list of passes from optimizer.RegisterSizePasses
         // 2) Disable/enable passes to try to produce some reasonable combination of low SPIR-V output size and compilation speed
@@ -242,6 +242,7 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
             optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
             optimizer.RegisterPass(spvtools::CreateCFGCleanupPass());
         }
+#endif
 
         break;
     case SLANG_OPTIMIZATION_LEVEL_HIGH:
