@@ -161,6 +161,17 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
 
     spvtools::OptimizerOptions spvOptOptions;
 
+    // To compile some large shaders the default is not enough.
+    // That although this limit is exceeded, the final optimized output is typically well
+    // within the range.
+    //
+    // See kDefaultMaxIdBound for description of this limit.
+    //
+    // If a compilation produces a warning like
+    // `0:0: ID overflow. Try running compact-ids.`
+    // it might be fixable by raising the multiplier to a larger value.
+    spvOptOptions.set_max_id_bound(kDefaultMaxIdBound * 4);
+
     // TODO confirm which passes we want to invoke for each level
     switch (optimizationLevel)
     {
@@ -171,7 +182,7 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
         // Use a minimal set of performance settings
         // If we run CreateInlineExhaustivePass, We need to run CreateMergeReturnPass first.
 
-#if 1
+#if 0
         // This is the previous 'default optimization' passes setting for glslang
         {
             optimizer.RegisterPass(spvtools::CreateMergeReturnPass());
@@ -182,6 +193,41 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
             optimizer.RegisterPass(spvtools::CreateLocalAccessChainConvertPass());
             optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
         }
+#elif 1
+        // 6Mb 27 secs (9) 
+        // 9Mb 25 secs (7)
+        // 8Mb 15 secs -(5,6,7)
+        // 6Mb 15 secs -(6,7) 
+
+         // This is the previous 'default optimization' passes setting for glslang
+        {
+            optimizer.RegisterPass(spvtools::CreateWrapOpKillPass());           // 1
+            optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());       // 2
+
+            optimizer.RegisterPass(spvtools::CreateMergeReturnPass());
+            optimizer.RegisterPass(spvtools::CreateInlineExhaustivePass());
+
+            optimizer.RegisterPass(spvtools::CreateEliminateDeadFunctionsPass()); // 3
+
+            optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
+            optimizer.RegisterPass(spvtools::CreatePrivateToLocalPass());
+
+            optimizer.RegisterPass(spvtools::CreateScalarReplacementPass(100));
+
+            optimizer.RegisterPass(spvtools::CreateCCPPass());                  // 4 *
+            optimizer.RegisterPass(spvtools::CreateSimplificationPass());       // 5
+            //optimizer.RegisterPass(spvtools::CreateIfConversionPass());         // 6
+            //optimizer.RegisterPass(spvtools::CreateBlockMergePass());           // 7 *
+
+            optimizer.RegisterPass(spvtools::CreateLocalAccessChainConvertPass());
+
+            optimizer.RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass()); // 8
+
+            optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
+
+            optimizer.RegisterPass(spvtools::CreateVectorDCEPass());            // 9
+        }
+
 #else
         // The following selection of passes was created by
         // 1) Taking the list of passes from optimizer.RegisterSizePasses
@@ -214,19 +260,19 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
             optimizer.RegisterPass(spvtools::CreateInlineExhaustivePass());
             optimizer.RegisterPass(spvtools::CreateEliminateDeadFunctionsPass()); // 9
             optimizer.RegisterPass(spvtools::CreatePrivateToLocalPass());
-            //optimizer.RegisterPass(spvtools::CreateScalarReplacementPass(0));   // 12
+            optimizer.RegisterPass(spvtools::CreateScalarReplacementPass(0));   // 12
             //optimizer.RegisterPass(spvtools::CreateLocalMultiStoreElimPass());
             optimizer.RegisterPass(spvtools::CreateCCPPass());
             //optimizer.RegisterPass(spvtools::CreateLoopUnrollPass(true));     // 1
             //optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());     // 4
-            //optimizer.RegisterPass(spvtools::CreateSimplificationPass());       // 11
-            optimizer.RegisterPass(spvtools::CreateScalarReplacementPass(0));
+            optimizer.RegisterPass(spvtools::CreateSimplificationPass());       // 11
+            optimizer.RegisterPass(spvtools::CreateScalarReplacementPass());
             //optimizer.RegisterPass(spvtools::CreateLocalSingleStoreElimPass());
-            //optimizer.RegisterPass(spvtools::CreateIfConversionPass());       // 7
+            optimizer.RegisterPass(spvtools::CreateIfConversionPass());       // 7
             optimizer.RegisterPass(spvtools::CreateSimplificationPass());       // 13
-            //optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());      // 10
+            optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());      // 10
             //optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());         // 6 + 15
-            //optimizer.RegisterPass(spvtools::CreateBlockMergePass());             // 8
+            optimizer.RegisterPass(spvtools::CreateBlockMergePass());             // 8
             optimizer.RegisterPass(spvtools::CreateLocalAccessChainConvertPass());
             optimizer.RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass());
             optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());        // 5
@@ -257,17 +303,7 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
         // Use the same passes when specifying the "-O" flag in spirv-opt
         // Roughly equivalent to `RegisterPerformancePasses`
 
-        // To compile some large shaders the default is not enough.
-        // That although this limit is exceeded, the final optimized output is typically well
-        // within the range.
-        //
-        // See kDefaultMaxIdBound for description of this limit.
-        //
-        // If a compilation produces a warning like
-        // `0:0: ID overflow. Try running compact-ids.`
-        // it might be fixable by raising the multiplier to a larger value.
-        spvOptOptions.set_max_id_bound(kDefaultMaxIdBound * 4);
-
+        
         optimizer.RegisterPass(spvtools::CreateWrapOpKillPass());
         optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());
         optimizer.RegisterPass(spvtools::CreateMergeReturnPass());
