@@ -253,10 +253,10 @@ workspace "slang"
 
 
     filter { "toolset:clang or gcc*" }
-        buildoptions { "-Wno-unused-parameter", "-Wno-type-limits", "-Wno-sign-compare", "-Wno-unused-variable", "-Wno-reorder", "-Wno-switch", "-Wno-return-type", "-Wno-unused-local-typedefs", "-Wno-parentheses",  "-fvisibility=hidden" , "-Wno-ignored-optimization-argument", "-Wno-unknown-warning-option", "-Wno-class-memaccess"} 
-        
+        buildoptions { "-Wno-unused-parameter", "-Wno-type-limits", "-Wno-sign-compare", "-Wno-unused-variable", "-Wno-reorder", "-Wno-switch", "-Wno-return-type", "-Wno-unused-local-typedefs", "-Wno-parentheses",  "-fvisibility=hidden" , "-Wno-ignored-optimization-argument", "-Wno-unknown-warning-option", "-Wno-class-memaccess", "-Wno-bitfield-enum-conversion"} 
+         
     filter { "toolset:gcc*"}
-        buildoptions { "-Wno-unused-but-set-variable", "-Wno-implicit-fallthrough"  }
+        buildoptions { "-Wno-unused-but-set-variable", "-Wno-implicit-fallthrough" }
         
     filter { "toolset:clang" }
          buildoptions { "-Wno-deprecated-register", "-Wno-tautological-compare", "-Wno-missing-braces", "-Wno-undefined-var-template", "-Wno-unused-function", "-Wno-return-std-move"}
