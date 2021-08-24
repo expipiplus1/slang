@@ -140,7 +140,7 @@ newoption {
     trigger     = "enable-xlib",
     description = "(Optional) If true build `gfx` and `platform` with xlib to support windowed apps on linux.",
     value       = "bool",
-    default     = "true",
+    default     = "false",
     allowed     = { { "true", "True"}, { "false", "False" } }
  }
 
