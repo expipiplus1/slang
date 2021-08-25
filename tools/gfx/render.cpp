@@ -105,6 +105,7 @@ extern "C"
         switch (desc->deviceType)
         {
 #if SLANG_WINDOWS_FAMILY
+#if 0
         case DeviceType::DirectX11:
             {
                 return createD3D11Device(desc, outDevice);
@@ -113,6 +114,7 @@ extern "C"
             {
                 return createD3D12Device(desc, outDevice);
             }
+#endif 
         case DeviceType::OpenGl:
             {
                 return createGLDevice(desc, outDevice);

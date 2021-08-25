@@ -848,9 +848,9 @@ tool "gfx"
         
         addSourceDir "tools/gfx/vulkan"
         addSourceDir "tools/gfx/open-gl"
-        addSourceDir "tools/gfx/d3d" 
-        addSourceDir "tools/gfx/d3d11"
-        addSourceDir "tools/gfx/d3d12"
+        --addSourceDir "tools/gfx/d3d" 
+        --addSourceDir "tools/gfx/d3d11"
+        --addSourceDir "tools/gfx/d3d12"
     elseif targetDetail == "mingw" or targetDetail == "cygwin" then
         -- Don't support any render techs...
     elseif os.target() == "macosx" then
