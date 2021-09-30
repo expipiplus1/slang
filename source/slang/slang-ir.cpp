@@ -2604,6 +2604,12 @@ namespace Slang
             operands);
     }
 
+    IRPtrType* IRBuilder::getPtrType(IROp op, IRType* valueType, IRIntegerValue addressSpace)
+    {
+        IRInst* operands[] = {valueType, getIntValue(getIntType(), addressSpace)};
+        return (IRPtrType*)getType(op, 2, operands);
+    }
+
     IRArrayTypeBase* IRBuilder::getArrayTypeBase(
         IROp    op,
         IRType* elementType,
@@ -4087,6 +4093,18 @@ namespace Slang
         auto inst = createInst<IRInst>(
             this,
             kIROp_BitAnd,
+            type,
+            left,
+            right);
+        addInst(inst);
+        return inst;
+    }
+
+    IRInst* IRBuilder::emitBitOr(IRType* type, IRInst* left, IRInst* right)
+    {
+        auto inst = createInst<IRInst>(
+            this,
+            kIROp_BitOr,
             type,
             left,
             right);

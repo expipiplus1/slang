@@ -822,13 +822,51 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModule(
     const char*     moduleName,
     slang::IBlob**  outDiagnostics)
 {
-    auto name = getNamePool()->getName(moduleName);
+    try
+    {
+        auto name = getNamePool()->getName(moduleName);
 
-    DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
-    auto module = findOrImportModule(name, SourceLoc(), &sink);
-    sink.getBlobIfNeeded(outDiagnostics);
+        DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
+        auto module = findOrImportModule(name, SourceLoc(), &sink);
+        sink.getBlobIfNeeded(outDiagnostics);
 
-    return asExternal(module);
+        return asExternal(module);
+
+    }
+    catch (const AbortCompilationException&)
+    {
+        return nullptr;
+    }
+}
+
+SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromSource(
+    const char* moduleName,
+    slang::IBlob* source,
+    slang::IBlob** outDiagnostics)
+{
+    try
+    {
+        auto name = getNamePool()->getName(moduleName);
+        RefPtr<LoadedModule> loadedModule;
+        if (mapNameToLoadedModules.TryGetValue(name, loadedModule))
+        {
+            return loadedModule;
+        }
+        DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
+        auto module = loadModule(
+            name,
+            PathInfo::makeFromString(moduleName),
+            source,
+            SourceLoc(),
+            &sink);
+        sink.getBlobIfNeeded(outDiagnostics);
+        return asExternal(module);
+
+    }
+    catch (const AbortCompilationException&)
+    {
+        return nullptr;
+    }
 }
 
 SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createCompositeComponentType(
@@ -1043,6 +1081,34 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::getTypeConformanceWitnessSequent
     return SLANG_OK;
 }
 
+SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createTypeConformanceComponentType(
+    slang::TypeReflection* type,
+    slang::TypeReflection* interfaceType,
+    slang::ITypeConformance** outConformanceComponentType,
+    SlangInt conformanceIdOverride,
+    ISlangBlob** outDiagnostics)
+{
+    RefPtr<TypeConformance> result;
+    DiagnosticSink sink;
+    try
+    {
+        SharedSemanticsContext sharedSemanticsContext(this, nullptr, &sink);
+        SemanticsVisitor visitor(&sharedSemanticsContext);
+        auto witness =
+            visitor.tryGetSubtypeWitness((Slang::Type*)type, (Slang::Type*)interfaceType);
+        if (auto subtypeWitness = as<SubtypeWitness>(witness))
+        {
+            result = new TypeConformance(this, subtypeWitness, conformanceIdOverride, &sink);
+        }
+    }
+    catch (...)
+    {}
+    sink.getBlobIfNeeded(outDiagnostics);
+    bool success = (result != nullptr);
+    *outConformanceComponentType = result.detach();
+    return success ? SLANG_OK : SLANG_FAIL;
+}
+
 SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createCompileRequest(
     SlangCompileRequest**   outCompileRequest)
 {
@@ -1100,7 +1166,6 @@ void TargetRequest::addCapability(CapabilityAtom capability)
     cookedCapabilities = CapabilitySet::makeEmpty();
 }
 
-
 CapabilitySet TargetRequest::getTargetCaps()
 {
     if(!cookedCapabilities.isEmpty())
@@ -1131,9 +1196,18 @@ CapabilitySet TargetRequest::getTargetCaps()
     case CodeGenTarget::GLSL:
     case CodeGenTarget::GLSL_Vulkan:
     case CodeGenTarget::GLSL_Vulkan_OneDesc:
+        atoms.add(CapabilityAtom::GLSL);
+        break;
     case CodeGenTarget::SPIRV:
     case CodeGenTarget::SPIRVAssembly:
-        atoms.add(CapabilityAtom::GLSL);
+        if (targetFlags & SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY)
+        {
+            atoms.add(CapabilityAtom::SPIRV_DIRECT);
+        }
+        else
+        {
+            atoms.add(CapabilityAtom::GLSL);
+        }
         break;
 
     case CodeGenTarget::HLSL:
@@ -2418,7 +2492,7 @@ void Linkage::_diagnoseErrorInImportedModule(
 {
     for(auto info = m_modulesBeingImported; info; info = info->next)
     {
-        sink->diagnose(info->importLoc, Diagnostics::errorInImportedModule, info->name);
+            sink->diagnose(info->importLoc, Diagnostics::errorInImportedModule, info->name);
     }
     sink->diagnose(SourceLoc(), Diagnostics::complationCeased);
 }
@@ -3033,6 +3107,11 @@ struct EnumerateModulesVisitor : ComponentTypeVisitor
     {
         visitChildren(specialized);
     }
+
+    void visitTypeConformance(TypeConformance* conformance) SLANG_OVERRIDE
+    {
+        SLANG_UNUSED(conformance);
+    }
 };
 
 
@@ -3070,6 +3149,11 @@ struct EnumerateIRModulesVisitor : ComponentTypeVisitor
         visitChildren(specialized);
 
         m_callback(specialized->getIRModule(), m_userData);
+    }
+
+    void visitTypeConformance(TypeConformance* conformance) SLANG_OVERRIDE
+    {
+        m_callback(conformance->getIRModule(), m_userData);
     }
 };
 
@@ -3393,6 +3477,11 @@ struct SpecializationArgModuleCollector : ComponentTypeVisitor
     {
         visitChildren(specialized);
     }
+
+    void visitTypeConformance(TypeConformance* conformance) SLANG_OVERRIDE
+    {
+        SLANG_UNUSED(conformance);
+    }
 };
 
 SpecializedComponentType::SpecializedComponentType(
@@ -3608,7 +3697,10 @@ SpecializedComponentType::SpecializedComponentType(
         { visitChildren(composite, specializationInfo); }
         void visitSpecialized(SpecializedComponentType* specialized) SLANG_OVERRIDE
         { visitChildren(specialized); }
-
+        void visitTypeConformance(TypeConformance* conformance) SLANG_OVERRIDE
+        {
+            SLANG_UNUSED(conformance);
+        }
         EntryPointMangledNameCollector(ASTBuilder* astBuilder):
             m_astBuilder(astBuilder)
         {
@@ -3867,6 +3959,13 @@ void EndToEndCompileRequest::setCompileFlags(SlangCompileFlags flags)
 void EndToEndCompileRequest::setDumpIntermediates(int enable)
 {
     getBackEndReq()->shouldDumpIntermediates = (enable != 0);
+
+    // Change all existing targets to use the new setting.
+    auto linkage = getLinkage();
+    for (auto& target : linkage->targets)
+    {
+        target->setDumpIntermediates(enable != 0);
+    }
 }
 
 void EndToEndCompileRequest::setDumpIntermediatePrefix(const char* prefix)

@@ -194,12 +194,19 @@ static void glslang_optimizeSPIRV(std::vector<unsigned int>& spirv, spv_target_e
             optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
         }
 #elif 1
-        // 6Mb 27 secs (9) 
-        // 9Mb 25 secs (7)
-        // 8Mb 15 secs -(5,6,7)
-        // 6Mb 15 secs -(6,7) 
+        // 6Mb 27 secs (all passes up to 9) 
+        // 9Mb 25 secs (all passes up to 7)
+        // 8Mb 15 secs (all passes) -(5,6,7)
+        // 6Mb 15 secs (all passes) -(6,7) 
 
-         // This is the previous 'default optimization' passes setting for glslang
+        // This list of passes takes the previous 'default optimization'
+        // passes (as listed above) and tries to combine them in order with the 'new' passes below.
+        // The issue with the passes below is that although it produces smaller SPIR-V fairly quickly
+        // it can cause serious problem on some drivers.
+        // 
+        // Across a wide range of compilations this produced SPIR-V that is less than half size of the
+        // previous -O1 passes above.
+
         {
             optimizer.RegisterPass(spvtools::CreateWrapOpKillPass());           // 1
             optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());       // 2
