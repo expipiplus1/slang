@@ -96,6 +96,8 @@ void ShaderCompilerUtil::Output::reset()
 
     spSetCodeGenTarget(slangRequest, input.target);
     spSetTargetProfile(slangRequest, 0, spFindProfile(out.session, input.profile.getBuffer()));
+    if (options.generateSPIRVDirectly)
+        spSetTargetFlags(slangRequest, 0, SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY);
 
     // Define a macro so that shader code in a test can detect what language we
     // are nominally working with.
@@ -233,6 +235,37 @@ void ShaderCompilerUtil::Output::reset()
         actualEntryPoints = request.entryPoints;
     }
 
+    if (request.typeConformances.getCount())
+    {
+        ComPtr<slang::ISession> session;
+        slangRequest->getSession(session.writeRef());
+        List<ComPtr<slang::ITypeConformance>> typeConformanceComponents;
+        List<slang::IComponentType*> componentsRawPtr;
+        componentsRawPtr.add(linkedSlangProgram.get());
+        auto reflection = slang::ProgramLayout::get(slangRequest);
+        ComPtr<ISlangBlob> outDiagnostic;
+        for (auto& conformance : request.typeConformances)
+        {
+            auto derivedType = reflection->findTypeByName(conformance.derivedTypeName.getBuffer());
+            auto baseType = reflection->findTypeByName(conformance.baseTypeName.getBuffer());
+            ComPtr<slang::ITypeConformance> conformanceComponentType;
+            session->createTypeConformanceComponentType(
+                derivedType,
+                baseType,
+                conformanceComponentType.writeRef(),
+                conformance.idOverride,
+                outDiagnostic.writeRef());
+            typeConformanceComponents.add(conformanceComponentType);
+            componentsRawPtr.add(conformanceComponentType);
+        }
+        ComPtr<slang::IComponentType> newProgram;
+        session->createCompositeComponentType(
+            componentsRawPtr.getBuffer(),
+            componentsRawPtr.getCount(),
+            newProgram.writeRef(),
+            outDiagnostic.writeRef());
+        linkedSlangProgram = newProgram;
+    }
     out.set(input.pipelineType, linkedSlangProgram);
     return SLANG_OK;
 }
@@ -413,6 +446,14 @@ void ShaderCompilerUtil::Output::reset()
     }
     compileRequest.globalSpecializationArgs = layout.globalSpecializationArgs;
     compileRequest.entryPointSpecializationArgs = layout.entryPointSpecializationArgs;
+    for (auto conformance : layout.typeConformances)
+    {
+        ShaderCompileRequest::TypeConformance c;
+        c.derivedTypeName = conformance.derivedTypeName;
+        c.baseTypeName = conformance.baseTypeName;
+        c.idOverride = conformance.idOverride;
+        compileRequest.typeConformances.add(c);
+    }
     return ShaderCompilerUtil::compileProgram(session, options, input, compileRequest, output.output);
 }
 

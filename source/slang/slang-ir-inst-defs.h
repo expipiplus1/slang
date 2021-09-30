@@ -502,7 +502,13 @@ INST(GpuForeach, gpuForeach, 3, 0)
 INST(GetOptiXRayPayloadPtr, getOptiXRayPayloadPtr, 0, 0)
 
 // Wrapper for OptiX intrinsics used to load a single hit attribute
-INST(GetOptiXHitAttribute, getOptiXHitAttribute, 1, 0)
+// Takes two arguments: the type (either float or int), and the hit 
+// attribute index
+INST(GetOptiXHitAttribute, getOptiXHitAttribute, 2, 0)
+
+// Wrapper for OptiX intrinsics used to load shader binding table record data
+// using a pointer. 
+INST(GetOptiXSbtDataPtr, getOptiXSbtDataPointer, 0, 0)
 
 /* Decoration */
 
@@ -621,10 +627,13 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
 
     INST(SemanticDecoration, semantic, 2, 0)
 
-    INST_RANGE(Decoration, HighLevelDeclDecoration, SemanticDecoration)
+        /// Marks a struct type as being used as a structured buffer block.
+        /// Recognized by SPIRV-emit pass so we can emit a SPIRV `BufferBlock` decoration.
+    INST(SPIRVBufferBlockDecoration, spvBufferBlock, 0, 0)
 
+    INST_RANGE(Decoration, HighLevelDeclDecoration, SPIRVBufferBlockDecoration)
 
-//
+    //
 
 // A `makeExistential(v : C, w) : I` instruction takes a value `v` of type `C`
 // and produces a value of interface type `I` by using the witness `w` which
@@ -635,6 +644,9 @@ INST(MakeExistential,                   makeExistential,                2, 0)
 // but with the type of `v` being an explict operand.
 INST(MakeExistentialWithRTTI,           makeExistentialWithRTTI,        3, 0)
 
+// A 'CreateExistentialObject<I>(typeID, T)` packs user-provided `typeID` and a
+// value of any type, and constructs an existential value of type `I`.
+INST(CreateExistentialObject,           createExistentialObject,        2, 0)
 
 // A `wrapExistential(v, T0,w0, T1,w0) : T` instruction is similar to `makeExistential`.
 // but applies to a value `v` that is of type `BindExistentials(T, T0,w0, ...)`. The
@@ -656,6 +668,7 @@ INST(ExtractTaggedUnionTag,             extractTaggedUnionTag,      1, 0)
 INST(ExtractTaggedUnionPayload,         extractTaggedUnionPayload,  1, 0)
 
 INST(BitCast,                           bitCast,                    1, 0)
+INST(Reinterpret,                       reinterpret,                1, 0)
 
 // Converts other resources (such as ByteAddressBuffer) to the equivalent StructuredBuffer
 INST(GetEquivalentStructuredBuffer,     getEquivalentStructuredBuffer, 1, 0)
@@ -696,4 +709,3 @@ INST_RANGE(Attr, PendingLayoutAttr, VarOffsetAttr)
 #undef USE_OTHER
 #undef INST_RANGE
 #undef INST
-

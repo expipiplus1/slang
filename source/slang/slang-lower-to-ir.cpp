@@ -4345,13 +4345,13 @@ struct StmtLoweringVisitor : StmtVisitor<StmtLoweringVisitor>
         auto builder = getBuilder();
         startBlockIfNeeded(stmt);
 
-        auto renderer = getSimpleVal(context, lowerRValueExpr(context, stmt->renderer));
+        auto device = getSimpleVal(context, lowerRValueExpr(context, stmt->device));
         auto gridDims = getSimpleVal(context, lowerRValueExpr(context, stmt->gridDims));
 
         List<IRInst*> irArgs;
         if (auto callExpr = as<InvokeExpr>(stmt->kernelCall))
         {
-            irArgs.add(renderer);
+            irArgs.add(device);
             irArgs.add(gridDims);
             auto fref = getSimpleVal(context, lowerRValueExpr(context, callExpr->functionExpr));
             irArgs.add(fref);
@@ -6702,9 +6702,18 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             {
                 HashSet<IRInst*> valuesToClone;
                 markInstsToClone(valuesToClone, parentGeneric->getFirstBlock(), returnType);
+                // For Function Types, we always clone all generic parameters regardless of whether
+                // the generic parameter appears in the function signature or not.
+                if (returnType->getOp() == kIROp_FuncType)
+                {
+                    for (auto genericParam : parentGeneric->getParams())
+                    {
+                        markInstsToClone(valuesToClone, parentGeneric->getFirstBlock(), genericParam);
+                    }
+                }
                 if (valuesToClone.Count() == 0)
                 {
-                    // If returnType is independent of generic parameters, set
+                    // If the new generic has no parameters, set
                     // the generic inst's type to just `returnType`.
                     parentGeneric->setFullType((IRType*)returnType);
                 }
@@ -6727,8 +6736,17 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
                     }
                     IRInst* clonedReturnType = nullptr;
                     cloneEnv.mapOldValToNew.TryGetValue(returnType, clonedReturnType);
-                    SLANG_ASSERT(clonedReturnType);
-                    typeBuilder.emitReturn(clonedReturnType);
+                    if (clonedReturnType)
+                    {
+                        // If the type has explicit dependency on generic parameters, use
+                        // the cloned type.
+                        typeBuilder.emitReturn(clonedReturnType);
+                    }
+                    else
+                    {
+                        // Otherwise just use the original type value directly.
+                        typeBuilder.emitReturn(returnType);
+                    }
                     parentGeneric->setFullType((IRType*)typeGeneric);
                     returnType = typeGeneric;
                 }
@@ -8255,6 +8273,11 @@ struct SpecializedComponentTypeIRGenContext : ComponentTypeVisitor
     {
         visitChildren(specialized);
     }
+
+    void visitTypeConformance(TypeConformance* conformance) SLANG_OVERRIDE
+    {
+        SLANG_UNUSED(conformance);
+    }
 };
 
 RefPtr<IRModule> generateIRForSpecializedComponentType(
@@ -8265,6 +8288,65 @@ RefPtr<IRModule> generateIRForSpecializedComponentType(
     return context.process(componentType, sink);
 }
 
+    /// Context for generating IR code to represent a `TypeConformance`
+struct TypeConformanceIRGenContext
+{
+    DiagnosticSink* sink;
+    Linkage* linkage;
+    Session* session;
+    IRGenContext* context;
+    IRBuilder* builder;
+
+    RefPtr<IRModule> process(
+        TypeConformance* typeConformance,
+        Int conformanceIdOverride,
+        DiagnosticSink* inSink)
+    {
+        sink = inSink;
+
+        linkage = typeConformance->getLinkage();
+        session = linkage->getSessionImpl();
+
+        SharedIRGenContext sharedContextStorage(session, sink, linkage->m_obfuscateCode);
+        SharedIRGenContext* sharedContext = &sharedContextStorage;
+
+        IRGenContext contextStorage(sharedContext, linkage->getASTBuilder());
+        context = &contextStorage;
+
+        SharedIRBuilder sharedBuilderStorage;
+        SharedIRBuilder* sharedBuilder = &sharedBuilderStorage;
+        sharedBuilder->module = nullptr;
+        sharedBuilder->session = session;
+
+        IRBuilder builderStorage;
+        builder = &builderStorage;
+        builder->sharedBuilder = sharedBuilder;
+
+        RefPtr<IRModule> module = builder->createModule();
+        sharedBuilder->module = module;
+
+        builder->setInsertInto(module->getModuleInst());
+
+        context->irBuilder = builder;
+
+        auto witness = lowerSimpleVal(context, typeConformance->getSubtypeWitness());
+        builder->addPublicDecoration(witness);
+        if (conformanceIdOverride != -1)
+        {
+            builder->addSequentialIDDecoration(witness, conformanceIdOverride);
+        }
+        return module;
+    }
+};
+
+RefPtr<IRModule> generateIRForTypeConformance(
+    TypeConformance* typeConformance,
+    Int conformanceIdOverride,
+    DiagnosticSink* sink)
+{
+    TypeConformanceIRGenContext context;
+    return context.process(typeConformance, conformanceIdOverride, sink);
+}
 
 RefPtr<IRModule> TargetProgram::getOrCreateIRModuleForLayout(DiagnosticSink* sink)
 {

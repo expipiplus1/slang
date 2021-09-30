@@ -1726,6 +1726,14 @@ struct IRMakeExistentialWithRTTI : IRInst
     IR_LEAF_ISA(MakeExistentialWithRTTI)
 };
 
+struct IRCreateExistentialObject : IRInst
+{
+    IRInst* getTypeID() { return getOperand(0); }
+    IRInst* getValue() { return getOperand(1); }
+
+    IR_LEAF_ISA(CreateExistentialObject)
+};
+
     /// Generalizes `IRMakeExistential` by allowing a type with existential sub-fields to be boxed
 struct IRWrapExistential : IRInst
 {
@@ -1904,6 +1912,7 @@ struct IRBuilder
     IRInOutType*  getInOutType(IRType* valueType);
     IRRefType*  getRefType(IRType* valueType);
     IRPtrTypeBase*  getPtrType(IROp op, IRType* valueType);
+    IRPtrType* getPtrType(IROp op, IRType* valueType, IRIntegerValue addressSpace);
 
     IRArrayTypeBase* getArrayTypeBase(
         IROp    op,
@@ -2437,6 +2446,7 @@ struct IRBuilder
     IRInst* emitWaveMaskMatch(IRType* type, IRInst* mask, IRInst* value);
 
     IRInst* emitBitAnd(IRType* type, IRInst* left, IRInst* right);
+    IRInst* emitBitOr(IRType* type, IRInst* left, IRInst* right);
     IRInst* emitBitNot(IRType* type, IRInst* value);
 
     IRInst* emitAdd(IRType* type, IRInst* left, IRInst* right);
@@ -2733,6 +2743,14 @@ IRTargetSpecificDecoration* findBestTargetDecoration(
 IRTargetSpecificDecoration* findBestTargetDecoration(
         IRInst*         val,
         CapabilityAtom  targetCapabilityAtom);
+
+inline IRTargetIntrinsicDecoration* findBestTargetIntrinsicDecoration(
+    IRInst* inInst,
+    CapabilitySet const& targetCaps)
+{
+    return as<IRTargetIntrinsicDecoration>(findBestTargetDecoration(inInst, targetCaps));
+}
+
 
 }
 
