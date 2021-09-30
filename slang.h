@@ -373,7 +373,7 @@ convention for interface methods.
 #   endif
 #elif defined(__arm__)
 #   define SLANG_PROCESSOR_ARM 1
-#elif defined(__aarch64__)
+#elif defined(_M_ARM64) || defined(__aarch64__)
 #   define SLANG_PROCESSOR_ARM_64 1
 #endif 
 
@@ -557,6 +557,7 @@ extern "C"
         SLANG_PASS_THROUGH_GCC,                     ///< GCC C/C++ compiler
         SLANG_PASS_THROUGH_GENERIC_C_CPP,           ///< Generic C or C++ compiler, which is decided by the source type
         SLANG_PASS_THROUGH_NVRTC,                   ///< NVRTC Cuda compiler
+        SLANG_PASS_THROUGH_LLVM,                    ///< LLVM 'compiler' - includes LLVM and Clang
         SLANG_PASS_THROUGH_COUNT_OF,
     };
 
@@ -613,7 +614,10 @@ extern "C"
         SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM = 1 << 8,
 
         /* When set, will dump out the IR between intermediate compilation steps.*/
-        SLANG_TARGET_FLAG_DUMP_IR = 1 << 9
+        SLANG_TARGET_FLAG_DUMP_IR = 1 << 9,
+
+        /* When set, will generate SPIRV directly instead of going through glslang. */
+        SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY = 1 << 10,
     };
 
     /*!
@@ -3047,6 +3051,7 @@ namespace slang
     typedef ISlangBlob IBlob;
 
     struct IComponentType;
+    struct ITypeConformance;
     struct IGlobalSession;
     struct IModule;
     struct ISession;
@@ -3926,6 +3931,13 @@ namespace slang
             const char* moduleName,
             IBlob**     outDiagnostics = nullptr) = 0;
 
+            /** Load a module from Slang source code.
+            */
+        virtual SLANG_NO_THROW IModule* SLANG_MCALL loadModuleFromSource(
+            const char* moduleName,
+            slang::IBlob* source,
+            slang::IBlob** outDiagnostics = nullptr) = 0;
+
             /** Combine multiple component types to create a composite component type.
 
             The `componentTypes` array must contain `componentTypeCount` pointers
@@ -4020,6 +4032,32 @@ namespace slang
             */
         virtual SLANG_NO_THROW SlangResult SLANG_MCALL createCompileRequest(
             SlangCompileRequest**   outCompileRequest) = 0;
+
+        
+            /** Creates a `IComponentType` that represents a type's conformance to an interface.
+                The retrieved `ITypeConformance` objects can be included in a composite `IComponentType`
+                to explicitly specify which implementation types should be included in the final compiled
+                code. For example, if an module defines `IMaterial` interface and `AMaterial`,
+                `BMaterial`, `CMaterial` types that implements the interface, the user can exclude
+                `CMaterial` implementation from the resulting shader code by explcitly adding
+                `AMaterial:IMaterial` and `BMaterial:IMaterial` conformances to a composite
+                `IComponentType` and get entry point code from it. The resulting code will not have
+                anything related to `CMaterial` in the dynamic dispatch logic. If the user does not
+                explicitly include any `TypeConformances` to an interface type, all implementations to
+                that interface will be included by default. By linking a `ITypeConformance`, the user is
+                also given the opportunity to specify the dispatch ID of the implementation type. If
+                `conformanceIdOverride` is -1, there will be no override behavior and Slang will
+                automatically assign IDs to implementation types. The automatically assigned IDs can be
+                queried via `ISession::getTypeConformanceWitnessSequentialID`.
+
+                Returns SLANG_OK if succeeds, or SLANG_FAIL if `type` does not conform to `interfaceType`.
+            */
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL createTypeConformanceComponentType(
+            slang::TypeReflection* type,
+            slang::TypeReflection* interfaceType,
+            ITypeConformance** outConformance,
+            SlangInt conformanceIdOverride,
+            ISlangBlob** outDiagnostics) = 0;
     };
 
     #define SLANG_UUID_ISession ISession::getTypeGuid()
@@ -4200,6 +4238,12 @@ namespace slang
     };
 
     #define SLANG_UUID_IEntryPoint IEntryPoint::getTypeGuid()
+
+    struct ITypeConformance : public IComponentType
+    {
+        SLANG_COM_INTERFACE(0x73eb3147, 0xe544, 0x41b5, { 0xb8, 0xf0, 0xa2, 0x44, 0xdf, 0x21, 0x94, 0xb })
+    };
+    #define SLANG_UUID_ITypeConformance ITypeConformance::getTypeGuid()
 
         /** A module is the granularity of shader code compilation and loading.
 

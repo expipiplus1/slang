@@ -17,6 +17,8 @@
 #include "../../source/core/slang-process-util.h"
 #include "../../source/core/slang-render-api-util.h"
 
+#include "tools/unit-test/slang-unit-test.h"
+#undef SLANG_UNIT_TEST
 
 #include "directory-util.h"
 #include "test-context.h"
@@ -38,6 +40,7 @@
 
 #define SLANG_PRELUDE_NAMESPACE CPPPrelude
 #include "../../prelude/slang-cpp-types.h"
+
 
 using namespace Slang;
 
@@ -3389,6 +3392,51 @@ static void _disableCPPBackends(TestContext* context)
     }
 }
 
+    /// Loads a DLL containing unit test functions and run them one by one.
+static SlangResult runUnitTestModule(TestContext* context, TestOptions& testOptions, const char* moduleName)
+{
+    SharedLibrary::Handle moduleHandle;
+    SLANG_RETURN_ON_FAIL(SharedLibrary::load(
+        Path::combine(context->exeDirectoryPath, moduleName).getBuffer(),
+        moduleHandle));
+    UnitTestGetModuleFunc getModuleFunc =
+        (UnitTestGetModuleFunc) SharedLibrary::findSymbolAddressByName(
+            moduleHandle, "slangUnitTestGetModule");
+    if (!getModuleFunc)
+        return SLANG_FAIL;
+
+    IUnitTestModule* testModule = getModuleFunc();
+    if (!testModule)
+        return SLANG_FAIL;
+    testModule->setTestReporter(TestReporter::get());
+    UnitTestContext unitTestContext;
+    unitTestContext.slangGlobalSession = context->getSession();
+    unitTestContext.workDirectory = "";
+    unitTestContext.enabledApis = context->options.enabledApis;
+    auto testCount = testModule->getTestCount();
+    for (SlangInt i = 0; i < testCount; i++)
+    {
+        auto testFunc = testModule->getTestFunc(i);
+        auto testName = testModule->getTestName(i);
+
+        StringBuilder filePath;
+        filePath << moduleName << "/" << testName << ".internal";
+
+        testOptions.command = filePath;
+
+        if (shouldRunTest(context, testOptions.command))
+        {
+            if (testPassesCategoryMask(context, testOptions))
+            {
+                TestReporter::get()->startTest(testOptions.command.getBuffer());
+                testFunc(&unitTestContext);
+                TestReporter::get()->endTest();
+            }
+        }
+    }
+    testModule->destroy();
+    return SLANG_OK;
+}
 
 SlangResult innerMain(int argc, char** argv)
 {
@@ -3430,46 +3478,40 @@ SlangResult innerMain(int argc, char** argv)
     // An un-categorized test will always belong to the `full` category
     categorySet.defaultCategory = fullTestCategory;
 
-    TestCategory* fxcCategory = nullptr;
-    TestCategory* dxcCategory = nullptr;
-    TestCategory* glslangCategory = nullptr;
-    TestCategory* nvrtcCategory = nullptr; 
+    // All following values are initialized to '0', so null.
+    TestCategory* passThroughCategories[SLANG_PASS_THROUGH_COUNT_OF] = { nullptr };
 
     // Work out what backends/pass-thrus are available
     {
         SlangSession* session = context.getSession();
 
+        StdWriters::getOut().print("Supported backends:");
+
         for (int i = 0; i < SLANG_PASS_THROUGH_COUNT_OF; ++i)
         {
-            SlangPassThrough passThru = SlangPassThrough(i);
+            const SlangPassThrough passThru = SlangPassThrough(i);
+            if (passThru == SLANG_PASS_THROUGH_NONE)
+            {
+                continue;
+            }
 
             if (SLANG_SUCCEEDED(spSessionCheckPassThroughSupport(session, passThru)))
             {
                 context.availableBackendFlags |= PassThroughFlags(1) << int(i);
+
+                StringBuilder buf;
+
+                auto name = TypeTextUtil::getPassThroughName(passThru);
+
+                buf << " " << name;
+
+                SLANG_ASSERT(passThroughCategories[i] == nullptr);
+                passThroughCategories[i] = categorySet.add(buf.getBuffer() + 1, fullTestCategory);
+
+                StdWriters::getOut().write(buf.getBuffer(), buf.getLength());
             }
         }
 
-        StdWriters::getOut().print("Supported backends:");
-        if (context.availableBackendFlags & PassThroughFlag::Fxc)
-        {
-            StdWriters::getOut().print(" fxc");
-            fxcCategory = categorySet.add("fxc", fullTestCategory);
-        }
-        if (context.availableBackendFlags & PassThroughFlag::Glslang)
-        {
-            StdWriters::getOut().print(" glslang");
-            glslangCategory = categorySet.add("glslang", fullTestCategory);
-        }
-        if (context.availableBackendFlags & PassThroughFlag::Dxc)
-        {
-            StdWriters::getOut().print(" dxc");
-            dxcCategory = categorySet.add("dxc", fullTestCategory);
-        }
-        if (context.availableBackendFlags & PassThroughFlag::NVRTC)
-        {
-            StdWriters::getOut().print(" nvrtc");
-            nvrtcCategory = categorySet.add("nvrtc", fullTestCategory);
-        }
         StdWriters::getOut().print("\n");
     }
 
@@ -3570,36 +3612,17 @@ SlangResult innerMain(int argc, char** argv)
             TestReporter::set(&reporter);
 
             // Run the unit tests
-            TestRegister* cur = TestRegister::s_first;
-            while (cur)
             {
-                StringBuilder filePath;
-                filePath << "unit-tests/" << cur->m_name << ".internal";
-
                 TestOptions testOptions;
                 testOptions.categories.add(unitTestCategory);
                 testOptions.categories.add(smokeTestCategory);
-                testOptions.command = filePath;
-
-                if (shouldRunTest(&context, testOptions.command))
-                {
-                    if (testPassesCategoryMask(&context, testOptions))
-                    {
-                        reporter.startTest(testOptions.command);
-                        // Run the test function
-                        cur->m_func();
-                        reporter.endTest();
-                    }
-                    else
-                    {
-                        reporter.addTest(testOptions.command, TestResult::Ignored);
-                    }
-                }
-
-                // Next
-                cur = cur->m_next;
+                runUnitTestModule(&context, testOptions, "slang-unit-test-tool");
             }
-
+            {
+                TestOptions testOptions;
+                testOptions.categories.add(unitTestCategory);
+                runUnitTestModule(&context, testOptions, "gfx-unit-test-tool");
+            }
             TestReporter::set(nullptr);
         }
 

@@ -37,6 +37,14 @@
 #include <unistd.h>
 #endif
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+#undef WIN32_LEAN_AND_MEAN
+#undef NOMINMAX
+#endif
+
 #ifdef _MSC_VER
 #pragma warning(disable: 4996)
 #endif
@@ -296,6 +304,92 @@ namespace Slang
         return empty;
     }
 
+    TypeConformance::TypeConformance(
+        Linkage* linkage,
+        SubtypeWitness* witness,
+        Int confomrmanceIdOverride,
+        DiagnosticSink* sink)
+        : ComponentType(linkage)
+        , m_subtypeWitness(witness)
+        , m_conformanceIdOverride(confomrmanceIdOverride)
+    {
+        addDepedencyFromWitness(witness);
+        m_irModule = generateIRForTypeConformance(this, m_conformanceIdOverride, sink);
+    }
+
+    void TypeConformance::addDepedencyFromWitness(SubtypeWitness* witness)
+    {
+        if (auto declaredWitness = as<DeclaredSubtypeWitness>(witness))
+        {
+            auto declModule = getModule(declaredWitness->declRef.getDecl());
+            m_moduleDependency.addDependency(declModule);
+            m_pathDependency.addDependency(declModule);
+            if (m_requirementSet.Add(declModule))
+            {
+                m_requirements.add(declModule);
+            }
+            // TODO: handle the specialization arguments in declaredWitness->declRef.substitutions.
+        }
+        else if (auto transitiveWitness = as<TransitiveSubtypeWitness>(witness))
+        {
+            addDepedencyFromWitness(transitiveWitness->midToSup);
+            addDepedencyFromWitness(transitiveWitness->subToMid);
+        }
+        else if (auto conjunctionWitness = as<ConjunctionSubtypeWitness>(witness))
+        {
+            auto left = as<SubtypeWitness>(conjunctionWitness->leftWitness);
+            if (left)
+                addDepedencyFromWitness(left);
+            auto right = as<SubtypeWitness>(conjunctionWitness->rightWitness);
+            if (right)
+                addDepedencyFromWitness(right);
+        }
+    }
+
+    ISlangUnknown* TypeConformance::getInterface(const Guid& guid)
+    {
+        if (guid == slang::ITypeConformance::getTypeGuid())
+            return static_cast<slang::ITypeConformance*>(this);
+
+        return Super::getInterface(guid);
+    }
+
+    List<Module*> const& TypeConformance::getModuleDependencies()
+    {
+        return m_moduleDependency.getModuleList();
+    }
+
+    List<String> const& TypeConformance::getFilePathDependencies()
+    {
+        return m_pathDependency.getFilePathList();
+    }
+
+    Index TypeConformance::getRequirementCount() { return m_requirements.getCount(); }
+
+    RefPtr<ComponentType> TypeConformance::getRequirement(Index index)
+    {
+        return m_requirements[index];
+    }
+
+    void TypeConformance::acceptVisitor(
+        ComponentTypeVisitor* visitor,
+        ComponentType::SpecializationInfo* specializationInfo)
+    {
+        SLANG_UNUSED(specializationInfo);
+        visitor->visitTypeConformance(this);
+    }
+
+    RefPtr<ComponentType::SpecializationInfo> TypeConformance::_validateSpecializationArgsImpl(
+        SpecializationArg const* args,
+        Index argCount,
+        DiagnosticSink* sink)
+    {
+        SLANG_UNUSED(args);
+        SLANG_UNUSED(argCount);
+        SLANG_UNUSED(sink);
+        return nullptr;
+    }
+
     //
 
     Profile Profile::lookUp(UnownedStringSlice const& name)
@@ -394,6 +488,7 @@ namespace Slang
             {
                 return SourceLanguage::GLSL;
             }
+            case PassThroughMode::LLVM:
             case PassThroughMode::Clang:
             case PassThroughMode::VisualStudio:
             case PassThroughMode::Gcc:
@@ -407,6 +502,7 @@ namespace Slang
             {
                 return SourceLanguage::CUDA;
             }
+            
             default: break;
         }
         SLANG_ASSERT(!"Unknown compiler");
@@ -1442,7 +1538,7 @@ namespace Slang
             {
                 RefPtr<DownstreamCompileResult> downstreamResult;
 
-                if (target == CodeGenTarget::SPIRV && compileRequest->shouldEmitSPIRVDirectly)
+                if (target == CodeGenTarget::SPIRV && targetReq->shouldEmitSPIRVDirectly())
                 {
                     List<uint8_t> spirv;
                     SLANG_RETURN_ON_FAIL(emitSPIRVForEntryPointsDirectly(compileRequest, entryPointIndices, targetReq, spirv));
@@ -1705,6 +1801,13 @@ namespace Slang
                 ComPtr<ISlangBlob> blob;
                 if (SLANG_FAILED(result.getBlob(blob)))
                 {
+                    if (targetReq->getTarget() == CodeGenTarget::HostCallable)
+                    {
+                        // Some HostCallable are not directly representable as a 'binary'.
+                        // So here, we just ignore if that appears the case, and don't output an unexpected error.
+                        return;
+                    }
+
                     SLANG_UNEXPECTED("No blob to emit");
                     return;
                 }
@@ -1963,6 +2066,7 @@ namespace Slang
             m_program);
         backEndRequest->shouldDumpIR =
             (m_targetReq->getTargetFlags() & SLANG_TARGET_FLAG_DUMP_IR) != 0;
+        backEndRequest->shouldDumpIntermediates = m_targetReq->shouldDumpIntermediates();
 
         return _createEntryPointResult(
             entryPointIndex,
@@ -2008,16 +2112,17 @@ namespace Slang
         SerialContainerUtil::WriteOptions options;
 
         options.compressionType = linkage->serialCompressionType;
-        if (linkage->debugInfoLevel != DebugInfoLevel::None)
-        {
-            options.optionFlags |= SerialOptionFlag::SourceLocation;
-        }
         if (linkage->m_obfuscateCode)
         {
             // If code is obfuscated, we *disable* AST output as it is not obfuscated and will reveal
             // too much about IR.
             // Also currently only IR is needed.
             options.optionFlags &= ~SerialOptionFlag::ASTModule;
+        }
+        else if (linkage->debugInfoLevel != DebugInfoLevel::None && linkage->getSourceManager())
+        {
+            options.optionFlags |= SerialOptionFlag::SourceLocation;
+            options.sourceManager = linkage->getSourceManager();
         }
 
         {
@@ -2194,7 +2299,7 @@ namespace Slang
         // really need/want to do anything too elaborate
 
         static uint32_t counter = 0;
-#ifdef WIN32
+#ifdef _WIN32
         uint32_t id = InterlockedIncrement(&counter);
 #else
         // TODO: actually implement the case for other platforms
