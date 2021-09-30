@@ -1264,6 +1264,13 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
     StdWritersDebugCallback debugCallback;
     debugCallback.writers = stdWriters;
     gfxSetDebugCallback(&debugCallback);
+    struct ResetDebugCallbackRAII
+    {
+        ~ResetDebugCallbackRAII()
+        {
+            gfxSetDebugCallback(nullptr);
+        }
+    } resetDebugCallbackRAII;
 
     // Use the profile name set on options if set
     input.profile = options.profileName.getLength() ? options.profileName : input.profile;
@@ -1326,6 +1333,8 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         desc.adapter = options.adapter.getBuffer();
 
         desc.slang.lineDirectiveMode = SLANG_LINE_DIRECTIVE_MODE_NONE;
+        if (options.generateSPIRVDirectly)
+            desc.slang.targetFlags = SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY;
 
         List<const char*> requiredFeatureList;
         for (auto& name : options.renderFeatures)

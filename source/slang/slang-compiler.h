@@ -850,6 +850,125 @@ namespace Slang
         Profile m_profile;
     };
 
+    class TypeConformance
+        : public ComponentType
+        , public slang::ITypeConformance
+    {
+        typedef ComponentType Super;
+
+    public:
+        SLANG_REF_OBJECT_IUNKNOWN_ALL
+
+        ISlangUnknown* getInterface(const Guid& guid);
+
+        TypeConformance(
+            Linkage* linkage,
+            SubtypeWitness* witness,
+            Int confomrmanceIdOverride,
+            DiagnosticSink* sink);
+
+        // Forward `IComponentType` methods
+
+        SLANG_NO_THROW slang::ISession* SLANG_MCALL getSession() SLANG_OVERRIDE
+        {
+            return Super::getSession();
+        }
+
+        SLANG_NO_THROW slang::ProgramLayout* SLANG_MCALL
+            getLayout(SlangInt targetIndex, slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getLayout(targetIndex, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointCode(
+            SlangInt entryPointIndex,
+            SlangInt targetIndex,
+            slang::IBlob** outCode,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getEntryPointCode(entryPointIndex, targetIndex, outCode, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL specialize(
+            slang::SpecializationArg const* specializationArgs,
+            SlangInt specializationArgCount,
+            slang::IComponentType** outSpecializedComponentType,
+            ISlangBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::specialize(
+                specializationArgs,
+                specializationArgCount,
+                outSpecializedComponentType,
+                outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL link(
+            slang::IComponentType** outLinkedComponentType,
+            ISlangBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::link(outLinkedComponentType, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointHostCallable(
+            int entryPointIndex,
+            int targetIndex,
+            ISlangSharedLibrary** outSharedLibrary,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getEntryPointHostCallable(
+                entryPointIndex, targetIndex, outSharedLibrary, outDiagnostics);
+        }
+
+        List<Module*> const& getModuleDependencies() SLANG_OVERRIDE;
+        List<String> const& getFilePathDependencies() SLANG_OVERRIDE;
+
+        SLANG_NO_THROW Index SLANG_MCALL getSpecializationParamCount() SLANG_OVERRIDE { return 0; }
+
+        /// Get the existential type parameter at `index`.
+        SpecializationParam const& getSpecializationParam(Index /*index*/) SLANG_OVERRIDE
+        {
+            static SpecializationParam emptyParam;
+            return emptyParam;
+        }
+
+        Index getRequirementCount() SLANG_OVERRIDE;
+        RefPtr<ComponentType> getRequirement(Index index) SLANG_OVERRIDE;
+        Index getEntryPointCount() SLANG_OVERRIDE { return 0; };
+        RefPtr<EntryPoint> getEntryPoint(Index index) SLANG_OVERRIDE
+        {
+            SLANG_UNUSED(index);
+            return nullptr;
+        }
+        String getEntryPointMangledName(Index /*index*/) SLANG_OVERRIDE { return ""; }
+
+        Index getShaderParamCount() SLANG_OVERRIDE { return 0; }
+        ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE
+        {
+            SLANG_UNUSED(index);
+            return ShaderParamInfo();
+        }
+
+        SubtypeWitness* getSubtypeWitness() { return m_subtypeWitness; }
+        IRModule* getIRModule() { return m_irModule.Ptr(); }
+    protected:
+        void acceptVisitor(ComponentTypeVisitor* visitor, SpecializationInfo* specializationInfo)
+            SLANG_OVERRIDE;
+
+        RefPtr<SpecializationInfo> _validateSpecializationArgsImpl(
+            SpecializationArg const* args,
+            Index argCount,
+            DiagnosticSink* sink) SLANG_OVERRIDE;
+    private:
+        SubtypeWitness* m_subtypeWitness;
+        ModuleDependencyList m_moduleDependency;
+        FilePathDependencyList m_pathDependency;
+        List<RefPtr<Module>> m_requirements;
+        HashSet<Module*> m_requirementSet;
+        RefPtr<IRModule> m_irModule;
+        Int m_conformanceIdOverride;
+        void addDepedencyFromWitness(SubtypeWitness* witness);
+    };
+
     enum class PassThroughMode : SlangPassThroughIntegral
     {
         None = SLANG_PASS_THROUGH_NONE,	                    ///< don't pass through: use Slang compiler
@@ -860,7 +979,8 @@ namespace Slang
         VisualStudio = SLANG_PASS_THROUGH_VISUAL_STUDIO,    ///< Visual studio compiler
         Gcc = SLANG_PASS_THROUGH_GCC,                       ///< Gcc compiler
         GenericCCpp = SLANG_PASS_THROUGH_GENERIC_C_CPP,     ///< Generic C/C++ compiler
-        NVRTC = SLANG_PASS_THROUGH_NVRTC,
+        NVRTC = SLANG_PASS_THROUGH_NVRTC,                   ///< NVRTC CUDA compiler
+        LLVM = SLANG_PASS_THROUGH_LLVM,                     ///< LLVM 'compiler'
         CountOf = SLANG_PASS_THROUGH_COUNT_OF,              
     };
     void printDiagnosticArg(StringBuilder& sb, PassThroughMode val);
@@ -1182,13 +1302,23 @@ namespace Slang
         {
             lineDirectiveMode = mode;
         }
+        void setDumpIntermediates(bool value)
+        {
+            dumpIntermediates = value;
+        }
         void addCapability(CapabilityAtom capability);
 
+        bool shouldEmitSPIRVDirectly()
+        {
+            return (targetFlags & SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY) != 0;
+        }
 
         bool isWholeProgramRequest()
         {
             return (targetFlags & SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM) != 0;
         }
+
+        bool shouldDumpIntermediates() { return dumpIntermediates; }
 
         Linkage* getLinkage() { return linkage; }
         CodeGenTarget getTarget() { return format; }
@@ -1217,6 +1347,7 @@ namespace Slang
         List<CapabilityAtom>    rawCapabilities;
         CapabilitySet           cookedCapabilities;
         LineDirectiveMode       lineDirectiveMode = LineDirectiveMode::Default;
+        bool                    dumpIntermediates = false;
     };
 
         /// Are we generating code for a D3D API?
@@ -1224,6 +1355,9 @@ namespace Slang
 
         /// Are we generating code for a Khronos API (OpenGL or Vulkan)?
     bool isKhronosTarget(TargetRequest* targetReq);
+
+        /// Are we generating code for a CUDA API (CUDA / OptiX)?
+    bool isCUDATarget(TargetRequest* targetReq);
 
         /// Are resource types "bindless" (implemented as ordinary data) on the given `target`?
     bool areResourceTypesBindlessOnTarget(TargetRequest* target);
@@ -1281,6 +1415,10 @@ namespace Slang
         SLANG_NO_THROW slang::IModule* SLANG_MCALL loadModule(
             const char* moduleName,
             slang::IBlob**     outDiagnostics = nullptr) override;
+        SLANG_NO_THROW slang::IModule* SLANG_MCALL loadModuleFromSource(
+            const char* moduleName,
+            slang::IBlob* source,
+            slang::IBlob** outDiagnostics = nullptr) override;
         SLANG_NO_THROW SlangResult SLANG_MCALL createCompositeComponentType(
             slang::IComponentType* const*   componentTypes,
             SlangInt                        componentTypeCount,
@@ -1312,6 +1450,12 @@ namespace Slang
             slang::TypeReflection* type,
             slang::TypeReflection* interfaceType,
             uint32_t*              outId) override;
+        SLANG_NO_THROW SlangResult SLANG_MCALL createTypeConformanceComponentType(
+            slang::TypeReflection* type,
+            slang::TypeReflection* interfaceType,
+            slang::ITypeConformance** outConformance,
+            SlangInt conformanceIdOverride,
+            ISlangBlob** outDiagnostics) override;
         SLANG_NO_THROW SlangResult SLANG_MCALL createCompileRequest(
             SlangCompileRequest**   outCompileRequest) override;
 
@@ -1749,6 +1893,7 @@ namespace Slang
         virtual void visitModule(Module* module, Module::ModuleSpecializationInfo* specializationInfo) = 0;
         virtual void visitComposite(CompositeComponentType* composite, CompositeComponentType::CompositeSpecializationInfo* specializationInfo) = 0;
         virtual void visitSpecialized(SpecializedComponentType* specialized) = 0;
+        virtual void visitTypeConformance(TypeConformance* conformance) = 0;
 
     protected:
         // These helpers can be used to recurse into the logical children of a
@@ -1891,10 +2036,6 @@ namespace Slang
         // The default behavior is to make a best-effort guess as to what format is intended.
         //
         bool useUnknownImageFormatAsDefault = false;
-
-            /// Should SPIR-V be generated directly from Slang IR rather than via translation to GLSL?
-        bool shouldEmitSPIRVDirectly = false;
-
 
         // If true will disable generics/existential value specialization pass.
         bool disableSpecialization = false;
