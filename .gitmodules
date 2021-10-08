@@ -27,4 +27,4 @@
 	url = ../glslang.git
 [submodule "slang-extras"]
 	path = slang-extras
-	url = https://gitlab-master.nvidia.com/slang/slang-extras.git
+	url = ssh://git@gitlab-master.nvidia.com:12051/slang/slang-extras.git
