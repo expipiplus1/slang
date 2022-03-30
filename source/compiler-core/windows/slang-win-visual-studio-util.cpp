@@ -14,7 +14,8 @@
 #   undef NOMINMAX
 
 #   include <Shlobj.h>
-
+#pragma comment(lib, "advapi32")
+#pragma comment(lib, "Shell32")
 #endif
 
 // The method used to invoke VS was originally inspired by some ideas in
@@ -199,7 +200,7 @@ static SlangResult _find(int versionIndex, WinVisualStudioUtil::VersionPath& out
         String vswherePath = programFilesPath;
         vswherePath.append("\\Microsoft Visual Studio\\Installer\\vswhere");
 
-        cmd.setExecutableFilename(vswherePath);
+        cmd.setExecutableLocation(ExecutableLocation(vswherePath));
 
         StringBuilder versionName;
         WinVisualStudioUtil::append(version, versionName);
@@ -304,22 +305,20 @@ static SlangResult _find(int versionIndex, WinVisualStudioUtil::VersionPath& out
     // To invoke cl we need to run the suitable vcvars. In order to run this we have to have MS CommandLine.
     // So here we build up a cl command line that is run by first running vcvars, and then executing cl with the parameters as passed to commandLine
 
-    CommandLine cmdLine;
+    // https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
+    // To run a batch file, you must start the command interpreter; set lpApplicationName to cmd.exe and set lpCommandLine to the
+    // following arguments: /c plus the name of the batch file.
 
-    cmdLine.setExecutableFilename("cmd.exe");
+    CommandLine cmdLine;
+    cmdLine.setExecutableLocation(ExecutableLocation(ExecutableLocation::Type::Name, "cmd.exe"));
+    
     {
         String options[] = { "/q", "/c", "@prompt", "$" };
         cmdLine.addArgs(options, SLANG_COUNT_OF(options));
     }
 
     cmdLine.addArg("&&");
-
-    {
-        StringBuilder path;
-        path << versionPath.vcvarsPath;
-        path << "\\vcvarsall.bat";
-        cmdLine.addArg(path);
-    }
+    cmdLine.addArg(Path::combine(versionPath.vcvarsPath, "vcvarsall.bat"));
 
 #if SLANG_PTR_IS_32
     cmdLine.addArg("x86");

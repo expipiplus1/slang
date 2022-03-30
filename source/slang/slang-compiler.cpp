@@ -7,6 +7,7 @@
 #include "../core/slang-hex-dump-util.h"
 #include "../core/slang-riff.h"
 #include "../core/slang-type-text-util.h"
+#include "../core/slang-type-convert-util.h"
 
 #include "slang-check.h"
 #include "slang-compiler.h"
@@ -54,7 +55,19 @@ namespace Slang
 
     // !!!!!!!!!!!!!!!!!!!!!! free functions for DiagnosicSink !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-    void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
+bool isHeterogeneousTarget(CodeGenTarget target)
+{
+    switch (target)
+    {
+    case CodeGenTarget::HostCPPSource:
+    case CodeGenTarget::HostExecutable:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
     {
         switch (val)
         {
@@ -279,6 +292,14 @@ namespace Slang
         SLANG_ASSERT(index == 0);
 
         return m_mangledName;
+    }
+
+    String EntryPoint::getEntryPointNameOverride(Index index)
+    {
+        SLANG_UNUSED(index);
+        SLANG_ASSERT(index == 0);
+
+        return m_name ? m_name->text : "";
     }
 
     void EntryPoint::acceptVisitor(ComponentTypeVisitor* visitor, SpecializationInfo* specializationInfo)
@@ -518,6 +539,7 @@ namespace Slang
             case CodeGenTarget::HLSL:
             case CodeGenTarget::CUDASource:
             case CodeGenTarget::CPPSource:
+            case CodeGenTarget::HostCPPSource:
             case CodeGenTarget::CSource:
             {
                 return PassThroughMode::None;
@@ -546,9 +568,9 @@ namespace Slang
             {
                 return PassThroughMode::Glslang;
             }
-            case CodeGenTarget::HostCallable:
-            case CodeGenTarget::SharedLibrary:
-            case CodeGenTarget::Executable:
+            case CodeGenTarget::ShaderHostCallable:
+            case CodeGenTarget::ShaderSharedLibrary:
+            case CodeGenTarget::HostExecutable:
             {
                 // We need some C/C++ compiler
                 return PassThroughMode::GenericCCpp;
@@ -575,9 +597,7 @@ namespace Slang
 
         // And if pass-through isn't set, we don't need
         // access to the translation unit.
-        //
-        if(endToEndReq->m_passThrough == PassThroughMode::None) return false;
-        return true;
+        return endToEndReq->m_passThrough != PassThroughMode::None;
     }
     /// If there is a pass-through compile going on, find the translation unit for the given entry point.
     /// Assumes isPassThroughEnabled has already been called
@@ -962,6 +982,36 @@ namespace Slang
         }
     }
 
+    static CodeGenTarget _getDefaultSourceForTarget(CodeGenTarget target)
+    {
+        switch (target)
+        {
+            case CodeGenTarget::ShaderHostCallable:
+            case CodeGenTarget::ShaderSharedLibrary:
+                return CodeGenTarget::CPPSource;
+            case CodeGenTarget::HostExecutable:
+                return CodeGenTarget::HostCPPSource;
+            case CodeGenTarget::PTX:                return CodeGenTarget::CUDASource;
+            case CodeGenTarget::DXBytecode:         return CodeGenTarget::HLSL;
+            case CodeGenTarget::DXIL:               return CodeGenTarget::HLSL;
+            case CodeGenTarget::SPIRV:              return CodeGenTarget::GLSL;
+            default: break;
+        }
+        return CodeGenTarget::Unknown;
+    }
+
+    static bool _isCPUHostTarget(CodeGenTarget target)
+    {
+        switch (target)
+        {
+        case CodeGenTarget::HostCPPSource:
+        case CodeGenTarget::HostExecutable:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     SlangResult emitWithDownstreamForEntryPoints(
         ComponentType*          program,
         BackEndCompileRequest*  slangRequest,
@@ -977,80 +1027,37 @@ namespace Slang
 
         auto session = slangRequest->getSession();
 
+
         CodeGenTarget sourceTarget = CodeGenTarget::None;
         SourceLanguage sourceLanguage = SourceLanguage::Unknown;
 
-        PassThroughMode downstreamCompiler = endToEndReq ? endToEndReq->m_passThrough : PassThroughMode::None;
-
         RefPtr<ExtensionTracker> extensionTracker = _newExtensionTracker(target);
+        PassThroughMode compilerType = endToEndReq ? endToEndReq->m_passThrough : PassThroughMode::None;
 
         // If we are not in pass through, lookup the default compiler for the emitted source type
-        if (downstreamCompiler == PassThroughMode::None)
+        if (compilerType == PassThroughMode::None)
         {
-            switch (target)
+            // Get the default source codegen type for a given target
+            sourceTarget = _getDefaultSourceForTarget(target);
+            compilerType = (PassThroughMode)session->getDownstreamCompilerForTransition((SlangCompileTarget)sourceTarget, (SlangCompileTarget)target);
+            // We should have a downstream compiler set at this point
+            if (compilerType == PassThroughMode::None)
             {
-                case CodeGenTarget::HostCallable:
-                case CodeGenTarget::SharedLibrary:
-                case CodeGenTarget::Executable:
-                {
-                    sourceTarget = CodeGenTarget::CPPSource;
-                    sourceLanguage = SourceLanguage::CPP;
-                    break;
-                }
-                case CodeGenTarget::PTX:
-                {
-                    sourceTarget = CodeGenTarget::CUDASource;
-                    sourceLanguage = SourceLanguage::CUDA;
-                    break;
-                }
-                case CodeGenTarget::DXBytecode:
-                {
-                    sourceTarget = CodeGenTarget::HLSL;
-                    sourceLanguage = SourceLanguage::HLSL;
-                    downstreamCompiler = PassThroughMode::Fxc;
-                    break;
-                }
-                case CodeGenTarget::DXIL:
-                {
-                    sourceTarget = CodeGenTarget::HLSL;
-                    sourceLanguage = SourceLanguage::HLSL;
-                    downstreamCompiler = PassThroughMode::Dxc;
-                    break;
-                }
-                case CodeGenTarget::SPIRV:
-                {
-                    sourceTarget = CodeGenTarget::GLSL;
-                    sourceLanguage = SourceLanguage::GLSL;
-                    downstreamCompiler = PassThroughMode::Glslang;
-                    break;
-                }
-                default: break;
-            }
+                auto sourceName = TypeTextUtil::getCompileTargetName(SlangCompileTarget(sourceTarget));
+                auto targetName = TypeTextUtil::getCompileTargetName(SlangCompileTarget(target));
 
-            // Try looking up based on the language if one isn't set
-            if (downstreamCompiler == PassThroughMode::None)
-            {
-                downstreamCompiler = PassThroughMode(session->getDefaultDownstreamCompiler(SlangSourceLanguage(sourceLanguage)));
-            }
-        }
-        else
-        {
-            // If we are pass through, we may need to set extension tracker state. 
-            if (GLSLExtensionTracker* glslTracker = as<GLSLExtensionTracker>(extensionTracker))
-            {
-                trackGLSLTargetCaps(glslTracker, targetReq->getTargetCaps());
+                sink->diagnose(SourceLoc(), Diagnostics::compilerNotDefinedForTransition, sourceName, targetName);
+                return SLANG_FAIL;
             }
         }
 
-        // We should have a downstream compiler set at this point
-        SLANG_ASSERT(downstreamCompiler != PassThroughMode::None);
+        SLANG_ASSERT(compilerType != PassThroughMode::None);
 
         // Get the required downstream compiler
-        DownstreamCompiler* compiler = session->getOrLoadDownstreamCompiler(downstreamCompiler, sink);
-
+        DownstreamCompiler* compiler = session->getOrLoadDownstreamCompiler(compilerType, sink);
         if (!compiler)
         {
-            auto compilerName = TypeTextUtil::getPassThroughAsHumanText((SlangPassThrough)downstreamCompiler);
+            auto compilerName = TypeTextUtil::getPassThroughAsHumanText((SlangPassThrough)compilerType);
             sink->diagnose(SourceLoc(), Diagnostics::passThroughCompilerNotFound, compilerName);
             return SLANG_FAIL;
         }
@@ -1061,13 +1068,11 @@ namespace Slang
         typedef DownstreamCompiler::CompileOptions CompileOptions;
         CompileOptions options;
 
-        /* Let's set the compiler specific options 
-
-          We can only do this if the endToEndReq is set. */
+        // Set compiler specific args
         {
             auto linkage = targetReq->getLinkage();
         
-            auto name = TypeTextUtil::getPassThroughName((SlangPassThrough)downstreamCompiler);
+            auto name = TypeTextUtil::getPassThroughName((SlangPassThrough)compilerType);
             const Index nameIndex = linkage->m_downstreamArgs.findName(name);
             if (nameIndex >= 0)
             {
@@ -1079,15 +1084,30 @@ namespace Slang
             }
         }
 
-        
         /* This is more convoluted than the other scenarios, because when we invoke C/C++ compiler we would ideally like
         to use the original file. We want to do this because we want includes relative to the source file to work, and
         for that to work most easily we want to use the original file, if there is one */
         if (isPassThroughEnabled(endToEndReq))
         {
+            // If we are pass through, we may need to set extension tracker state. 
+            if (GLSLExtensionTracker* glslTracker = as<GLSLExtensionTracker>(extensionTracker))
+            {
+                trackGLSLTargetCaps(glslTracker, targetReq->getTargetCaps());
+            }
+
             // TODO(DG): Review this assertion later
             SLANG_ASSERT(entryPointIndices.getCount() == 1);
             auto translationUnit = getPassThroughTranslationUnit(endToEndReq, entryPointIndices[0]);
+
+            // We are just passing thru, so it's whatever it originally was
+            sourceLanguage = translationUnit->sourceLanguage;
+
+            // TODO(JS): This seems like a bit of a hack
+            // That if a pass-through is being performed and the source language is Slang
+            // no downstream compiler knows how to deal with that, so probably means 'HLSL'
+            sourceLanguage = (sourceLanguage == SourceLanguage::Slang) ? SourceLanguage::HLSL : sourceLanguage;
+            sourceTarget = CodeGenTarget(TypeConvertUtil::getCompileTargetFromSourceLanguage((SlangSourceLanguage)sourceLanguage));
+
             // If it's pass through we accumulate the preprocessor definitions. 
             for (auto& define : translationUnit->compileRequest->preprocessorDefinitions)
             {
@@ -1130,18 +1150,6 @@ namespace Slang
                 }
             }
 
-            // We are just passing thru, so it's whatever it originally was
-            sourceLanguage = translationUnit->sourceLanguage;
-
-            // TODO(JS): This seems like a bit of a hack
-            // That if a pass-through is being performed and the source language is Slang
-            // no downstream compiler knows how to deal with that, so probably means 'HLSL'
-            if (sourceLanguage == SourceLanguage::Slang)
-            {
-                sourceLanguage = SourceLanguage::HLSL;
-            }
-
-            sourceTarget = CodeGenTarget(DownstreamCompiler::getCompileTarget(SlangSourceLanguage(sourceLanguage)));
 
             // If emitted source is required, emit and set the path            
             if (_useEmittedSource(compiler, translationUnit))
@@ -1167,6 +1175,8 @@ namespace Slang
         {
             SLANG_RETURN_ON_FAIL(emitEntryPointsSource(slangRequest, entryPointIndices, targetReq, sourceTarget, endToEndReq, extensionTracker, options.sourceContents));
             maybeDumpIntermediate(slangRequest, options.sourceContents.getBuffer(), sourceTarget);
+
+            sourceLanguage = (SourceLanguage)TypeConvertUtil::getSourceLanguageFromTarget((SlangCompileTarget)sourceTarget);
         }
 
         // If we have an extension tracker, we may need to set options such as SPIR-V version
@@ -1212,9 +1222,9 @@ namespace Slang
         // Disable exceptions and security checks
         options.flags &= ~(CompileOptions::Flag::EnableExceptionHandling | CompileOptions::Flag::EnableSecurityChecks);
 
-        if (downstreamCompiler == PassThroughMode::Fxc ||
-            downstreamCompiler == PassThroughMode::Dxc ||
-            downstreamCompiler == PassThroughMode::Glslang)
+        if (compilerType == PassThroughMode::Fxc ||
+            compilerType == PassThroughMode::Dxc ||
+            compilerType == PassThroughMode::Glslang)
         {
             if (entryPointIndices.getCount() != 1)
             {
@@ -1232,8 +1242,12 @@ namespace Slang
 
             // Set the entry point name
             options.entryPointName = getText(entryPoint->getName());
-
-            if (downstreamCompiler == PassThroughMode::Dxc)
+            auto entryPointNameOverride = program->getEntryPointNameOverride(entryPointIndex);
+            if (entryPointNameOverride.getLength() != 0)
+            {
+                options.entryPointName = entryPointNameOverride;
+            }
+            if (compilerType == PassThroughMode::Dxc)
             {
                 // We will enable the flag to generate proper code for 16 - bit types
                 // by default, as long as the user is requesting a sufficiently
@@ -1260,17 +1274,26 @@ namespace Slang
                 // Set the matrix layout
                 options.matrixLayout = targetReq->getDefaultMatrixLayoutMode();
             }
-            else if (downstreamCompiler == PassThroughMode::Fxc)
+            else if (compilerType == PassThroughMode::Fxc)
             {
                 // Set the profile
                 options.profileName = GetHLSLProfileName(profile);
             }
         }
 
-        // For host callable we want downstream compile to produce a shared library
-        if (target == CodeGenTarget::HostCallable)
+        // If we aren't using LLVM 'host callable', we want downstream compile to produce a shared library
+        if (compilerType != PassThroughMode::LLVM && target == CodeGenTarget::ShaderHostCallable)
         {
-            target = CodeGenTarget::SharedLibrary;
+            target = CodeGenTarget::ShaderSharedLibrary;
+        }
+
+        if (!isPassThroughEnabled(endToEndReq))
+        {
+            if (_isCPUHostTarget(target))
+            {
+                options.libraryPaths.add(Path::getParentDirectory(Path::getExecutablePath()));
+                options.libraries.add("slang-rt");
+            }
         }
 
         options.targetType = (SlangCompileTarget)target;
@@ -1374,8 +1397,12 @@ namespace Slang
 
         // Compile
         RefPtr<DownstreamCompileResult> downstreamCompileResult;
+        auto downstreamStartTime = std::chrono::high_resolution_clock::now();
         SLANG_RETURN_ON_FAIL(compiler->compile(options, downstreamCompileResult));
-        
+        auto downstreamElapsedTime =
+            (std::chrono::high_resolution_clock::now() - downstreamStartTime).count() * 0.000000001;
+        slangRequest->getSession()->addDownstreamCompileTime(downstreamElapsedTime);
+
         const auto& diagnostics = downstreamCompileResult->getDiagnostics();
 
         if (diagnostics.diagnostics.getCount())
@@ -1532,9 +1559,9 @@ namespace Slang
             case CodeGenTarget::DXIL:
             case CodeGenTarget::DXBytecode:
             case CodeGenTarget::PTX:
-            case CodeGenTarget::HostCallable:
-            case CodeGenTarget::SharedLibrary:
-            case CodeGenTarget::Executable:
+            case CodeGenTarget::ShaderHostCallable:
+            case CodeGenTarget::ShaderSharedLibrary:
+            case CodeGenTarget::HostExecutable:
             {
                 RefPtr<DownstreamCompileResult> downstreamResult;
 
@@ -1588,9 +1615,9 @@ namespace Slang
         case CodeGenTarget::DXIL:
         case CodeGenTarget::DXBytecode:
         case CodeGenTarget::PTX:
-        case CodeGenTarget::HostCallable:
-        case CodeGenTarget::SharedLibrary:
-        case CodeGenTarget::Executable:
+        case CodeGenTarget::ShaderHostCallable:
+        case CodeGenTarget::ShaderSharedLibrary:
+        case CodeGenTarget::HostExecutable:
             {
                 RefPtr<DownstreamCompileResult> downstreamResult;
 
@@ -1611,6 +1638,7 @@ namespace Slang
         case CodeGenTarget::HLSL:
         case CodeGenTarget::CUDASource:
         case CodeGenTarget::CPPSource:
+        case CodeGenTarget::HostCPPSource:
         case CodeGenTarget::CSource:
             {
                 RefPtr<ExtensionTracker> extensionTracker = _newExtensionTracker(target);
@@ -1801,7 +1829,7 @@ namespace Slang
                 ComPtr<ISlangBlob> blob;
                 if (SLANG_FAILED(result.getBlob(blob)))
                 {
-                    if (targetReq->getTarget() == CodeGenTarget::HostCallable)
+                    if (targetReq->getTarget() == CodeGenTarget::ShaderHostCallable)
                     {
                         // Some HostCallable are not directly representable as a 'binary'.
                         // So here, we just ignore if that appears the case, and don't output an unexpected error.
@@ -1845,9 +1873,9 @@ namespace Slang
                     case CodeGenTarget::PTX:
                         // For now we just dump PTX out as hex
 
-                    case CodeGenTarget::HostCallable:
-                    case CodeGenTarget::SharedLibrary:
-                    case CodeGenTarget::Executable:
+                    case CodeGenTarget::ShaderHostCallable:
+                    case CodeGenTarget::ShaderSharedLibrary:
+                    case CodeGenTarget::HostExecutable:
                         HexDumpUtil::dumpWithMarkers((const uint8_t*)blobData, blobSize, 24, writer);
                         break;
 
@@ -2176,16 +2204,106 @@ namespace Slang
             return SLANG_OK;
         }
 
-        FileStream stream(fileName, FileMode::Create, FileAccess::Write, FileShare::ReadWrite);
-        try
+        FileStream stream;
+        SLANG_RETURN_ON_FAIL(stream.init(fileName, FileMode::Create, FileAccess::Write, FileShare::ReadWrite));
+        SLANG_RETURN_ON_FAIL(stream.write(m_containerBlob->getBufferPointer(), m_containerBlob->getBufferSize()));
+        return SLANG_OK;
+    }
+
+    static void _writeString(Stream& stream, const char* string)
+    {
+        stream.write(string, strlen(string));
+    }
+
+    static void _escapeDependencyString(const char* string, StringBuilder& outBuilder)
+    {
+        // make has unusual escaping rules, but we only care about characters that are acceptable in a path
+        for (const char* p = string; *p; ++p)
         {
-            stream.write(m_containerBlob->getBufferPointer(), m_containerBlob->getBufferSize());
+            char c = *p;
+            switch(c)
+            {
+            case ' ':
+            case ':':
+            case '#':
+            case '[':
+            case ']':
+            case '\\':
+                outBuilder.appendChar('\\');
+                break;
+
+            case '$':
+                outBuilder.appendChar('$');
+                break;
+            }
+
+            outBuilder.appendChar(c);
         }
-        catch (const IOException&)
+    }
+
+    // Writes a line to the file stream, formatted like this:
+    //   <output-file>: <dependency-file> <dependency-file...>
+    static void _writeDependencyStatement(Stream& stream, EndToEndCompileRequest* compileRequest, const String& outputPath)
+    {
+        if (outputPath.getLength() == 0)
+            return;
+
+        StringBuilder builder;
+        _escapeDependencyString(outputPath.begin(), builder);
+        _writeString(stream, builder.begin());
+        _writeString(stream, ": ");
+
+        int dependencyCount = compileRequest->getDependencyFileCount();
+        for (int dependencyIndex = 0; dependencyIndex < dependencyCount; ++dependencyIndex)
         {
-            // Unable to write
-            return SLANG_FAIL;
+            builder.Clear();
+            _escapeDependencyString(compileRequest->getDependencyFilePath(dependencyIndex), builder);
+            _writeString(stream, builder.begin());
+            _writeString(stream, (dependencyIndex + 1 < dependencyCount) ? " " : "\n");
         }
+    }
+
+    // Writes a file with dependency info, with one line in the output file per compile product.
+    static SlangResult _writeDependencyFile(EndToEndCompileRequest* compileRequest)
+    {
+        if (compileRequest->m_dependencyOutputPath.getLength() == 0)
+            return SLANG_OK;
+
+        FileStream stream;
+        SLANG_RETURN_ON_FAIL(stream.init(compileRequest->m_dependencyOutputPath, FileMode::Create, FileAccess::Write, FileShare::ReadWrite));
+
+        auto linkage = compileRequest->getLinkage();
+        auto program = compileRequest->getSpecializedGlobalAndEntryPointsComponentType();
+
+        // Iterate over all the targets and their outputs
+        for (const auto& targetReq : linkage->targets)
+        {
+            if (targetReq->isWholeProgramRequest())
+            {
+                RefPtr<EndToEndCompileRequest::TargetInfo> targetInfo;
+                if (compileRequest->m_targetInfos.TryGetValue(targetReq, targetInfo))
+                {
+                    _writeDependencyStatement(stream, compileRequest, targetInfo->wholeTargetOutputPath);
+                }
+            }
+            else
+            {
+                Index entryPointCount = program->getEntryPointCount();
+                for (Index entryPointIndex = 0; entryPointIndex < entryPointCount; ++entryPointIndex)
+                {
+                    RefPtr<EndToEndCompileRequest::TargetInfo> targetInfo;
+                    if (compileRequest->m_targetInfos.TryGetValue(targetReq, targetInfo))
+                    {
+                        String outputPath;
+                        if (targetInfo->entryPointOutputPaths.TryGetValue(entryPointIndex, outputPath))
+                        {
+                            _writeDependencyStatement(stream, compileRequest, outputPath);
+                        }
+                    }
+                }
+            }
+        }
+
         return SLANG_OK;
     }
 
@@ -2277,6 +2395,8 @@ namespace Slang
 
             compileRequest->maybeCreateContainer();
             compileRequest->maybeWriteContainer(compileRequest->m_containerOutputPath);
+
+            _writeDependencyFile(compileRequest);
         }
     }
 
@@ -2366,11 +2486,12 @@ namespace Slang
             case CodeGenTarget::CSource:            return ".c";
             case CodeGenTarget::CUDASource:         return ".cu";
             case CodeGenTarget::CPPSource:          return ".cpp";
+            case CodeGenTarget::HostCPPSource:      return ".cpp";
                 // What these should be called is target specific, but just use these exts to make clear for now
                 // for now
-            case CodeGenTarget::Executable:         return ".exe";
-            case CodeGenTarget::HostCallable:
-            case CodeGenTarget::SharedLibrary:      return ".shared-lib";
+            case CodeGenTarget::HostExecutable:      return ".exe";
+            case CodeGenTarget::ShaderHostCallable:
+            case CodeGenTarget::ShaderSharedLibrary: return ".shared-lib";
             default: break;
         }
         return nullptr;
@@ -2388,6 +2509,7 @@ namespace Slang
         switch (target)
         {    
             case CodeGenTarget::CPPSource:
+            case CodeGenTarget::HostCPPSource:
             case CodeGenTarget::CUDASource:
             case CodeGenTarget::CSource:
             case CodeGenTarget::DXILAssembly:
@@ -2426,9 +2548,9 @@ namespace Slang
                 break;
             }
 
-            case CodeGenTarget::HostCallable:
-            case CodeGenTarget::SharedLibrary:
-            case CodeGenTarget::Executable:
+            case CodeGenTarget::ShaderHostCallable:
+            case CodeGenTarget::ShaderSharedLibrary:
+            case CodeGenTarget::HostExecutable:
             {
                 dumpIntermediateBinary(compileRequest, data, size, _getTargetExtension(target));
                 break;

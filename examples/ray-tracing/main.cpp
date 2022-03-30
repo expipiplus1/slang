@@ -155,9 +155,7 @@ void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 
 // Load and compile shader code from souce.
 gfx::Result loadShaderProgram(
-    gfx::IDevice*         device,
-    gfx::PipelineType pipelineType,
-    gfx::IShaderProgram**   outProgram)
+    gfx::IDevice* device, bool isComputePipeline, gfx::IShaderProgram** outProgram)
 {
     ComPtr<slang::ISession> slangSession;
     slangSession = device->getSlangSession();
@@ -170,7 +168,7 @@ gfx::Result loadShaderProgram(
 
     Slang::List<slang::IComponentType*> componentTypes;
     componentTypes.add(module);
-    if (pipelineType == PipelineType::Compute)
+    if (isComputePipeline)
     {
         ComPtr<slang::IEntryPoint> computeEntryPoint;
         SLANG_RETURN_ON_FAIL(module->findEntryPointByName("computeMain", computeEntryPoint.writeRef()));
@@ -195,8 +193,7 @@ gfx::Result loadShaderProgram(
     SLANG_RETURN_ON_FAIL(result);
 
     gfx::IShaderProgram::Desc programDesc = {};
-    programDesc.pipelineType = pipelineType;
-    programDesc.slangProgram = linkedProgram;
+    programDesc.slangGlobalScope = linkedProgram;
     SLANG_RETURN_ON_FAIL(device->createProgram(programDesc, outProgram));
 
     return SLANG_OK;
@@ -320,7 +317,8 @@ Slang::Result initialize()
     IResourceView::Desc primitiveSRVDesc = {};
     primitiveSRVDesc.format = Format::Unknown;
     primitiveSRVDesc.type = IResourceView::Type::ShaderResource;
-    gPrimitiveBufferSRV = gDevice->createBufferView(gPrimitiveBuffer, primitiveSRVDesc);
+    primitiveSRVDesc.bufferElementSize = sizeof(Primitive);
+    gPrimitiveBufferSRV = gDevice->createBufferView(gPrimitiveBuffer, nullptr, primitiveSRVDesc);
 
     IBufferResource::Desc transformBufferDesc;
     transformBufferDesc.type = IResource::Type::Buffer;
@@ -344,10 +342,10 @@ Slang::Result initialize()
         geomDesc.type = IAccelerationStructure::GeometryType::Triangles;
         geomDesc.content.triangles.indexCount = kIndexCount;
         geomDesc.content.triangles.indexData = gIndexBuffer->getDeviceAddress();
-        geomDesc.content.triangles.indexFormat = Format::R_UInt32;
+        geomDesc.content.triangles.indexFormat = Format::R32_UINT;
         geomDesc.content.triangles.vertexCount = kVertexCount;
         geomDesc.content.triangles.vertexData = gVertexBuffer->getDeviceAddress();
-        geomDesc.content.triangles.vertexFormat = Format::RGB_Float32;
+        geomDesc.content.triangles.vertexFormat = Format::R32G32B32_FLOAT;
         geomDesc.content.triangles.vertexStride = sizeof(Vertex);
         geomDesc.content.triangles.transform3x4 = gTransformBuffer->getDeviceAddress();
         accelerationStructureBuildInputs.geometryDescs = &geomDesc;
@@ -384,6 +382,8 @@ Slang::Result initialize()
         SLANG_RETURN_ON_FAIL(
             gDevice->createAccelerationStructure(draftCreateDesc, draftAS.writeRef()));
 
+        compactedSizeQuery->reset();
+
         auto commandBuffer = gTransientHeaps[0]->createCommandBuffer();
         auto encoder = commandBuffer->encodeRayTracingCommands();
         IAccelerationStructure::BuildDesc buildDesc = {};
@@ -397,7 +397,7 @@ Slang::Result initialize()
         encoder->endEncoding();
         commandBuffer->close();
         gQueue->executeCommandBuffer(commandBuffer);
-        gQueue->wait();
+        gQueue->waitOnHost();
 
         uint64_t compactedSize = 0;
         compactedSizeQuery->getResult(0, 1, &compactedSize);
@@ -419,7 +419,7 @@ Slang::Result initialize()
         encoder->endEncoding();
         commandBuffer->close();
         gQueue->executeCommandBuffer(commandBuffer);
-        gQueue->wait();
+        gQueue->waitOnHost();
     }
 
     // Build top level acceleration structure.
@@ -483,7 +483,7 @@ Slang::Result initialize()
         encoder->endEncoding();
         commandBuffer->close();
         gQueue->executeCommandBuffer(commandBuffer);
-        gQueue->wait();
+        gQueue->waitOnHost();
     }
 
     IBufferResource::Desc fullScreenVertexBufferDesc;
@@ -497,14 +497,14 @@ Slang::Result initialize()
         return SLANG_FAIL;
 
     InputElementDesc inputElements[] = {
-        {"POSITION", 0, Format::RG_Float32, offsetof(FullScreenTriangle::Vertex, position)},
+        {"POSITION", 0, Format::R32G32_FLOAT, offsetof(FullScreenTriangle::Vertex, position)},
     };
-    auto inputLayout = gDevice->createInputLayout(&inputElements[0], SLANG_COUNT_OF(inputElements));
+    auto inputLayout = gDevice->createInputLayout(sizeof(FullScreenTriangle::Vertex), &inputElements[0], SLANG_COUNT_OF(inputElements));
     if (!inputLayout)
         return SLANG_FAIL;
 
     ComPtr<IShaderProgram> shaderProgram;
-    SLANG_RETURN_ON_FAIL(loadShaderProgram(gDevice, PipelineType::Graphics, shaderProgram.writeRef()));
+    SLANG_RETURN_ON_FAIL(loadShaderProgram(gDevice, false, shaderProgram.writeRef()));
     GraphicsPipelineStateDesc desc;
     desc.inputLayout = inputLayout;
     desc.program = shaderProgram;
@@ -514,8 +514,7 @@ Slang::Result initialize()
         return SLANG_FAIL;
 
     ComPtr<IShaderProgram> computeProgram;
-    SLANG_RETURN_ON_FAIL(
-        loadShaderProgram(gDevice, PipelineType::Compute, computeProgram.writeRef()));
+    SLANG_RETURN_ON_FAIL(loadShaderProgram(gDevice, true, computeProgram.writeRef()));
     ComputePipelineStateDesc computeDesc;
     computeDesc.program = computeProgram;
     gRenderPipelineState = gDevice->createComputePipelineState(computeDesc);
@@ -535,7 +534,7 @@ void createResultTexture()
     resultTextureDesc.size.height = windowHeight;
     resultTextureDesc.size.depth = 1;
     resultTextureDesc.defaultState = ResourceState::UnorderedAccess;
-    resultTextureDesc.format = Format::RGBA_Float16;
+    resultTextureDesc.format = Format::R16G16B16A16_FLOAT;
     gResultTexture = gDevice->createTextureResource(resultTextureDesc);
     IResourceView::Desc resultUAVDesc = {};
     resultUAVDesc.format = resultTextureDesc.format;
@@ -626,7 +625,7 @@ virtual void renderFrame(int frameBufferIndex) override
         auto cursor = ShaderCursor(rootObject->getEntryPoint(1));
         cursor["t"].setResource(gResultTextureUAV);
         presentEncoder->setVertexBuffer(
-            0, gFullScreenVertexBuffer, sizeof(FullScreenTriangle::Vertex));
+            0, gFullScreenVertexBuffer);
         presentEncoder->setPrimitiveTopology(PrimitiveTopology::TriangleList);
         presentEncoder->draw(3);
         presentEncoder->endEncoding();

@@ -73,8 +73,7 @@ ComPtr<gfx::IShaderProgram> loadComputeProgram(slang::IModule* slangModule, char
     gGPUPrinting.loadStrings(linkedProgram->getLayout());
 
     gfx::IShaderProgram::Desc programDesc = {};
-    programDesc.pipelineType = gfx::PipelineType::Compute;
-    programDesc.slangProgram = linkedProgram;
+    programDesc.slangGlobalScope = linkedProgram;
 
     auto shaderProgram = gDevice->createProgram(programDesc);
 
@@ -109,12 +108,12 @@ Result execute()
     printBufferDesc.defaultState = ResourceState::UnorderedAccess;
     printBufferDesc.allowedStates = ResourceStateSet(
         ResourceState::CopySource, ResourceState::CopyDestination, ResourceState::UnorderedAccess);
-    printBufferDesc.cpuAccessFlags = AccessFlag::Read; // | Resource::AccessFlag::Write;
+    printBufferDesc.memoryType = MemoryType::ReadBack;
     auto printBuffer = gDevice->createBufferResource(printBufferDesc);
 
     IResourceView::Desc printBufferViewDesc;
     printBufferViewDesc.type = IResourceView::Type::UnorderedAccess;
-    auto printBufferView = gDevice->createBufferView(printBuffer, printBufferViewDesc);
+    auto printBufferView = gDevice->createBufferView(printBuffer, nullptr, printBufferViewDesc);
 
     ITransientResourceHeap::Desc transientResourceHeapDesc = {};
     transientResourceHeapDesc.constantBufferSize = 256;

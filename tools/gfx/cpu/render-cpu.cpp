@@ -11,7 +11,7 @@
 
 #include "../immediate-renderer-base.h"
 #include "../slang-context.h"
-
+#include "../mutable-shader-object.h"
 #define SLANG_PRELUDE_NAMESPACE slang_prelude
 #include "prelude/slang-cpp-types.h"
 
@@ -53,6 +53,21 @@ public:
     virtual SLANG_NO_THROW DeviceAddress SLANG_MCALL getDeviceAddress() override
     {
         return (DeviceAddress)m_data;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL
+        map(MemoryRange* rangeToRead, void** outPointer) override
+    {
+        SLANG_UNUSED(rangeToRead);
+        if (outPointer)
+            *outPointer = m_data;
+        return SLANG_OK;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL unmap(MemoryRange* writtenRange) override
+    {
+        SLANG_UNUSED(writtenRange);
+        return SLANG_OK;
     }
 };
 
@@ -169,21 +184,21 @@ struct CPUFormatInfoMap
     {
         memset(m_infos, 0, sizeof(m_infos));
 
-        set(Format::RGBA_Float32, &_unpackFloatTexel<4>);
-        set(Format::RGB_Float32, &_unpackFloatTexel<3>);
+        set(Format::R32G32B32A32_FLOAT, &_unpackFloatTexel<4>);
+        set(Format::R32G32B32_FLOAT, &_unpackFloatTexel<3>);
 
-        set(Format::RG_Float32, &_unpackFloatTexel<2>);
-        set(Format::R_Float32, &_unpackFloatTexel<1>);
+        set(Format::R32G32_FLOAT, &_unpackFloatTexel<2>);
+        set(Format::R32_FLOAT, &_unpackFloatTexel<1>);
 
-        set(Format::RGBA_Float16, &_unpackFloat16Texel<4>);
-        set(Format::RG_Float16, &_unpackFloat16Texel<2>);
-        set(Format::R_Float16, &_unpackFloat16Texel<1>);
+        set(Format::R16G16B16A16_FLOAT, &_unpackFloat16Texel<4>);
+        set(Format::R16G16_FLOAT, &_unpackFloat16Texel<2>);
+        set(Format::R16_FLOAT, &_unpackFloat16Texel<1>);
 
-        set(Format::RGBA_Unorm_UInt8, &_unpackUnorm8Texel<4>);
-        set(Format::BGRA_Unorm_UInt8, &_unpackUnormBGRA8Texel);
-        set(Format::R_UInt16, &_unpackUInt16Texel<1>);
-        set(Format::R_UInt32, &_unpackUInt32Texel<1>);
-        set(Format::D_Float32, &_unpackFloatTexel<1>);
+        set(Format::R8G8B8A8_UNORM, &_unpackUnorm8Texel<4>);
+        set(Format::B8G8R8A8_UNORM, &_unpackUnormBGRA8Texel);
+        set(Format::R16_UINT, &_unpackUInt16Texel<1>);
+        set(Format::R32_UINT, &_unpackUInt32Texel<1>);
+        set(Format::D32_FLOAT, &_unpackFloatTexel<1>);
     }
 
     void set(Format format, CPUTextureUnpackFunc func)
@@ -233,8 +248,10 @@ public:
         // the block extents would be 1 along each axis.
         //
         auto format = desc.format;
-        auto texelSize = gfxGetFormatSize(format);
-        m_texelSize = (int32_t) texelSize;
+        FormatInfo texelInfo;
+        gfxGetFormatInfo(format, &texelInfo);
+        uint32_t texelSize = uint32_t(texelInfo.blockSizeInBytes / texelInfo.pixelsPerBlock);
+        m_texelSize = texelSize;
 
         int32_t formatBlockSize[kMaxRank] = { 1, 1, 1 };
 
@@ -353,7 +370,7 @@ public:
     CPUTextureBaseShapeInfo const* m_baseShape;
     CPUTextureFormatInfo const* m_formatInfo;
     int32_t m_effectiveArrayElementCount = 0;
-    int32_t m_texelSize = 0;
+    uint32_t m_texelSize = 0;
 
     struct MipLevel
     {
@@ -842,10 +859,21 @@ public:
         *outEntryPoint = nullptr;
         return SLANG_OK;
     }
+
+    virtual SLANG_NO_THROW const void* SLANG_MCALL getRawData() override
+    {
+        return m_data.getBuffer();
+    }
+
+    virtual SLANG_NO_THROW size_t SLANG_MCALL getSize() override
+    {
+        return (size_t)m_data.getCount();
+    }
+
     virtual SLANG_NO_THROW Result SLANG_MCALL
         setData(ShaderOffset const& offset, void const* data, size_t size) override
     {
-        size = Math::Min(size, (size_t)m_data.getCount() - offset.uniformOffset);
+        size = Math::Min(size, size_t(m_data.getCount() - offset.uniformOffset));
         memcpy((char*)m_data.getBuffer() + offset.uniformOffset, data, size);
         return SLANG_OK;
     }
@@ -942,6 +970,9 @@ public:
     char* getDataBuffer() { return m_data.getBuffer(); }
 };
 
+class CPUMutableShaderObject : public MutableShaderObject<CPUMutableShaderObject, CPUShaderObjectLayout>
+{};
+
 class CPUEntryPointShaderObject : public CPUShaderObject
 {
 public:
@@ -951,12 +982,9 @@ public:
 class CPURootShaderObject : public CPUShaderObject
 {
 public:
-    // Override default reference counting behavior to disable lifetime management via ComPtr.
-    // Root objects are managed by command buffer and does not need to be freed by the user.
-    SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-    SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
+    virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+    virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
 
-public:
     SlangResult init(IDevice* device, CPUProgramLayout* programLayout);
 
     CPUProgramLayout* getLayout() { return static_cast<CPUProgramLayout*>(m_layout.Ptr()); }
@@ -1007,16 +1035,8 @@ public:
     }
 };
 
-class CPUQueryPool : public IQueryPool, public ComObject
+class CPUQueryPool : public QueryPoolBase
 {
-public:
-    SLANG_COM_OBJECT_IUNKNOWN_ALL;
-    IQueryPool* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IQueryPool)
-            return static_cast<IQueryPool*>(this);
-        return nullptr;
-    }
 public:
     List<uint64_t> m_queries;
     Result init(const IQueryPool::Desc& desc)
@@ -1071,7 +1091,7 @@ private:
 
         ComPtr<ISlangSharedLibrary> sharedLibrary;
         ComPtr<ISlangBlob> diagnostics;
-        auto compileResult = program->slangProgram->getEntryPointHostCallable(
+        auto compileResult = program->slangGlobalScope->getEntryPointHostCallable(
             entryPointIndex, targetIndex, sharedLibrary.writeRef(), diagnostics.writeRef());
         if (diagnostics)
         {
@@ -1123,7 +1143,7 @@ public:
     {
         SLANG_RETURN_ON_FAIL(slangContext.initialize(
             desc.slang,
-            SLANG_HOST_CALLABLE,
+            SLANG_SHADER_HOST_CALLABLE,
             "sm_5_1",
             makeArray(slang::PreprocessorMacroDesc{ "__CPU__", "1" }).getView()));
 
@@ -1185,7 +1205,10 @@ public:
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferView(
-        IBufferResource* inBuffer, IResourceView::Desc const& desc, IResourceView** outView) override
+        IBufferResource* inBuffer,
+        IBufferResource* counterBuffer,
+        IResourceView::Desc const& desc,
+        IResourceView** outView) override
     {
         auto buffer = static_cast<CPUBufferResource*>(inBuffer);
         RefPtr<CPUBufferView> view = new CPUBufferView(desc, buffer);
@@ -1216,6 +1239,19 @@ public:
         return SLANG_OK;
     }
 
+    virtual Result createMutableShaderObject(
+        ShaderObjectLayoutBase* layout,
+        IShaderObject** outObject) override
+    {
+        auto cpuLayout = static_cast<CPUShaderObjectLayout*>(layout);
+
+        RefPtr<CPUMutableShaderObject> result = new CPUMutableShaderObject();
+        SLANG_RETURN_ON_FAIL(result->init(this, cpuLayout));
+        returnComPtr(outObject, result);
+
+        return SLANG_OK;
+    }
+
     virtual Result createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject) override
     {
         auto cpuProgram = static_cast<CPUShaderProgram*>(program);
@@ -1227,19 +1263,17 @@ public:
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override
+    virtual SLANG_NO_THROW Result SLANG_MCALL createProgram(
+        const IShaderProgram::Desc& desc,
+        IShaderProgram** outProgram,
+        ISlangBlob** outDiagnosticBlob) override
     {
         RefPtr<CPUShaderProgram> cpuProgram = new CPUShaderProgram();
-
-        // TODO: stuff?
-
-        auto slangProgram = desc.slangProgram;
-        if( slangProgram )
+        cpuProgram->init(desc);
+        auto slangGlobalScope = cpuProgram->linkedProgram;
+        if( slangGlobalScope )
         {
-            cpuProgram->slangProgram = slangProgram;
-
-            auto slangProgramLayout = slangProgram->getLayout();
+            auto slangProgramLayout = slangGlobalScope->getLayout();
             if(!slangProgramLayout)
                 return SLANG_FAIL;
 

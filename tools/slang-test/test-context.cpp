@@ -12,9 +12,50 @@
 
 using namespace Slang;
 
+thread_local int slangTestThreadIndex = 0;
+
 TestContext::TestContext() 
 {
     m_session = nullptr;
+
+    /// if we are testing on arm, debug, we may want to increase the connection timeout
+#if (SLANG_PROCESSOR_ARM || SLANG_PROCESSOR_ARM_64) && defined(_DEBUG)
+    // 10 mins(!). This seems to be the order of time needed for timeout on a CI ARM test system on debug
+    connectionTimeOutInMs = 1000 * 60 * 10;
+#endif
+}
+
+void TestContext::setThreadIndex(int index) { slangTestThreadIndex = index; }
+
+void TestContext::setMaxTestRunnerThreadCount(int count)
+{
+    m_jsonRpcConnections.setCount(count);
+    m_testRequirements.setCount(count);
+    m_reporters.setCount(count);
+    for (auto& reporter : m_reporters)
+    {
+        reporter = nullptr;
+    }
+}
+
+void TestContext::setTestRequirements(TestRequirements* req)
+{
+    m_testRequirements[slangTestThreadIndex] = req;
+}
+
+TestRequirements* TestContext::getTestRequirements() const
+{
+    return m_testRequirements[slangTestThreadIndex];
+}
+
+void TestContext::setTestReporter(TestReporter* reporter)
+{
+    m_reporters[slangTestThreadIndex] = reporter;
+}
+
+TestReporter* TestContext::getTestReporter()
+{
+    return m_reporters[slangTestThreadIndex];
 }
 
 Result TestContext::init(const char* exePath)
@@ -85,6 +126,7 @@ void TestContext::setInnerMainFunc(const String& name, InnerMainFunc func)
 
 DownstreamCompilerSet* TestContext::getCompilerSet()
 {
+    std::lock_guard<std::mutex> lock(mutex);
     if (!compilerSet)
     {
         compilerSet = new DownstreamCompilerSet;
@@ -106,6 +148,53 @@ DownstreamCompilerSet* TestContext::getCompilerSet()
     return compilerSet;
 }
 
+SlangResult TestContext::_createJSONRPCConnection(RefPtr<JSONRPCConnection>& out)
+{
+    RefPtr<Process> process;
+
+    {
+        CommandLine cmdLine;
+        cmdLine.setExecutableLocation(ExecutableLocation(exeDirectoryPath, "test-server"));
+        SLANG_RETURN_ON_FAIL(Process::create(cmdLine, Process::Flag::AttachDebugger, process));
+    }
+
+    Stream* writeStream = process->getStream(StdStreamType::In);
+    RefPtr<BufferedReadStream> readStream(new BufferedReadStream(process->getStream(StdStreamType::Out)));
+
+    RefPtr<HTTPPacketConnection> connection = new HTTPPacketConnection(readStream, writeStream);
+    RefPtr<JSONRPCConnection> rpcConnection = new JSONRPCConnection;
+
+    SLANG_RETURN_ON_FAIL(rpcConnection->init(connection, JSONRPCConnection::CallStyle::Default, process));
+
+    out = rpcConnection;
+
+    return SLANG_OK;
+}
+
+
+void TestContext::destroyRPCConnection()
+{
+    if (m_jsonRpcConnections[slangTestThreadIndex])
+    {
+        m_jsonRpcConnections[slangTestThreadIndex]->disconnect();
+        m_jsonRpcConnections[slangTestThreadIndex].setNull();
+    }
+}
+
+Slang::JSONRPCConnection* TestContext::getOrCreateJSONRPCConnection()
+{
+    if (!m_jsonRpcConnections[slangTestThreadIndex])
+    {
+        if (SLANG_FAILED(_createJSONRPCConnection(m_jsonRpcConnections[slangTestThreadIndex])))
+        {
+            return nullptr;
+        }
+    }
+
+    return m_jsonRpcConnections[slangTestThreadIndex];
+}
+
+
 Slang::DownstreamCompiler* TestContext::getDefaultCompiler(SlangSourceLanguage sourceLanguage)
 {
     DownstreamCompilerSet* set = getCompilerSet();
@@ -123,4 +212,25 @@ bool TestContext::canRunTestWithRenderApiFlags(Slang::RenderApiFlags requiredFla
     return (requiredFlags & options.enabledApis) == requiredFlags;
 }
 
+SpawnType TestContext::getFinalSpawnType(SpawnType spawnType)
+{
+    if (spawnType == SpawnType::Default)
+    {
+        if (options.outputMode == TestOutputMode::Default)
+        {
+            return SpawnType::UseSharedLibrary;
+        }
+        else
+        {
+            return SpawnType::UseTestServer;
+        }
+    }
 
+    // Just return whatever spawnType was passed in
+    return spawnType;
+}
+
+SpawnType TestContext::getFinalSpawnType()
+{
+    return getFinalSpawnType(options.defaultSpawnType);
+}

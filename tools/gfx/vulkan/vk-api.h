@@ -9,6 +9,7 @@ namespace gfx {
     x(vkGetInstanceProcAddr) \
     x(vkCreateInstance) \
     x(vkEnumerateInstanceLayerProperties) \
+    x(vkEnumerateDeviceExtensionProperties) \
     x(vkDestroyInstance) \
     /* */
 
@@ -78,9 +79,15 @@ namespace gfx {
     \
     x(vkCmdBindPipeline) \
     x(vkCmdClearAttachments) \
+    x(vkCmdClearColorImage) \
+    x(vkCmdClearDepthStencilImage) \
+    x(vkCmdFillBuffer) \
     x(vkCmdBindDescriptorSets) \
     x(vkCmdDispatch) \
     x(vkCmdDraw) \
+    x(vkCmdDrawIndexed) \
+    x(vkCmdDrawIndirect) \
+    x(vkCmdDrawIndexedIndirect) \
     x(vkCmdSetScissor) \
     x(vkCmdSetViewport) \
     x(vkCmdBindVertexBuffers) \
@@ -89,12 +96,16 @@ namespace gfx {
     x(vkCmdEndRenderPass) \
     x(vkCmdPipelineBarrier) \
     x(vkCmdCopyBufferToImage)\
+    x(vkCmdCopyImage) \
+    x(vkCmdCopyImageToBuffer) \
+    x(vkCmdResolveImage) \
     x(vkCmdPushConstants) \
     x(vkCmdSetStencilReference) \
     x(vkCmdWriteTimestamp) \
     x(vkCmdBeginQuery) \
     x(vkCmdEndQuery) \
     x(vkCmdResetQueryPool) \
+    x(vkCmdCopyQueryPoolResults) \
     \
     x(vkCreateFence) \
     x(vkDestroyFence) \
@@ -152,9 +163,24 @@ namespace gfx {
     x(vkGetSwapchainImagesKHR) \
     x(vkDestroySwapchainKHR) \
     x(vkAcquireNextImageKHR) \
+    x(vkCreateRayTracingPipelinesKHR) \
+    x(vkCmdTraceRaysKHR) \
+    x(vkGetRayTracingShaderGroupHandlesKHR) \
     /* */
 
+#if SLANG_WINDOWS_FAMILY
+#   define VK_API_DEVICE_PLATFORM_OPT_PROCS(x) \
+    x(vkGetMemoryWin32HandleKHR) \
+    x(vkGetSemaphoreWin32HandleKHR) \
+    /* */
+#else
+#   define VK_API_DEVICE_PLATFORM_OPT_PROCS(x) \
+    x(vkGetMemoryFdKHR) \
+    /* */
+#endif
+
 #define VK_API_DEVICE_OPT_PROCS(x) \
+    VK_API_DEVICE_PLATFORM_OPT_PROCS(x) \
     x(vkCmdSetPrimitiveTopologyEXT) \
     x(vkGetBufferDeviceAddress) \
     x(vkGetBufferDeviceAddressKHR) \
@@ -167,6 +193,16 @@ namespace gfx {
     x(vkCreateAccelerationStructureKHR) \
     x(vkDestroyAccelerationStructureKHR) \
     x(vkGetAccelerationStructureBuildSizesKHR) \
+    x(vkGetSemaphoreCounterValue) \
+    x(vkGetSemaphoreCounterValueKHR) \
+    x(vkSignalSemaphore) \
+    x(vkSignalSemaphoreKHR) \
+    x(vkWaitSemaphores) \
+    x(vkWaitSemaphoresKHR) \
+    x(vkCmdSetSampleLocationsEXT) \
+    x(vkCmdDebugMarkerBeginEXT) \
+    x(vkCmdDebugMarkerEndEXT) \
+    x(vkDebugMarkerSetObjectNameEXT) \
     /* */
 
 #define VK_API_ALL_GLOBAL_PROCS(x) \
@@ -218,6 +254,10 @@ struct VulkanExtendedFeatureProperties
     // Acceleration structure features
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    // Ray tracing pipeline features
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR
+    };
     // Ray query (inline ray-tracing) features
     VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
@@ -227,6 +267,9 @@ struct VulkanExtendedFeatureProperties
     // Inline uniform block features
     VkPhysicalDeviceInlineUniformBlockFeaturesEXT inlineUniformBlockFeatures = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES_EXT};
+    // Robustness2 features
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2Features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
 };
 
 struct VulkanApi
@@ -267,10 +310,11 @@ struct VulkanApi
     VkDevice m_device = VK_NULL_HANDLE;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
 
-    VkPhysicalDeviceProperties          m_deviceProperties;
-    VkPhysicalDeviceFeatures            m_deviceFeatures;
-    VkPhysicalDeviceMemoryProperties    m_deviceMemoryProperties;
-    VulkanExtendedFeatureProperties     m_extendedFeatures;
+    VkPhysicalDeviceProperties                              m_deviceProperties;
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR         m_rtProperties;
+    VkPhysicalDeviceFeatures                                m_deviceFeatures;
+    VkPhysicalDeviceMemoryProperties                        m_deviceMemoryProperties;
+    VulkanExtendedFeatureProperties                         m_extendedFeatures;
 };
 
 } // renderer_test

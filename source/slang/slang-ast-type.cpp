@@ -655,7 +655,7 @@ bool ExtractExistentialType::_equalsImplOverride(Type* type)
 
 HashCode ExtractExistentialType::_getHashCodeOverride()
 {
-    return combineHash(declRef.getHashCode(), interfaceDeclRef.getHashCode());
+    return combineHash(declRef.getHashCode(), originalInterfaceType->getHashCode(), originalInterfaceDeclRef.getHashCode());
 }
 
 Type* ExtractExistentialType::_createCanonicalTypeOverride()
@@ -667,7 +667,8 @@ Val* ExtractExistentialType::_substituteImplOverride(ASTBuilder* astBuilder, Sub
 {
     int diff = 0;
     auto substDeclRef = declRef.substituteImpl(astBuilder, subst, &diff);
-    auto interfaceSubstDeclRef = interfaceDeclRef.substituteImpl(astBuilder, subst, &diff);
+    auto substOriginalInterfaceType = originalInterfaceType->substituteImpl(astBuilder, subst, &diff);
+    auto substOriginalInterfaceDeclRef = originalInterfaceDeclRef.substituteImpl(astBuilder, subst, &diff);
     if (!diff)
         return this;
 
@@ -675,9 +676,45 @@ Val* ExtractExistentialType::_substituteImplOverride(ASTBuilder* astBuilder, Sub
 
     ExtractExistentialType* substValue = astBuilder->create<ExtractExistentialType>();
     substValue->declRef = substDeclRef;
-    substValue->interfaceDeclRef = interfaceSubstDeclRef;
+    substValue->originalInterfaceType = as<Type>(substOriginalInterfaceType);
+    substValue->originalInterfaceDeclRef = substOriginalInterfaceDeclRef;
     return substValue;
 }
+
+SubtypeWitness* ExtractExistentialType::getSubtypeWitness()
+{
+    if (auto cachedValue = this->cachedSubtypeWitness)
+        return cachedValue;
+
+    ExtractExistentialSubtypeWitness* openedWitness = m_astBuilder->create<ExtractExistentialSubtypeWitness>();
+    openedWitness->sub = this;
+    openedWitness->sup = originalInterfaceType;
+    openedWitness->declRef = this->declRef;
+
+    this->cachedSubtypeWitness = openedWitness;
+    return openedWitness;
+}
+
+DeclRef<InterfaceDecl> ExtractExistentialType::getSpecializedInterfaceDeclRef()
+{
+    if (auto cachedValue = this->cachedSpecializedInterfaceDeclRef)
+        return cachedValue;
+
+    auto interfaceDecl = originalInterfaceDeclRef.getDecl();
+
+    SubtypeWitness* openedWitness = getSubtypeWitness();
+
+    ThisTypeSubstitution* openedThisType = m_astBuilder->create<ThisTypeSubstitution>();
+    openedThisType->outer = originalInterfaceDeclRef.substitutions.substitutions;
+    openedThisType->interfaceDecl = interfaceDecl;
+    openedThisType->witness = openedWitness;
+
+    DeclRef<InterfaceDecl> specialiedInterfaceDeclRef = DeclRef<InterfaceDecl>(interfaceDecl, openedThisType);
+
+    this->cachedSpecializedInterfaceDeclRef = specialiedInterfaceDeclRef;
+    return specialiedInterfaceDeclRef;
+}
+
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! TaggedUnionType !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
@@ -1013,6 +1050,103 @@ Val* AndType::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet su
     AndType* substType = m_astBuilder->create<AndType>();
     substType->left = substLeft;
     substType->right = substRight;
+    return substType;
+}
+
+// ModifiedType
+
+
+void ModifiedType::_toTextOverride(StringBuilder& out)
+{
+    for( auto modifier : modifiers )
+    {
+        modifier->toText(out);
+        out.appendChar(' ');
+    }
+    base->toText(out);
+}
+
+bool ModifiedType::_equalsImplOverride(Type* type)
+{
+    auto other = as<ModifiedType>(type);
+    if(!other)
+        return false;
+
+    if(!base->equals(other->base))
+        return false;
+
+    // TODO: Eventually we need to put the `modifiers` into
+    // a canonical ordering as part of creation of a `ModifiedType`,
+    // so that two instances that apply the same modifiers to
+    // the same type will have those modifiers in a matching order.
+    //
+    // The simplest way to achieve that ordering *for now* would
+    // be to sort the array by the integer AST node type tag.
+    // That approach would of course not scale to modifiers that
+    // have any operands of their own.
+    //
+    // Note that we would *also* need the logic that creates a
+    // `ModifiedType` to detect when the base type is itself a
+    // `ModifiedType` and produce a single `ModifiedType` with
+    // a combined list of modifiers and a non-`ModifiedType` as
+    // its base type.
+    //
+    auto modifierCount = modifiers.getCount();
+    if(modifierCount != other->modifiers.getCount())
+        return false;
+
+    for( Index i = 0; i < modifierCount; ++i )
+    {
+        auto thisModifier = this->modifiers[i];
+        auto otherModifier = other->modifiers[i];
+        if(!thisModifier->equalsVal(otherModifier))
+            return false;
+    }
+    return true;
+}
+
+HashCode ModifiedType::_getHashCodeOverride()
+{
+    Hasher hasher;
+    hasher.hashObject(base);
+    for( auto modifier : modifiers )
+    {
+        hasher.hashObject(modifier);
+    }
+    return hasher.getResult();
+}
+
+Type* ModifiedType::_createCanonicalTypeOverride()
+{
+    ModifiedType* canonical = m_astBuilder->create<ModifiedType>();
+    canonical->base = base->getCanonicalType();
+    for( auto modifier : modifiers )
+    {
+        canonical->modifiers.add(modifier);
+    }
+    return canonical;
+}
+
+Val* ModifiedType::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
+{
+    int diff = 0;
+    Type* substBase = as<Type>(base->substituteImpl(astBuilder, subst, &diff));
+
+    List<Val*> substModifiers;
+    for( auto modifier : modifiers )
+    {
+        auto substModifier = modifier->substituteImpl(astBuilder, subst, &diff);
+        substModifiers.add(substModifier);
+    }
+
+    if(!diff)
+        return this;
+
+    *ioDiff = 1;
+
+    ModifiedType* substType = m_astBuilder->create<ModifiedType>();
+    substType->base = substBase;
+    substType->modifiers = _Move(substModifiers);
     return substType;
 }
 

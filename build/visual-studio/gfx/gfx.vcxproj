@@ -166,7 +166,7 @@
       <WarningLevel>Level3</WarningLevel>
       <PreprocessorDefinitions>_DEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -185,7 +185,7 @@
       <WarningLevel>Level3</WarningLevel>
       <PreprocessorDefinitions>_DEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -288,6 +288,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\slang-gfx.h" />
+    <ClInclude Include="..\..\..\tools\gfx\command-encoder-com-forward.h" />
     <ClInclude Include="..\..\..\tools\gfx\command-writer.h" />
     <ClInclude Include="..\..\..\tools\gfx\cpu\render-cpu.h" />
     <ClInclude Include="..\..\..\tools\gfx\cuda\render-cuda.h" />
@@ -300,6 +301,7 @@
     <ClInclude Include="..\..\..\tools\gfx\debug-layer.h" />
     <ClInclude Include="..\..\..\tools\gfx\flag-combiner.h" />
     <ClInclude Include="..\..\..\tools\gfx\immediate-renderer-base.h" />
+    <ClInclude Include="..\..\..\tools\gfx\mutable-shader-object.h" />
     <ClInclude Include="..\..\..\tools\gfx\nvapi\nvapi-include.h" />
     <ClInclude Include="..\..\..\tools\gfx\nvapi\nvapi-util.h" />
     <ClInclude Include="..\..\..\tools\gfx\open-gl\render-gl.h" />

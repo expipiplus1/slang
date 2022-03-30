@@ -100,18 +100,19 @@ struct FunctionParameterSpecializationContext
     // With the basic state out of the way, let's walk
     // through the overall flow of the pass.
     //
-    void processModule()
+    bool processModule()
     {
         // We will start by initializing our IR building state.
         //
-        sharedBuilderStorage.module = module;
-        sharedBuilderStorage.session = module->getSession();
-        builderStorage.sharedBuilder = &sharedBuilderStorage;
+        sharedBuilderStorage.init(module);
+        builderStorage.init(sharedBuilderStorage);
 
         // Next we will populate our initial work list by
         // recursively finding every single call site in the module.
         //
         addCallsToWorkListRec(module->getModuleInst());
+
+        bool changed = false;
 
         // We will process the work list until it goes dry,
         // treating it like a stack of work items.
@@ -131,8 +132,10 @@ struct FunctionParameterSpecializationContext
             if( canSpecializeCall(call) )
             {
                 specializeCall(call);
+                changed = true;
             }
         }
+        return changed;
     }
 
     // Setting up the work list is a simple recursive procedure.
@@ -354,6 +357,7 @@ struct FunctionParameterSpecializationContext
         // we need to generate a call to it, and then use the new
         // call as a replacement for the old one.
         //
+        SLANG_ASSERT(newFunc != oldCall->getCallee());
         auto newCall = getBuilder()->emitCallInst(
             oldCall->getFullType(),
             newFunc,
@@ -675,7 +679,19 @@ struct FunctionParameterSpecializationContext
             // instructions if an insertion location
             // is set.
             //
-            builder->setInsertInto(nullptr);
+            // TODO(tfoley): We should really question any cases where
+            // we are creating IR instructions but not inserting them into the
+            // hierarchy of the IR module anywhere. Ideally we would have an
+            // invariant that all IR instructions are always parented somewhere
+            // under their IR module, except during very brief interludes.
+            //
+            // A good fix here would be for a pass like this to create a transient
+            // IR block to serve as a "nursery" for the newly-created instructions,
+            // instead of using `newBodyInsts` to hold them. The new IR block could
+            // be placed directly under the IR module during the construction phase
+            // of things, and then inserted to a more permanent location later.
+            //
+            builder->setInsertLoc(IRInsertLoc());
             auto newVal = builder->emitElementExtract(
                 oldArg->getFullType(),
                 newBase,
@@ -697,7 +713,7 @@ struct FunctionParameterSpecializationContext
             auto newPtr = getSpecializedValueForArg(ioInfo, oldPtr);
 
             auto builder = getBuilder();
-            builder->setInsertInto(nullptr);
+            builder->setInsertLoc(IRInsertLoc());
             auto newVal = builder->emitLoad(
                 oldArg->getFullType(),
                 newPtr);
@@ -782,7 +798,7 @@ struct FunctionParameterSpecializationContext
         //
         cloneInstDecorationsAndChildren(
             &cloneEnv,
-            builder->sharedBuilder,
+            builder->getSharedBuilder(),
             oldFunc,
             newFunc);
 
@@ -866,7 +882,7 @@ struct FunctionParameterSpecializationContext
 // is straighforward. We set up the context object
 // and then defer to it for the real work.
 //
-void specializeFunctionCalls(
+bool specializeFunctionCalls(
     BackEndCompileRequest* compileRequest,
     TargetRequest*  targetRequest,
     IRModule*       module,
@@ -878,7 +894,7 @@ void specializeFunctionCalls(
     context.module = module;
     context.condition = condition;
 
-    context.processModule();
+    return context.processModule();
 }
 
 } // namesapce Slang

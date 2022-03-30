@@ -17,6 +17,8 @@
 #include "../../source/core/slang-process-util.h"
 #include "../../source/core/slang-render-api-util.h"
 
+#include "../../source/core/slang-shared-library.h"
+
 #include "tools/unit-test/slang-unit-test.h"
 #undef SLANG_UNIT_TEST
 
@@ -41,6 +43,8 @@
 #define SLANG_PRELUDE_NAMESPACE CPPPrelude
 #include "../../prelude/slang-cpp-types.h"
 
+#include <atomic>
+#include <thread>
 
 using namespace Slang;
 
@@ -97,11 +101,6 @@ struct FileTestList
     List<TestDetails> tests;
 };
 
-enum class SpawnType
-{
-    UseExe,
-    UseSharedLibrary,
-};
 
 struct TestInput
 {
@@ -436,14 +435,8 @@ static SlangResult _gatherTestsForFile(
     outTestList->tests.clear();
 
     String fileContents;
-    try
-    {
-        fileContents = Slang::File::readAllText(filePath);
-    }
-    catch (const Slang::IOException&)
-    {
-        return SLANG_FAIL;
-    }
+
+    SLANG_RETURN_ON_FAIL(Slang::File::readAllText(filePath, fileContents));
 
     // Walk through the lines of the file, looking for test commands
     char const* cursor = fileContents.begin();
@@ -537,35 +530,44 @@ static SlangResult _gatherTestsForFile(
     return SLANG_OK;
 }
 
+
+
 Result spawnAndWaitExe(TestContext* context, const String& testPath, const CommandLine& cmdLine, ExecuteResult& outRes)
 {
+    std::lock_guard<std::mutex> lock(context->mutex);
+
     const auto& options = context->options;
 
     if (options.shouldBeVerbose)
     {
-        String commandLine = ProcessUtil::getCommandLineString(cmdLine);
-        context->reporter->messageFormat(TestMessageType::Info, "%s\n", commandLine.begin());
+        String commandLine = cmdLine.toString();
+        context->getTestReporter()->messageFormat(
+            TestMessageType::Info, "%s\n", commandLine.begin());
     }
 
     Result res = ProcessUtil::execute(cmdLine, outRes);
     if (SLANG_FAILED(res))
     {
         //        fprintf(stderr, "failed to run test '%S'\n", testPath.ToWString());
-        context->reporter->messageFormat(TestMessageType::RunError, "failed to run test '%S'", testPath.toWString().begin());
+        context->getTestReporter()->messageFormat(
+            TestMessageType::RunError, "failed to run test '%S'", testPath.toWString().begin());
     }
     return res;
 }
 
+
 Result spawnAndWaitSharedLibrary(TestContext* context, const String& testPath, const CommandLine& cmdLine, ExecuteResult& outRes)
 {
+    std::lock_guard<std::mutex> lock(context->mutex);
+
     const auto& options = context->options;
-    String exeName = Path::getFileNameWithoutExt(cmdLine.m_executable);
+    String exeName = Path::getFileNameWithoutExt(cmdLine.m_executableLocation.m_pathOrName);
 
     if (options.shouldBeVerbose)
     {
         CommandLine testCmdLine;
 
-        testCmdLine.setExecutableFilename("slang-test");
+        testCmdLine.setExecutableLocation(ExecutableLocation("slang-test"));
 
         if (options.binDir.getLength())
         {
@@ -576,8 +578,8 @@ Result spawnAndWaitSharedLibrary(TestContext* context, const String& testPath, c
         testCmdLine.addArg(exeName);
         testCmdLine.m_args.addRange(cmdLine.m_args);
 
-        String testCmdLineString = ProcessUtil::getCommandLineString(testCmdLine);
-        context->reporter->messageFormat(TestMessageType::Info, "%s\n", testCmdLineString.getBuffer());
+        context->getTestReporter()->messageFormat(
+            TestMessageType::Info, "%s\n", testCmdLine.toString().getBuffer());
     }
 
     auto func = context->getInnerMainFunc(context->options.binDir, exeName);
@@ -626,6 +628,109 @@ Result spawnAndWaitSharedLibrary(TestContext* context, const String& testPath, c
 }
 
 
+Result spawnAndWaitProxy(TestContext* context, const String& testPath, const CommandLine& inCmdLine, ExecuteResult& outRes)
+{
+    std::lock_guard<std::mutex> lock(context->mutex);
+
+    // Get the name of the thing to execute
+    String exeName = Path::getFileNameWithoutExt(inCmdLine.m_executableLocation.m_pathOrName);
+
+    if (exeName == "slangc")
+    {
+        // If the test is slangc there is a command line version we can just directly use
+        //return spawnAndWaitExe(context, testPath, inCmdLine, outRes);
+        return spawnAndWaitSharedLibrary(context, testPath, inCmdLine, outRes);
+    }
+
+    CommandLine cmdLine(inCmdLine);
+
+    // Make the first arg the name of the tool to invoke
+    cmdLine.m_args.insert(0, exeName);
+    cmdLine.setExecutableLocation(ExecutableLocation(context->exeDirectoryPath, "test-proxy"));
+
+    const auto& options = context->options;
+    if (options.shouldBeVerbose)
+    {
+        String commandLine = cmdLine.toString();
+        context->getTestReporter()->messageFormat(
+            TestMessageType::Info, "%s\n", commandLine.begin());
+    }
+
+    // Execute
+    Result res = ProcessUtil::execute(cmdLine, outRes);
+    if (SLANG_FAILED(res))
+    {
+        //        fprintf(stderr, "failed to run test '%S'\n", testPath.ToWString());
+        context->getTestReporter()->messageFormat(
+            TestMessageType::RunError, "failed to run test '%S'", testPath.toWString().begin());
+    }
+
+    return res;
+}
+
+static Result _executeRPC(TestContext* context, SpawnType spawnType, const UnownedStringSlice& method, const RttiInfo* rttiInfo, const void* args, ExecuteResult& outRes)
+{
+    // If we are 'fully isolated', we cannot share a test server.
+    // So tear down the RPC connection if there is one currently.
+    if (spawnType == SpawnType::UseFullyIsolatedTestServer)
+    {
+        context->destroyRPCConnection();
+    }
+
+    JSONRPCConnection* rpcConnection = context->getOrCreateJSONRPCConnection();
+    if (!rpcConnection)
+    {
+        return SLANG_FAIL;
+    }
+
+    // Execute
+    SLANG_RETURN_ON_FAIL(rpcConnection->sendCall(method, rttiInfo, args));
+
+    // Wait for the result
+    rpcConnection->waitForResult(context->connectionTimeOutInMs);
+
+    if (!rpcConnection->hasMessage())
+    {
+        // We can assume somethings gone wrong. So lets kill the connection and fail.
+        context->destroyRPCConnection();
+        return SLANG_FAIL;
+    }
+
+    if (rpcConnection->getMessageType() != JSONRPCMessageType::Result)
+    {
+        return SLANG_FAIL;
+    }
+
+    // Get the result
+    TestServerProtocol::ExecutionResult exeRes;
+    SLANG_RETURN_ON_FAIL(rpcConnection->getMessage(&exeRes));
+
+    outRes.resultCode = exeRes.returnCode;
+    outRes.standardError = exeRes.stdError;
+    outRes.standardOutput = exeRes.stdOut;
+
+    return SLANG_OK;
+}
+
+template <typename T>
+static Result _executeRPC(TestContext* context, SpawnType spawnType, const UnownedStringSlice& method, const T* msg, ExecuteResult& outRes)
+{
+    return _executeRPC(context, spawnType, method, GetRttiInfo<T>::get(), (const void*)msg, outRes);
+}
+
+Result spawnAndWaitTestServer(TestContext* context, SpawnType spawnType, const String& testPath, const CommandLine& inCmdLine, ExecuteResult& outRes)
+{
+    String exeName = Path::getFileNameWithoutExt(inCmdLine.m_executableLocation.m_pathOrName);
+
+    // This is a test tool execution
+    TestServerProtocol::ExecuteToolTestArgs args;
+
+    args.toolName = exeName;
+    args.args = inCmdLine.m_args;
+
+    return _executeRPC(context, spawnType, TestServerProtocol::ExecuteToolTestArgs::g_methodName, &args, outRes);
+}
+
 static SlangResult _extractArg(const CommandLine& cmdLine, const String& argName, String& outValue)
 {
     SLANG_ASSERT(argName.getLength() > 0 && argName[0] == '-');
@@ -654,6 +759,7 @@ static PassThroughFlags _getPassThroughFlagsForTarget(SlangCompileTarget target)
         case SLANG_GLSL:
         case SLANG_C_SOURCE:
         case SLANG_CPP_SOURCE:
+        case SLANG_HOST_CPP_SOURCE:
         case SLANG_CUDA_SOURCE:
         {
             return 0;
@@ -674,9 +780,9 @@ static PassThroughFlags _getPassThroughFlagsForTarget(SlangCompileTarget target)
             return PassThroughFlag::Dxc;
         }
 
-        case SLANG_HOST_CALLABLE:
-        case SLANG_EXECUTABLE:
-        case SLANG_SHARED_LIBRARY:
+        case SLANG_SHADER_HOST_CALLABLE:
+        case SLANG_HOST_EXECUTABLE:
+        case SLANG_SHADER_SHARED_LIBRARY:
         {
             return PassThroughFlag::Generic_C_CPP;
         }
@@ -786,7 +892,7 @@ static SlangResult _extractRenderTestRequirements(const CommandLine& cmdLine, Te
             passThru = SLANG_PASS_THROUGH_GLSLANG;
             break;
         case RenderApiType::CPU:
-            target = SLANG_HOST_CALLABLE;
+            target = SLANG_SHADER_HOST_CALLABLE;
             nativeLanguage = SLANG_SOURCE_LANGUAGE_CPP;
             passThru = SLANG_PASS_THROUGH_GENERIC_C_CPP;
             break;
@@ -853,7 +959,7 @@ static SlangResult _extractReflectionTestRequirements(const CommandLine& cmdLine
 
 static SlangResult _extractTestRequirements(const CommandLine& cmdLine, TestRequirements* ioInfo)
 {
-    String exeName = Path::getFileNameWithoutExt(cmdLine.m_executable);
+    String exeName = Path::getFileNameWithoutExt(cmdLine.m_executableLocation.m_pathOrName);
 
     if (exeName == "render-test")
     {
@@ -874,6 +980,8 @@ static SlangResult _extractTestRequirements(const CommandLine& cmdLine, TestRequ
 
 static RenderApiFlags _getAvailableRenderApiFlags(TestContext* context)
 {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
     // Only evaluate if it hasn't already been evaluated (the actual evaluation is slow...)
     if (!context->isAvailableRenderApiFlagsValid)
     {
@@ -903,9 +1011,14 @@ static RenderApiFlags _getAvailableRenderApiFlags(TestContext* context)
             // See if it's possible the api is available
             if (RenderApiUtil::calcHasApi(apiType))
             {
+                if (context->options.skipApiDetection)
+                {
+                    availableRenderApiFlags |= RenderApiFlags(1) << int(apiType);
+                    continue;
+                }
                 // Try starting up the device
                 CommandLine cmdLine;
-                cmdLine.setExecutablePath(Path::combine(context->options.binDir,  String("render-test") + ProcessUtil::getExecutableSuffix()));
+                cmdLine.setExecutableLocation(ExecutableLocation(context->options.binDir, "render-test"));
                 _addRenderTestOptions(context->options, cmdLine);
                 // We just want to see if the device can be started up
                 cmdLine.addArg("-only-startup");
@@ -914,7 +1027,6 @@ static RenderApiFlags _getAvailableRenderApiFlags(TestContext* context)
                 StringBuilder builder;
                 builder << "-" << RenderApiUtil::getApiName(apiType);
                 cmdLine.addArg(builder);
-
                 // Run the render-test tool and see if the device could startup
                 ExecuteResult exeRes;
                 if (SLANG_SUCCEEDED(spawnAndWaitSharedLibrary(context, "device-startup", cmdLine, exeRes))
@@ -950,8 +1062,9 @@ ToolReturnCode spawnAndWait(TestContext* context, const String& testPath, SpawnT
 {
     if (context->isCollectingRequirements())
     {
+        std::lock_guard<std::mutex> lock(context->mutex);
         // If we just want info... don't bother running anything
-        const SlangResult res = _extractTestRequirements(cmdLine, context->testRequirements);
+        const SlangResult res = _extractTestRequirements(cmdLine, context->getTestRequirements());
         // Keep compiler happy on release
         SLANG_UNUSED(res);
         SLANG_ASSERT(SLANG_SUCCEEDED(res));
@@ -961,17 +1074,26 @@ ToolReturnCode spawnAndWait(TestContext* context, const String& testPath, SpawnT
 
     const auto& options = context->options;
 
+    const auto finalSpawnType = context->getFinalSpawnType(spawnType);
+
     SlangResult spawnResult = SLANG_FAIL;
-    switch (spawnType)
+    switch (finalSpawnType)
     {
         case SpawnType::UseExe:
         {
             spawnResult = spawnAndWaitExe(context, testPath, cmdLine, outExeRes);
             break;
         }
+        case SpawnType::Default:
         case SpawnType::UseSharedLibrary:
         {
             spawnResult = spawnAndWaitSharedLibrary(context, testPath, cmdLine, outExeRes);
+            break;
+        }
+        case SpawnType::UseFullyIsolatedTestServer:
+        case SpawnType::UseTestServer:
+        {
+            spawnResult = spawnAndWaitTestServer(context, finalSpawnType, testPath, cmdLine, outExeRes);
             break;
         }
         default: break;
@@ -1045,7 +1167,7 @@ String findExpectedPath(const TestInput& input, const char* postFix)
 
 static void _initSlangCompiler(TestContext* context, CommandLine& ioCmdLine)
 {
-    ioCmdLine.setExecutablePath(Path::combine(context->options.binDir, String("slangc") + ProcessUtil::getExecutableSuffix()));
+    ioCmdLine.setExecutableLocation(ExecutableLocation(context->options.binDir, "slangc"));
 
     if (context->options.verbosePaths)
     {
@@ -1082,7 +1204,7 @@ static SlangResult _executeBinary(const UnownedStringSlice& hexDump, ExecuteResu
     String fileName;
     SLANG_RETURN_ON_FAIL(File::generateTemporary(UnownedStringSlice("slang-test"), fileName));
 
-    fileName.append(ProcessUtil::getExecutableSuffix());
+    fileName.append(Process::getExecutableSuffix());
 
     TemporaryFileSet temporaryFileSet;
     temporaryFileSet.add(fileName);
@@ -1098,9 +1220,12 @@ static SlangResult _executeBinary(const UnownedStringSlice& hexDump, ExecuteResu
     SLANG_RETURN_ON_FAIL(File::makeExecutable(fileName));
 
     // Execute it
+    ExecutableLocation exe;
+    exe.setPath(fileName);
+
     CommandLine cmdLine;
-    cmdLine.m_executable = fileName;
-    cmdLine.m_executableType = CommandLine::ExecutableType::Path;
+    cmdLine.setExecutableLocation(exe);
+
     return ProcessUtil::execute(cmdLine, outExeRes);
 }
 
@@ -1168,13 +1293,9 @@ TestResult runDocTest(TestContext* context, TestInput& input)
 
     String expectedOutputPath = outputStem + ".expected";
     String expectedOutput;
-    try
-    {
-        expectedOutput = Slang::File::readAllText(expectedOutputPath);
-    }
-    catch (const Slang::IOException&)
-    {
-    }
+
+    // TODO(JS): Might want to check the result code..
+    Slang::File::readAllText(expectedOutputPath, expectedOutput);
 
     // If no expected output file was found, then we
     // expect everything to be empty
@@ -1188,7 +1309,7 @@ TestResult runDocTest(TestContext* context, TestInput& input)
     // Otherwise we compare to the expected output
     if (!_areResultsEqual(input.testOptions->type, expectedOutput, actualOutput))
     {
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
         result = TestResult::Fail;
     }
 
@@ -1200,7 +1321,7 @@ TestResult runDocTest(TestContext* context, TestInput& input)
         String actualOutputPath = outputStem + ".actual";
         Slang::File::writeAllText(actualOutputPath, actualOutput);
 
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
     }
 
     return result;
@@ -1244,7 +1365,7 @@ TestResult runSimpleTest(TestContext* context, TestInput& input)
     }
 
     // If it's executable we run it and use it's output
-    if (target == SLANG_EXECUTABLE)
+    if (target == SLANG_HOST_EXECUTABLE)
     {
         ExecuteResult runExeRes;
         if (SLANG_FAILED(_executeBinary(exeRes.standardOutput.getUnownedSlice(), runExeRes)))
@@ -1258,14 +1379,9 @@ TestResult runSimpleTest(TestContext* context, TestInput& input)
 
     String expectedOutputPath = outputStem + ".expected";
     String expectedOutput;
-    try
-    {
-        expectedOutput = Slang::File::readAllText(expectedOutputPath);
-    }
-    catch (const Slang::IOException&)
-    {
-    }
-
+    
+    Slang::File::readAllText(expectedOutputPath, expectedOutput);
+    
     // If no expected output file was found, then we
     // expect everything to be empty
     if (expectedOutput.getLength() == 0)
@@ -1278,7 +1394,7 @@ TestResult runSimpleTest(TestContext* context, TestInput& input)
     // Otherwise we compare to the expected output
     if (!_areResultsEqual(input.testOptions->type, expectedOutput, actualOutput))
     {
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
         result = TestResult::Fail;
     }
 
@@ -1290,7 +1406,7 @@ TestResult runSimpleTest(TestContext* context, TestInput& input)
         String actualOutputPath = outputStem + ".actual";
         Slang::File::writeAllText(actualOutputPath, actualOutput);
 
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
     }
 
     return result;
@@ -1298,15 +1414,7 @@ TestResult runSimpleTest(TestContext* context, TestInput& input)
 
 SlangResult _readText(const UnownedStringSlice& path, String& out)
 {
-    try
-    {
-        out = Slang::File::readAllText(path);
-    }
-    catch (const Slang::IOException&)
-    {
-        return SLANG_FAIL;
-    }
-    return SLANG_OK;
+    return Slang::File::readAllText(path, out);
 }
 
 static SlangResult _readExpected(const UnownedStringSlice& stem, String& out)
@@ -1395,14 +1503,14 @@ TestResult runSimpleLineTest(TestContext* context, TestInput& input)
         }
         else
         {
-            context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+            context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
         }
     }
     else
     {
         StringBuilder buf;
         buf << "Unable to find expected output for '" << outputStem << "'";
-        context->reporter->message(TestMessageType::TestFailure, buf);
+        context->getTestReporter()->message(TestMessageType::TestFailure, buf);
     }
 
     // If the test failed, then we write the actual output to a file
@@ -1450,7 +1558,7 @@ TestResult runCompile(TestContext* context, TestInput& input)
 
     if (exeRes.resultCode != 0)
     {
-        auto reporter = context->reporter;
+        auto reporter = context->getTestReporter();
         if (reporter)
         {
             auto output = getOutput(exeRes);
@@ -1511,7 +1619,7 @@ TestResult runReflectionTest(TestContext* context, TestInput& input)
 
     CommandLine cmdLine;
     
-    cmdLine.setExecutablePath(Path::combine(options.binDir, String("slang-reflection-test") + ProcessUtil::getExecutableSuffix()));
+    cmdLine.setExecutableLocation(ExecutableLocation(options.binDir, "slang-reflection-test"));
     cmdLine.addArg(filePath);
 
     for( auto arg : input.testOptions->args )
@@ -1540,13 +1648,8 @@ TestResult runReflectionTest(TestContext* context, TestInput& input)
 
     String expectedOutputPath = outputStem + ".expected";
     String expectedOutput;
-    try
-    {
-        expectedOutput = Slang::File::readAllText(expectedOutputPath);
-    }
-    catch (const Slang::IOException&)
-    {
-    }
+    
+    Slang::File::readAllText(expectedOutputPath, expectedOutput);
 
     // If no expected output file was found, then we
     // expect everything to be empty
@@ -1558,7 +1661,7 @@ TestResult runReflectionTest(TestContext* context, TestInput& input)
     TestResult result = TestResult::Pass;
 
     // Otherwise we compare to the expected output
-    if (actualOutput != expectedOutput)
+    if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
     {
         result = TestResult::Fail;
     }
@@ -1571,7 +1674,7 @@ TestResult runReflectionTest(TestContext* context, TestInput& input)
         String actualOutputPath = outputStem + ".actual";
         Slang::File::writeAllText(actualOutputPath, actualOutput);
 
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
     }
 
     return result;
@@ -1581,14 +1684,9 @@ String getExpectedOutput(String const& outputStem)
 {
     String expectedOutputPath = outputStem + ".expected";
     String expectedOutput;
-    try
-    {
-        expectedOutput = Slang::File::readAllText(expectedOutputPath);
-    }
-    catch (const Slang::IOException&)
-    {
-    }
-
+    
+    Slang::File::readAllText(expectedOutputPath, expectedOutput);
+    
     // If no expected output file was found, then we
     // expect everything to be empty
     if (expectedOutput.getLength() == 0)
@@ -1669,13 +1767,14 @@ static TestResult runCPPCompilerSharedLibrary(TestContext* context, TestInput& i
     DownstreamCompiler* compiler = context->getDefaultCompiler(SLANG_SOURCE_LANGUAGE_CPP);
     if (!compiler)
     {
+        std::lock_guard<std::mutex> lock(context->mutex);
         return TestResult::Ignored;
     }
 
     // If we are just collecting requirements, say it passed
     if (context->isCollectingRequirements())
     {
-        context->testRequirements->addUsedBackEnd(SLANG_PASS_THROUGH_GENERIC_C_CPP);
+        context->getTestRequirements()->addUsedBackEnd(SLANG_PASS_THROUGH_GENERIC_C_CPP);
         return TestResult::Pass;
     }
 
@@ -1699,7 +1798,7 @@ static TestResult runCPPCompilerSharedLibrary(TestContext* context, TestInput& i
     options.sourceLanguage = (ext == "c") ? SLANG_SOURCE_LANGUAGE_C : SLANG_SOURCE_LANGUAGE_CPP;
 
     // Build a shared library
-    options.targetType = SLANG_SHARED_LIBRARY;
+    options.targetType = SLANG_SHADER_SHARED_LIBRARY;
 
     // Compile this source
     options.sourceFiles.add(filePath);
@@ -1727,19 +1826,14 @@ static TestResult runCPPCompilerSharedLibrary(TestContext* context, TestInput& i
         {
             // Read the expected
             String expectedOutput;
-            try
-            {
-                String expectedOutputPath = outputStem + ".expected";
-                expectedOutput = Slang::File::readAllText(expectedOutputPath);
-            }
-            catch (const Slang::IOException&)
-            {
-            }
-
+            
+            String expectedOutputPath = outputStem + ".expected";
+            Slang::File::readAllText(expectedOutputPath, expectedOutput);
+            
             // Compare if they are the same 
             if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
             {
-                context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+                context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
                 return TestResult::Fail;
             }
         }
@@ -1793,7 +1887,8 @@ static TestResult runCPPCompilerExecute(TestContext* context, TestInput& input)
     // If we are just collecting requirements, say it passed
     if (context->isCollectingRequirements())
     {
-        context->testRequirements->addUsedBackEnd(SLANG_PASS_THROUGH_GENERIC_C_CPP);
+        std::lock_guard<std::mutex> lock(context->mutex);
+        context->getTestRequirements()->addUsedBackEnd(SLANG_PASS_THROUGH_GENERIC_C_CPP);
         return TestResult::Pass;
     }
 
@@ -1808,12 +1903,16 @@ static TestResult runCPPCompilerExecute(TestContext* context, TestInput& input)
     String modulePath = _calcModulePath(input);
     
     // Remove the binary..
+    String moduleExePath;
     {
-        StringBuilder moduleExePath;
-        moduleExePath << modulePath;
-        moduleExePath << ProcessUtil::getExecutableSuffix();
-        File::remove(moduleExePath);
+        StringBuilder buf;
+        buf << modulePath;
+        buf << Process::getExecutableSuffix();
+        moduleExePath = buf;
     }
+
+    // Remove the exe if it exists
+    File::remove(moduleExePath);
 
     // Set up the compilation options
     DownstreamCompiler::CompileOptions options;
@@ -1834,7 +1933,7 @@ static TestResult runCPPCompilerExecute(TestContext* context, TestInput& input)
 
     const auto& diagnostics = compileResult->getDiagnostics();
 
-    // If the actual compilation failed, then the output will be
+    // If the actual compilation failed, then the output will be the summary
     if (SLANG_FAILED(diagnostics.result))
     {
         actualOutput = _calcSummary(diagnostics);
@@ -1842,13 +1941,12 @@ static TestResult runCPPCompilerExecute(TestContext* context, TestInput& input)
     else
     {
        // Execute the binary and see what we get
-
         CommandLine cmdLine;
 
-        StringBuilder exePath;
-        exePath << modulePath << ProcessUtil::getExecutableSuffix();
+        ExecutableLocation exe;
+        exe.setPath(moduleExePath);
 
-        cmdLine.setExecutablePath(exePath);
+        cmdLine.setExecutableLocation(exe);
 
         ExecuteResult exeRes;
         if (SLANG_FAILED(ProcessUtil::execute(cmdLine, exeRes)))
@@ -1867,19 +1965,14 @@ static TestResult runCPPCompilerExecute(TestContext* context, TestInput& input)
     {
         // Read the expected
         String expectedOutput;
-        try
-        {
-            String expectedOutputPath = outputStem + ".expected";
-            expectedOutput = Slang::File::readAllText(expectedOutputPath);
-        }
-        catch (const Slang::IOException&)
-        {
-        }
-
+        
+        String expectedOutputPath = outputStem + ".expected";
+        Slang::File::readAllText(expectedOutputPath, expectedOutput);
+        
         // Compare if they are the same 
         if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
         {
-            context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+            context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
             return TestResult::Fail;
         }
     }
@@ -1960,11 +2053,8 @@ TestResult runCrossCompilerTest(TestContext* context, TestInput& input)
     {
         expectedOutput = getOutput(expectedExeRes);
         String expectedOutputPath = outputStem + ".expected";
-        try
-        {
-            Slang::File::writeAllText(expectedOutputPath, expectedOutput);
-        }
-        catch (const Slang::IOException&)
+        
+        if (SLANG_FAILED(Slang::File::writeAllText(expectedOutputPath, expectedOutput)))
         {
             return TestResult::Fail;
         }
@@ -1983,7 +2073,7 @@ TestResult runCrossCompilerTest(TestContext* context, TestInput& input)
     TestResult result = TestResult::Pass;
 
     // Otherwise we compare to the expected output
-    if (actualOutput != expectedOutput)
+    if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
     {
         result = TestResult::Fail;
     }
@@ -2005,7 +2095,7 @@ TestResult runCrossCompilerTest(TestContext* context, TestInput& input)
         String actualOutputPath = outputStem + ".actual";
         Slang::File::writeAllText(actualOutputPath, actualOutput);
 
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
     }
 
     return result;
@@ -2045,14 +2135,12 @@ TestResult generateHLSLBaseline(
 
     String expectedOutput = getOutput(exeRes);
     String expectedOutputPath = outputStem + ".expected";
-    try
-    {
-        Slang::File::writeAllText(expectedOutputPath, expectedOutput);
-    }
-    catch (const Slang::IOException&)
+    
+    if (SLANG_FAILED(Slang::File::writeAllText(expectedOutputPath, expectedOutput)))
     {
         return TestResult::Fail;
     }
+
     return TestResult::Pass;
 }
 
@@ -2126,14 +2214,8 @@ static TestResult _runHLSLComparisonTest(
     String actualOutput = actualOutputBuilder.ProduceString();
 
     String expectedOutput;
-    try
-    {
-        expectedOutput = Slang::File::readAllText(expectedOutputPath);
-    }
-    catch (const Slang::IOException&)
-    {
-    }
-
+    Slang::File::readAllText(expectedOutputPath, expectedOutput);
+    
     TestResult result = TestResult::Pass;
 
     // If no expected output file was found, then we
@@ -2145,7 +2227,7 @@ static TestResult _runHLSLComparisonTest(
         if (standardOutput.getLength() != 0)	result = TestResult::Fail;
     }
     // Otherwise we compare to the expected output
-    else if (actualOutput != expectedOutput)
+    else if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
     {
         result = TestResult::Fail;
     }
@@ -2167,7 +2249,7 @@ static TestResult _runHLSLComparisonTest(
         String actualOutputPath = outputStem + ".actual";
         Slang::File::writeAllText(actualOutputPath, actualOutput);
 
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
     }
 
     return result;
@@ -2282,9 +2364,9 @@ TestResult runGLSLComparisonTest(TestContext* context, TestInput& input)
     if( hlslResult  == TestResult::Fail )   return TestResult::Fail;
     if( slangResult == TestResult::Fail )   return TestResult::Fail;
 
-    if (actualOutput != expectedOutput)
+    if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
     {
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
 
         return TestResult::Fail;
     }
@@ -2328,7 +2410,7 @@ TestResult runPerformanceProfile(TestContext* context, TestInput& input)
 
     CommandLine cmdLine;
 
-    cmdLine.setExecutablePath(Path::combine(context->options.binDir, String("render-test") + ProcessUtil::getExecutableSuffix()));
+    cmdLine.setExecutableLocation(ExecutableLocation(context->options.binDir, "render-test"));
     
     cmdLine.addArg(input.filePath);
     cmdLine.addArg("-performance-profile");
@@ -2355,7 +2437,7 @@ TestResult runPerformanceProfile(TestContext* context, TestInput& input)
         return TestResult::Fail;
     }
 
-    context->reporter->addExecutionTime(time);
+    context->getTestReporter()->addExecutionTime(time);
 
     return TestResult::Pass;
 }
@@ -2481,7 +2563,7 @@ TestResult runComputeComparisonImpl(TestContext* context, TestInput& input, cons
 
 	CommandLine cmdLine;
 
-    cmdLine.setExecutablePath(Path::combine(context->options.binDir, String("render-test") + ProcessUtil::getExecutableSuffix()));
+    cmdLine.setExecutableLocation(ExecutableLocation(context->options.binDir, "render-test"));
     cmdLine.addArg(filePath999);
 
     _addRenderTestOptions(context->options, cmdLine);
@@ -2521,9 +2603,10 @@ TestResult runComputeComparisonImpl(TestContext* context, TestInput& input, cons
 
     auto actualOutput = getOutput(exeRes);
     auto expectedOutput = getExpectedOutput(outputStem);
-    if (actualOutput != expectedOutput)
+    
+    if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
     {
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
 
         String actualOutputPath = outputStem + ".actual";
         Slang::File::writeAllText(actualOutputPath, actualOutput);
@@ -2543,12 +2626,18 @@ TestResult runComputeComparisonImpl(TestContext* context, TestInput& input, cons
         printf("referenceOutput %s not found.\n", referenceOutputFile.getBuffer());
 		return TestResult::Fail;
     }
-    auto actualOutputContent = File::readAllText(actualOutputFile);
-    auto referenceOutputContent = File::readAllText(referenceOutputFile);
+    String actualOutputContent, referenceOutputContent;
+
+    File::readAllText(actualOutputFile, actualOutputContent);
+    File::readAllText(referenceOutputFile, referenceOutputContent);
 
     if (SLANG_FAILED(_compareWithType(actualOutputContent.getUnownedSlice(), referenceOutputContent.getUnownedSlice())))
     {
-        context->reporter->messageFormat(TestMessageType::TestFailure, "output mismatch! actual output: {\n%s\n}, \n%s\n", actualOutputContent.getBuffer(), referenceOutputContent.getBuffer());
+        context->getTestReporter()->messageFormat(
+            TestMessageType::TestFailure,
+            "output mismatch! actual output: {\n%s\n}, \n%s\n",
+            actualOutputContent.getBuffer(),
+            referenceOutputContent.getBuffer());
         return TestResult::Fail;
     }
 
@@ -2587,7 +2676,7 @@ TestResult doRenderComparisonTestRun(TestContext* context, TestInput& input, cha
 
     CommandLine cmdLine;
 
-    cmdLine.setExecutablePath(Path::combine(context->options.binDir, String("render-test") + ProcessUtil::getExecutableSuffix()));
+    cmdLine.setExecutableLocation(ExecutableLocation(context->options.binDir, "render-test"));
     cmdLine.addArg(filePath);
 
     _addRenderTestOptions(context->options, cmdLine);
@@ -2697,7 +2786,7 @@ bool STBImage::isComparable(const ThisType& rhs) const
 
 TestResult doImageComparison(TestContext* context, String const& filePath)
 {
-    auto reporter = context->reporter;
+    auto reporter = context->getTestReporter();
 
     // Allow a difference in the low bits of the 8-bit result, just to play it safe
     static const int kAbsoluteDiffCutoff = 2;
@@ -2825,9 +2914,9 @@ TestResult runHLSLRenderComparisonTestImpl(
     if( hlslResult  == TestResult::Fail )   return TestResult::Fail;
     if( slangResult == TestResult::Fail )   return TestResult::Fail;
 
-    if (actualOutput != expectedOutput)
+    if (!StringUtil::areLinesEqual(actualOutput.getUnownedSlice(), expectedOutput.getUnownedSlice()))
     {
-        context->reporter->dumpOutputDifference(expectedOutput, actualOutput);
+        context->getTestReporter()->dumpOutputDifference(expectedOutput, actualOutput);
 
         return TestResult::Fail;
     }
@@ -2928,8 +3017,6 @@ TestResult runTest(
         return TestResult::Pass;
     }
 
-    const SpawnType defaultSpawnType = context->options.useExes ? SpawnType::UseExe : SpawnType::UseSharedLibrary;
-
     auto testInfo = _findTestCommandInfoByCommand(testOptions.command.getUnownedSlice());
 
     if (testInfo)
@@ -2938,7 +3025,7 @@ TestResult runTest(
         testInput.filePath = filePath;
         testInput.outputStem = outputStem;
         testInput.testOptions = &testOptions;
-        testInput.spawnType = defaultSpawnType;
+        testInput.spawnType = context->options.defaultSpawnType;
 
         return testInfo->callback(context, testInput);
     }
@@ -2964,7 +3051,7 @@ bool testCategoryMatches(
 
 bool testCategoryMatches(
     TestCategory*                           categoryToMatch,
-    Dictionary<TestCategory*, TestCategory*> categorySet)
+    const Dictionary<TestCategory*, TestCategory*>& categorySet)
 {
     for( auto item : categorySet )
     {
@@ -3086,9 +3173,9 @@ static void _calcSynthesizedTests(TestContext* context, RenderApiType synthRende
         }
 
         // Work out the info about this tests
-        context->testRequirements = &synthTestDetails.requirements;
+        context->setTestRequirements(& synthTestDetails.requirements);
         runTest(context, "", "", "", synthOptions);
-        context->testRequirements = nullptr;
+        context->setTestRequirements(nullptr);
 
         // It does set the explicit render target
         SLANG_ASSERT(synthTestDetails.requirements.explicitRenderApi == synthRenderApiType);
@@ -3148,7 +3235,7 @@ static SlangResult _runTestsOnFile(
     // Note cases where a test file exists, but we found nothing to run
     if( testList.tests.getCount() == 0 )
     {
-        context->reporter->addTest(filePath, TestResult::Ignored);
+        context->getTestReporter()->addTest(filePath, TestResult::Ignored);
         return SLANG_OK;
     }
 
@@ -3162,14 +3249,14 @@ static SlangResult _runTestsOnFile(
             auto& requirements = testDetails.requirements;
 
             // Collect what the test needs (by setting restRequirements the test isn't actually run)
-            context->testRequirements = &requirements;
+            context->setTestRequirements(&requirements);
             runTest(context, filePath, filePath, filePath, testDetails.options);
 
             // 
             apiUsedFlags |= requirements.usedRenderApiFlags;
             explictUsedApiFlags |= (requirements.explicitRenderApi != RenderApiType::Unknown) ? (RenderApiFlags(1) << int(requirements.explicitRenderApi)) : 0;
         }
-        context->testRequirements = nullptr;
+        context->setTestRequirements(nullptr);
     }
 
     SLANG_ASSERT((apiUsedFlags & explictUsedApiFlags) == explictUsedApiFlags);
@@ -3259,8 +3346,7 @@ static SlangResult _runTestsOnFile(
 
         // Report the test and run/ignore
         {
-            auto reporter = context->reporter;
-            TestReporter::TestScope scope(reporter, testName);
+            TestReporter::TestScope scope(context->getTestReporter(), testName);
 
             TestResult testResult = TestResult::Fail;
 
@@ -3274,7 +3360,7 @@ static SlangResult _runTestsOnFile(
                 testResult = runTest(context, filePath, outputStem, testName, testDetails.options);
             }
 
-            reporter->addResult(testResult);
+            context->getTestReporter()->addResult(testResult);
 
             // Could determine if to continue or not here... based on result
         }        
@@ -3336,43 +3422,101 @@ static bool shouldRunTest(
     return true;
 }
 
-void runTestsInDirectory(
-    TestContext*		context,
-    String				directoryPath)
+void getFilesInDirectory(String directoryPath, List<String>& files)
 {
     {
-        List<String> files;
-        DirectoryUtil::findFiles(directoryPath, files);
-        for (auto file : files)
-        {
-            if( shouldRunTest(context, file) )
-            {
-    //            fprintf(stderr, "slang-test: found '%s'\n", file.getBuffer());
-                if (SLANG_FAILED(_runTestsOnFile(context, file)))
-                {
-                    auto reporter = context->reporter;
-
-                    {
-                        TestReporter::TestScope scope(reporter, file);
-                        reporter->message(TestMessageType::RunError, "slang-test: unable to parse test");
-
-                        reporter->addResult(TestResult::Fail);
-                    }
-
-                    // Output there was some kind of error trying to run the tests on this file
-                    // fprintf(stderr, "slang-test: unable to parse test '%s'\n", file.getBuffer());
-                }
-            }
-        }
+        List<String> localFiles;
+        DirectoryUtil::findFiles(directoryPath, localFiles);
+        files.addRange(localFiles);
     }
-
     {
         List<String> subDirs;
         DirectoryUtil::findDirectories(directoryPath, subDirs);
         for (auto subDir : subDirs)
         {
-            runTestsInDirectory(context, subDir);
+            getFilesInDirectory(subDir, files);
         }
+    }
+}
+
+void runTestsInDirectory(
+    TestContext*		context,
+    String				directoryPath)
+{
+    List<String> files;
+    getFilesInDirectory(directoryPath, files);
+    auto processFile = [&](String file)
+    {
+        if (shouldRunTest(context, file))
+        {
+            //            fprintf(stderr, "slang-test: found '%s'\n", file.getBuffer());
+            if (SLANG_FAILED(_runTestsOnFile(context, file)))
+            {
+                {
+                    TestReporter::TestScope scope(context->getTestReporter(), file);
+                    context->getTestReporter()->message(
+                        TestMessageType::RunError, "slang-test: unable to parse test");
+
+                    context->getTestReporter()->addResult(TestResult::Fail);
+                }
+
+                // Output there was some kind of error trying to run the tests on this file
+                // fprintf(stderr, "slang-test: unable to parse test '%s'\n", file.getBuffer());
+            }
+        }
+    };
+    bool useMultiThread = false;
+    switch (context->options.defaultSpawnType)
+    {
+    case SpawnType::UseFullyIsolatedTestServer:
+    case SpawnType::UseTestServer:
+        useMultiThread = true;
+        break;
+    }
+    if (context->options.serverCount == 1)
+    {
+        useMultiThread = false;
+    }
+    if (!useMultiThread)
+    {
+        for (auto file : files)
+        {
+            processFile(file);
+        }
+    }
+    else
+    {
+        auto originalReporter = context->getTestReporter();
+        std::atomic<int> consumePtr;
+        consumePtr = 0;
+        auto threadFunc = [&](int threadId)
+        {
+            TestReporter reporter;
+            reporter.init(context->options.outputMode, true);
+            TestReporter::SuiteScope suiteScope(&reporter, "tests");
+            context->setThreadIndex(threadId);
+            context->setTestReporter(&reporter);
+            do
+            {
+                int index = consumePtr.fetch_add(1);
+                if (index >= (int)files.getCount())
+                    break;
+                processFile(files[index]);
+            } while (true);
+            {
+                std::lock_guard<std::mutex> lock(context->mutex);
+                originalReporter->consolidateWith(&reporter);
+            }
+            context->setTestReporter(nullptr);
+        };
+        List<std::thread> threads;
+        for (int threadId = 0; threadId < context->options.serverCount; threadId++)
+        {
+            threads.add(std::thread(threadFunc, threadId));
+        }
+        for (auto& t : threads)
+            t.join();
+        context->setTestReporter(originalReporter);
     }
 }
 
@@ -3389,31 +3533,52 @@ static void _disableCPPBackends(TestContext* context)
     for (auto passThru : cppPassThrus)
     {
         context->availableBackendFlags &= ~(PassThroughFlags(1) << int(passThru));
+        context->availableRenderApiFlags &= ~(RenderApiFlag::CPU);
+        context->options.enabledApis &= ~(RenderApiFlag::CPU);
+    }
+}
+
+static TestResult _asTestResult(ToolReturnCode retCode)
+{
+    switch (retCode)
+    {
+        default:                        return TestResult::Fail;
+        case ToolReturnCode::Success:   return TestResult::Pass;
+        case ToolReturnCode::Ignored:   return TestResult::Ignored;
     }
 }
 
     /// Loads a DLL containing unit test functions and run them one by one.
-static SlangResult runUnitTestModule(TestContext* context, TestOptions& testOptions, const char* moduleName)
+static SlangResult runUnitTestModule(TestContext* context, TestOptions& testOptions, SpawnType spawnType, const char* moduleName)
 {
-    SharedLibrary::Handle moduleHandle;
-    SLANG_RETURN_ON_FAIL(SharedLibrary::load(
+    ISlangSharedLibraryLoader* loader = DefaultSharedLibraryLoader::getSingleton();
+    ComPtr<ISlangSharedLibrary> moduleLibrary;
+
+    SLANG_RETURN_ON_FAIL(loader->loadSharedLibrary(
         Path::combine(context->exeDirectoryPath, moduleName).getBuffer(),
-        moduleHandle));
+        moduleLibrary.writeRef()));
+
     UnitTestGetModuleFunc getModuleFunc =
-        (UnitTestGetModuleFunc) SharedLibrary::findSymbolAddressByName(
-            moduleHandle, "slangUnitTestGetModule");
+        (UnitTestGetModuleFunc)moduleLibrary->findFuncByName("slangUnitTestGetModule");
     if (!getModuleFunc)
         return SLANG_FAIL;
 
     IUnitTestModule* testModule = getModuleFunc();
     if (!testModule)
         return SLANG_FAIL;
-    testModule->setTestReporter(TestReporter::get());
+
+    auto reporter = TestReporter::get();
+
+    testModule->setTestReporter(reporter);
+
     UnitTestContext unitTestContext;
     unitTestContext.slangGlobalSession = context->getSession();
     unitTestContext.workDirectory = "";
     unitTestContext.enabledApis = context->options.enabledApis;
+    unitTestContext.executableDirectory = context->exeDirectoryPath.getBuffer();
+
     auto testCount = testModule->getTestCount();
+
     for (SlangInt i = 0; i < testCount; i++)
     {
         auto testFunc = testModule->getTestFunc(i);
@@ -3428,18 +3593,62 @@ static SlangResult runUnitTestModule(TestContext* context, TestOptions& testOpti
         {
             if (testPassesCategoryMask(context, testOptions))
             {
-                TestReporter::get()->startTest(testOptions.command.getBuffer());
-                testFunc(&unitTestContext);
-                TestReporter::get()->endTest();
+                if (spawnType == SpawnType::UseTestServer ||
+                    spawnType == SpawnType::UseFullyIsolatedTestServer)
+                {
+                    TestServerProtocol::ExecuteUnitTestArgs args;
+                    args.enabledApis = context->options.enabledApis;
+                    args.moduleName = moduleName;
+                    args.testName = testName;
+
+                    {
+                        TestReporter::TestScope scopeTest(reporter, testOptions.command);
+                        ExecuteResult exeRes;
+
+                        SlangResult rpcRes = _executeRPC(context, spawnType, TestServerProtocol::ExecuteUnitTestArgs::g_methodName, &args, exeRes);
+                        const auto testResult = _asTestResult(ToolReturnCode(exeRes.resultCode));
+
+                        // If the test fails, output any output - which might give information about individual tests that have failed.
+                        if (SLANG_FAILED(rpcRes) || testResult == TestResult::Fail)
+                        {
+                            String output = getOutput(exeRes);
+                            reporter->message(TestMessageType::TestFailure, output.getBuffer());
+                        }
+
+                        reporter->addResult(testResult);
+                    }
+                }
+                else
+                {
+                    TestReporter::TestScope scopeTest(reporter, testOptions.command);
+
+                    // TODO(JS): Problem here could be exception not handled properly across
+                    // shared library boundary. 
+
+                    try
+                    {
+                        testFunc(&unitTestContext);
+                    }
+                    catch (...)
+                    {
+                        reporter->message(TestMessageType::TestFailure, "Exception was thrown during execution");
+                        reporter->addResult(TestResult::Fail);
+                    }
+                }
             }
         }
     }
+
     testModule->destroy();
     return SLANG_OK;
 }
 
 SlangResult innerMain(int argc, char** argv)
 {
+    // Disable buffering for out and std out
+    StreamUtil::setStreamBufferStyle(StdStreamType::Out, StreamBufferStyle::None);
+    StreamUtil::setStreamBufferStyle(StdStreamType::ErrorOut, StreamBufferStyle::None);
+
     auto stdWriters = StdWriters::initDefaultSingleton();
 
     // The context holds useful things used during testing
@@ -3485,7 +3694,8 @@ SlangResult innerMain(int argc, char** argv)
     {
         SlangSession* session = context.getSession();
 
-        StdWriters::getOut().print("Supported backends:");
+        auto out = StdWriters::getOut();
+        out.print("Supported backends:");
 
         for (int i = 0; i < SLANG_PASS_THROUGH_COUNT_OF; ++i)
         {
@@ -3508,11 +3718,11 @@ SlangResult innerMain(int argc, char** argv)
                 SLANG_ASSERT(passThroughCategories[i] == nullptr);
                 passThroughCategories[i] = categorySet.add(buf.getBuffer() + 1, fullTestCategory);
 
-                StdWriters::getOut().write(buf.getBuffer(), buf.getLength());
+                out.write(buf.getBuffer(), buf.getLength());
             }
         }
 
-        StdWriters::getOut().print("\n");
+        out.print("\n");
     }
 
     // Working out what renderApis is worked on on demand through
@@ -3524,8 +3734,10 @@ SlangResult innerMain(int argc, char** argv)
     }
 
     SLANG_RETURN_ON_FAIL(Options::parse(argc, argv, &categorySet, StdWriters::getError(), &context.options));
-    
+
     Options& options = context.options;
+
+    context.setMaxTestRunnerThreadCount(options.serverCount);
 
     // Set up the prelude/s
     TestToolUtil::setSessionDefaultPreludeFromExePath(argv[0], context.getSession());
@@ -3588,7 +3800,7 @@ SlangResult innerMain(int argc, char** argv)
         TestReporter reporter;
         SLANG_RETURN_ON_FAIL(reporter.init(options.outputMode));
 
-        context.reporter = &reporter;
+        context.setTestReporter(&reporter);
 
         reporter.m_dumpOutputOnFailure = options.dumpOutputOnFailure;
         reporter.m_isVerbose = options.shouldBeVerbose;
@@ -3611,18 +3823,22 @@ SlangResult innerMain(int argc, char** argv)
             TestReporter::SuiteScope suiteScope(&reporter, "unit tests");
             TestReporter::set(&reporter);
 
+            const auto spawnType = context.getFinalSpawnType();
+
             // Run the unit tests
             {
                 TestOptions testOptions;
                 testOptions.categories.add(unitTestCategory);
                 testOptions.categories.add(smokeTestCategory);
-                runUnitTestModule(&context, testOptions, "slang-unit-test-tool");
+                runUnitTestModule(&context, testOptions, spawnType, "slang-unit-test-tool");
             }
+
             {
                 TestOptions testOptions;
                 testOptions.categories.add(unitTestCategory);
-                runUnitTestModule(&context, testOptions, "gfx-unit-test-tool");
+                runUnitTestModule(&context, testOptions, spawnType, "gfx-unit-test-tool");
             }
+             
             TestReporter::set(nullptr);
         }
 
@@ -3634,6 +3850,9 @@ SlangResult innerMain(int argc, char** argv)
 int main(int argc, char** argv)
 {
     const SlangResult res = innerMain(argc, argv);
+
+    Slang::RttiInfo::deallocateAll();
+
 #ifdef _MSC_VER
     _CrtDumpMemoryLeaks();
 #endif

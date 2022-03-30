@@ -12,8 +12,10 @@
 #include "slang-com-helper.h"
 #include "../command-writer.h"
 #include "../renderer-shared.h"
+#include "../mutable-shader-object.h"
 #include "../simple-transient-resource-heap.h"
 #include "../slang-context.h"
+#include "../command-encoder-com-forward.h"
 
 #   ifdef RENDER_TEST_OPTIX
 
@@ -185,6 +187,7 @@ public:
 
     uint64_t getBindlessHandle() { return (uint64_t)m_cudaMemory; }
 
+    void* m_cudaExternalMemory = nullptr;
     void* m_cudaMemory = nullptr;
 
     RefPtr<CUDAContext> m_cudaContext;
@@ -192,6 +195,27 @@ public:
     virtual SLANG_NO_THROW DeviceAddress SLANG_MCALL getDeviceAddress() override
     {
         return (DeviceAddress)m_cudaMemory;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL getNativeResourceHandle(InteropHandle* outHandle) override
+    {
+        outHandle->handleValue = getBindlessHandle();
+        outHandle->api = InteropHandleAPI::CUDA;
+        return SLANG_OK;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL
+        map(MemoryRange* rangeToRead, void** outPointer) override
+    {
+        SLANG_UNUSED(rangeToRead);
+        SLANG_UNUSED(outPointer);
+        return SLANG_FAIL;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL unmap(MemoryRange* writtenRange) override
+    {
+        SLANG_UNUSED(writtenRange);
+        return SLANG_FAIL;
     }
 };
 
@@ -233,7 +257,16 @@ public:
     CUarray m_cudaArray = CUarray();
     CUmipmappedArray m_cudaMipMappedArray = CUmipmappedArray();
 
+    void* m_cudaExternalMemory = nullptr;
+
     RefPtr<CUDAContext> m_cudaContext;
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL getNativeResourceHandle(InteropHandle* outHandle) override
+    {
+        outHandle->handleValue = getBindlessHandle();
+        outHandle->api = InteropHandleAPI::CUDA;
+        return SLANG_OK;
+    }
 };
 
 class CUDAResourceView : public ResourceViewBase
@@ -541,6 +574,17 @@ public:
         *outEntryPoint = nullptr;
         return SLANG_OK;
     }
+
+    virtual SLANG_NO_THROW const void* SLANG_MCALL getRawData() override
+    {
+        return m_data.getBuffer();
+    }
+
+    virtual SLANG_NO_THROW size_t SLANG_MCALL getSize() override
+    {
+        return (size_t)m_data.getCount();
+    }
+
     virtual SLANG_NO_THROW Result SLANG_MCALL
         setData(ShaderOffset const& offset, void const* data, size_t size) override
     {
@@ -647,6 +691,9 @@ public:
     }
 };
 
+class CUDAMutableShaderObject : public MutableShaderObject< CUDAMutableShaderObject, CUDAShaderObjectLayout>
+{};
+
 class CUDAEntryPointShaderObject : public CUDAShaderObject
 {
 public:
@@ -656,11 +703,8 @@ public:
 class CUDARootShaderObject : public CUDAShaderObject
 {
 public:
-    // Override default reference counting behavior to disable lifetime management.
-    // Root objects are managed by command buffer and does not need to be freed by the user.
-    SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-    SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-
+    virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+    virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
 public:
     List<RefPtr<CUDAEntryPointShaderObject>> entryPointObjects;
     virtual SLANG_NO_THROW Result SLANG_MCALL
@@ -711,16 +755,8 @@ public:
     }
 };
 
-class CUDAQueryPool : public IQueryPool, public ComObject
+class CUDAQueryPool : public QueryPoolBase
 {
-public:
-    SLANG_COM_OBJECT_IUNKNOWN_ALL;
-    IQueryPool* getInterface(const Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IQueryPool)
-            return static_cast<IQueryPool*>(this);
-        return nullptr;
-    }
 public:
     // The event object for each query. Owned by the pool.
     List<CUevent> m_events;
@@ -887,6 +923,13 @@ private:
     String m_adapterName;
 
 public:
+    virtual SLANG_NO_THROW Result SLANG_MCALL getNativeDeviceHandles(InteropHandles* outHandles) override
+    {
+        outHandles->handles[0].handleValue = (uint64_t)m_device;
+        outHandles->handles[0].api = InteropHandleAPI::CUDA;
+        return SLANG_OK;
+    }
+
     class CommandQueueImpl;
 
     class CommandBufferImpl
@@ -904,8 +947,14 @@ public:
         }
     public:
         CUDADevice* m_device;
+        TransientResourceHeapBase* m_transientHeap;
 
-        void init(CUDADevice* device) { m_device = device; }
+        void init(CUDADevice* device, TransientResourceHeapBase* transientHeap)
+        {
+            m_device = device;
+            m_transientHeap = transientHeap;
+        }
+
         virtual SLANG_NO_THROW void SLANG_MCALL encodeRenderCommands(
             IRenderPassLayout* renderPass,
             IFramebuffer* framebuffer,
@@ -916,9 +965,192 @@ public:
             *outEncoder = nullptr;
         }
 
+        class ResourceCommandEncoderImpl : public IResourceCommandEncoder
+        {
+        public:
+            CommandWriter* m_writer;
+
+            void init(CommandBufferImpl* cmdBuffer) { m_writer = cmdBuffer; }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
+            virtual SLANG_NO_THROW void SLANG_MCALL copyBuffer(
+                IBufferResource* dst,
+                size_t dstOffset,
+                IBufferResource* src,
+                size_t srcOffset,
+                size_t size) override
+            {
+                m_writer->copyBuffer(dst, dstOffset, src, srcOffset, size);
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL textureBarrier(
+                size_t count,
+                ITextureResource* const* textures,
+                ResourceState src,
+                ResourceState dst) override
+            {}
+
+            virtual SLANG_NO_THROW void SLANG_MCALL bufferBarrier(
+                size_t count,
+                IBufferResource* const* buffers,
+                ResourceState src,
+                ResourceState dst) override
+            {}
+
+            virtual SLANG_NO_THROW void SLANG_MCALL uploadBufferData(
+                IBufferResource* dst, size_t offset, size_t size, void* data) override
+            {
+                m_writer->uploadBufferData(dst, offset, size, data);
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL
+                writeTimestamp(IQueryPool* pool, SlangInt index) override
+            {
+                m_writer->writeTimestamp(pool, index);
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL copyTexture(
+                ITextureResource* dst,
+                ResourceState dstState,
+                SubresourceRange dstSubresource,
+                ITextureResource::Offset3D dstOffset,
+                ITextureResource* src,
+                ResourceState srcState,
+                SubresourceRange srcSubresource,
+                ITextureResource::Offset3D srcOffset,
+                ITextureResource::Size extent) override
+            {
+                SLANG_UNUSED(dst);
+                SLANG_UNUSED(dstState);
+                SLANG_UNUSED(dstSubresource);
+                SLANG_UNUSED(dstOffset);
+                SLANG_UNUSED(src);
+                SLANG_UNUSED(srcState);
+                SLANG_UNUSED(srcSubresource);
+                SLANG_UNUSED(srcOffset);
+                SLANG_UNUSED(extent);
+                SLANG_UNIMPLEMENTED_X("copyTexture");
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL uploadTextureData(
+                ITextureResource* dst,
+                SubresourceRange subResourceRange,
+                ITextureResource::Offset3D offset,
+                ITextureResource::Size extent,
+                ITextureResource::SubresourceData* subResourceData,
+                size_t subResourceDataCount) override
+            {
+                SLANG_UNUSED(dst);
+                SLANG_UNUSED(subResourceRange);
+                SLANG_UNUSED(offset);
+                SLANG_UNUSED(extent);
+                SLANG_UNUSED(subResourceData);
+                SLANG_UNUSED(subResourceDataCount);
+                SLANG_UNIMPLEMENTED_X("uploadTextureData");
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL clearResourceView(
+                IResourceView* view,
+                ClearValue* clearValue,
+                ClearResourceViewFlags::Enum flags) override
+            {
+                SLANG_UNUSED(view);
+                SLANG_UNUSED(clearValue);
+                SLANG_UNUSED(flags);
+                SLANG_UNIMPLEMENTED_X("clearResourceView");
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL resolveResource(
+                ITextureResource* source,
+                ResourceState sourceState,
+                SubresourceRange sourceRange,
+                ITextureResource* dest,
+                ResourceState destState,
+                SubresourceRange destRange) override
+            {
+                SLANG_UNUSED(source);
+                SLANG_UNUSED(sourceState);
+                SLANG_UNUSED(sourceRange);
+                SLANG_UNUSED(dest);
+                SLANG_UNUSED(destState);
+                SLANG_UNUSED(destRange);
+                SLANG_UNIMPLEMENTED_X("resolveResource");
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL resolveQuery(
+                IQueryPool* queryPool,
+                uint32_t index,
+                uint32_t count,
+                IBufferResource* buffer,
+                uint64_t offset) override
+            {
+                SLANG_UNUSED(queryPool);
+                SLANG_UNUSED(index);
+                SLANG_UNUSED(count);
+                SLANG_UNUSED(buffer);
+                SLANG_UNUSED(offset);
+                SLANG_UNIMPLEMENTED_X("resolveQuery");
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL copyTextureToBuffer(
+                IBufferResource* dst,
+                size_t dstOffset,
+                size_t dstSize,
+                size_t dstRowStride,
+                ITextureResource* src,
+                ResourceState srcState,
+                SubresourceRange srcSubresource,
+                ITextureResource::Offset3D srcOffset,
+                ITextureResource::Size extent) override
+            {
+                SLANG_UNUSED(dst);
+                SLANG_UNUSED(dstOffset);
+                SLANG_UNUSED(dstSize);
+                SLANG_UNUSED(dstRowStride);
+                SLANG_UNUSED(src);
+                SLANG_UNUSED(srcState);
+                SLANG_UNUSED(srcSubresource);
+                SLANG_UNUSED(srcOffset);
+                SLANG_UNUSED(extent);
+                SLANG_UNIMPLEMENTED_X("copyTextureToBuffer");
+            }
+
+            virtual SLANG_NO_THROW void SLANG_MCALL textureSubresourceBarrier(
+                ITextureResource* texture,
+                SubresourceRange subresourceRange,
+                ResourceState src,
+                ResourceState dst) override
+            {
+                SLANG_UNUSED(texture);
+                SLANG_UNUSED(subresourceRange);
+                SLANG_UNUSED(src);
+                SLANG_UNUSED(dst);
+                SLANG_UNIMPLEMENTED_X("textureSubresourceBarrier");
+            }
+            virtual SLANG_NO_THROW void SLANG_MCALL
+                beginDebugEvent(const char* name, float rgbColor[3]) override
+            {
+                SLANG_UNUSED(name);
+                SLANG_UNUSED(rgbColor);
+            }
+            virtual SLANG_NO_THROW void SLANG_MCALL endDebugEvent() override {}
+        };
+
+        ResourceCommandEncoderImpl m_resourceCommandEncoder;
+
+        virtual SLANG_NO_THROW void SLANG_MCALL
+            encodeResourceCommands(IResourceCommandEncoder** outEncoder) override
+        {
+            m_resourceCommandEncoder.init(this);
+            *outEncoder = &m_resourceCommandEncoder;
+        }
+
         class ComputeCommandEncoderImpl
             : public IComputeCommandEncoder
+            , public ResourceCommandEncoderImpl
         {
+        public:
+            SLANG_GFX_FORWARD_RESOURCE_COMMAND_ENCODER_IMPL(ResourceCommandEncoderImpl)
         public:
             CommandWriter* m_writer;
             CommandBufferImpl* m_commandBuffer;
@@ -941,15 +1173,27 @@ public:
                 return SLANG_OK;
             }
 
+            virtual SLANG_NO_THROW Result SLANG_MCALL
+                bindPipelineWithRootObject(IPipelineState* state, IShaderObject* rootObject) override
+            {
+                m_writer->setPipelineState(state);
+                PipelineStateBase* pipelineImpl = static_cast<PipelineStateBase*>(state);
+                SLANG_RETURN_ON_FAIL(m_commandBuffer->m_device->createRootShaderObject(
+                    pipelineImpl->m_program, m_rootObject.writeRef()));
+                m_rootObject->copyFrom(rootObject, m_commandBuffer->m_transientHeap);
+                return SLANG_OK;
+            }
+
             virtual SLANG_NO_THROW void SLANG_MCALL dispatchCompute(int x, int y, int z) override
             {
                 m_writer->bindRootShaderObject(m_rootObject);
                 m_writer->dispatchCompute(x, y, z);
             }
 
-            virtual SLANG_NO_THROW void SLANG_MCALL writeTimestamp(IQueryPool* pool, SlangInt index) override
+            virtual SLANG_NO_THROW void SLANG_MCALL
+                dispatchComputeIndirect(IBufferResource* argBuffer, uint64_t offset) override
             {
-                m_writer->writeTimestamp(pool, index);
+                SLANG_UNIMPLEMENTED_X("dispatchComputeIndirect");
             }
         };
 
@@ -961,49 +1205,6 @@ public:
             *outEncoder = &m_computeCommandEncoder;
         }
 
-        class ResourceCommandEncoderImpl
-            : public IResourceCommandEncoder
-        {
-        public:
-            CommandWriter* m_writer;
-
-            void init(CommandBufferImpl* cmdBuffer)
-            {
-                m_writer = cmdBuffer;
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL endEncoding() override {}
-            virtual SLANG_NO_THROW void SLANG_MCALL copyBuffer(
-                IBufferResource* dst,
-                size_t dstOffset,
-                IBufferResource* src,
-                size_t srcOffset,
-                size_t size) override
-            {
-                m_writer->copyBuffer(dst, dstOffset, src, srcOffset, size);
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL
-                uploadBufferData(IBufferResource* dst, size_t offset, size_t size, void* data) override
-            {
-                m_writer->uploadBufferData(dst, offset, size, data);
-            }
-
-            virtual SLANG_NO_THROW void SLANG_MCALL writeTimestamp(IQueryPool* pool, SlangInt index) override
-            {
-                m_writer->writeTimestamp(pool, index);
-            }
-        };
-
-        ResourceCommandEncoderImpl m_resourceCommandEncoder;
-
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            encodeResourceCommands(IResourceCommandEncoder** outEncoder) override
-        {
-            m_resourceCommandEncoder.init(this);
-            *outEncoder = &m_resourceCommandEncoder;
-        }
-
         virtual SLANG_NO_THROW void SLANG_MCALL
             encodeRayTracingCommands(IRayTracingCommandEncoder** outEncoder) override
         {
@@ -1011,6 +1212,11 @@ public:
         }
 
         virtual SLANG_NO_THROW void SLANG_MCALL close() override {}
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL getNativeHandle(InteropHandle* outHandle) override
+        {
+            return SLANG_FAIL;
+        }
     };
 
     class CommandQueueImpl
@@ -1053,20 +1259,34 @@ public:
             return m_desc;
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL
-            executeCommandBuffers(uint32_t count, ICommandBuffer* const* commandBuffers) override
+        virtual SLANG_NO_THROW void SLANG_MCALL executeCommandBuffers(
+            uint32_t count, ICommandBuffer* const* commandBuffers, IFence* fence, uint64_t valueToSignal) override
         {
+            SLANG_UNUSED(valueToSignal);
+            // TODO: implement fence.
+            assert(fence == nullptr);
             for (uint32_t i = 0; i < count; i++)
             {
                 execute(static_cast<CommandBufferImpl*>(commandBuffers[i]));
             }
         }
 
-        virtual SLANG_NO_THROW void SLANG_MCALL wait() override
+        virtual SLANG_NO_THROW void SLANG_MCALL waitOnHost() override
         {
             auto resultCode = cuStreamSynchronize(stream);
             if (resultCode != cudaSuccess)
                 SLANG_CUDA_HANDLE_ERROR(resultCode);
+        }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL waitForFenceValuesOnDevice(
+            uint32_t fenceCount, IFence** fences, uint64_t* waitValues) override
+        {
+            return SLANG_FAIL;
+        }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL getNativeHandle(InteropHandle* outHandle) override
+        {
+            return SLANG_FAIL;
         }
 
     public:
@@ -1192,11 +1412,11 @@ public:
                 switch (cmd.name)
                 {
                 case CommandName::SetPipelineState:
-                    setPipelineState(commandBuffer->getObject<IPipelineState>(cmd.operands[0]));
+                    setPipelineState(commandBuffer->getObject<PipelineStateBase>(cmd.operands[0]));
                     break;
                 case CommandName::BindRootShaderObject:
                     bindRootShaderObject(
-                        commandBuffer->getObject<IShaderObject>(cmd.operands[0]));
+                        commandBuffer->getObject<ShaderObjectBase>(cmd.operands[0]));
                     break;
                 case CommandName::DispatchCompute:
                     dispatchCompute(
@@ -1204,22 +1424,22 @@ public:
                     break;
                 case CommandName::CopyBuffer:
                     copyBuffer(
-                        commandBuffer->getObject<IBufferResource>(cmd.operands[0]),
+                        commandBuffer->getObject<BufferResource>(cmd.operands[0]),
                         cmd.operands[1],
-                        commandBuffer->getObject<IBufferResource>(cmd.operands[2]),
+                        commandBuffer->getObject<BufferResource>(cmd.operands[2]),
                         cmd.operands[3],
                         cmd.operands[4]);
                     break;
                 case CommandName::UploadBufferData:
                     uploadBufferData(
-                        commandBuffer->getObject<IBufferResource>(cmd.operands[0]),
+                        commandBuffer->getObject<BufferResource>(cmd.operands[0]),
                         cmd.operands[1],
                         cmd.operands[2],
                         commandBuffer->getData<uint8_t>(cmd.operands[3]));
                     break;
                 case CommandName::WriteTimestamp:
                     writeTimestamp(
-                        commandBuffer->getObject<IQueryPool>(cmd.operands[0]),
+                        commandBuffer->getObject<QueryPoolBase>(cmd.operands[0]),
                         (SlangInt)cmd.operands[1]);
                 }
             }
@@ -1246,6 +1466,8 @@ public:
 
         m_context = new CUDAContext();
 
+        int count = -1;
+        cuDeviceGetCount(&count);
         SLANG_CUDA_RETURN_ON_FAIL(cuDeviceGet(&m_device, m_deviceIndex));
 
         SLANG_CUDA_RETURN_WITH_REPORT_ON_FAIL(
@@ -1272,6 +1494,62 @@ public:
         }
 
         return SLANG_OK;
+    }
+
+    Result getCUDAFormat(Format format, CUarray_format* outFormat)
+    {
+        // TODO: Expand to cover all available formats that can be supported in CUDA
+        switch (format)
+        {
+        case Format::R32G32B32A32_FLOAT:
+        case Format::R32G32B32_FLOAT:
+        case Format::R32G32_FLOAT:
+        case Format::R32_FLOAT:
+        case Format::D32_FLOAT:
+            *outFormat = CU_AD_FORMAT_FLOAT;
+            return SLANG_OK;
+        case Format::R16G16B16A16_FLOAT:
+        case Format::R16G16_FLOAT:
+        case Format::R16_FLOAT:
+            *outFormat = CU_AD_FORMAT_HALF;
+            return SLANG_OK;
+        case Format::R32G32B32A32_UINT:
+        case Format::R32G32B32_UINT:
+        case Format::R32G32_UINT:
+        case Format::R32_UINT:
+            *outFormat = CU_AD_FORMAT_UNSIGNED_INT32;
+            return SLANG_OK;
+        case Format::R16G16B16A16_UINT:
+        case Format::R16G16_UINT:
+        case Format::R16_UINT:
+            *outFormat = CU_AD_FORMAT_UNSIGNED_INT16;
+            return SLANG_OK;
+        case Format::R8G8B8A8_UINT:
+        case Format::R8G8_UINT:
+        case Format::R8_UINT:
+        case Format::R8G8B8A8_UNORM:
+            *outFormat = CU_AD_FORMAT_UNSIGNED_INT8;
+            return SLANG_OK;
+        case Format::R32G32B32A32_SINT:
+        case Format::R32G32B32_SINT:
+        case Format::R32G32_SINT:
+        case Format::R32_SINT:
+            *outFormat = CU_AD_FORMAT_SIGNED_INT32;
+            return SLANG_OK;
+        case Format::R16G16B16A16_SINT:
+        case Format::R16G16_SINT:
+        case Format::R16_SINT:
+            *outFormat = CU_AD_FORMAT_SIGNED_INT16;
+            return SLANG_OK;
+        case Format::R8G8B8A8_SINT:
+        case Format::R8G8_SINT:
+        case Format::R8_SINT:
+            *outFormat = CU_AD_FORMAT_SIGNED_INT8;
+            return SLANG_OK;
+        default:
+            SLANG_ASSERT(!"Only support R32_FLOAT/R8G8B8A8_UNORM formats for now");
+            return SLANG_FAIL;
+        }
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureResource(
@@ -1324,43 +1602,34 @@ public:
         {
             CUarray_format format = CU_AD_FORMAT_FLOAT;
             int numChannels = 0;
-            
-            switch (desc.format)
+
+            SLANG_RETURN_ON_FAIL(getCUDAFormat(desc.format, &format));
+            FormatInfo info;
+            gfxGetFormatInfo(desc.format, &info);
+            numChannels = info.channelCount;
+
+            switch (format)
             {
-            case Format::RGBA_Float32:
-            case Format::RGB_Float32:
-            case Format::RG_Float32:
-            case Format::R_Float32:
-            case Format::D_Float32:
-                {
-                    const FormatInfo info = gfxGetFormatInfo(desc.format);
-                    format = CU_AD_FORMAT_FLOAT;
-                    numChannels = info.channelCount;
-                    elementSize = sizeof(float) * numChannels;
-                    break;
-                }
-            case Format::RGBA_Float16:
-            case Format::RG_Float16:
-            case Format::R_Float16:
-                {
-                    const FormatInfo info = gfxGetFormatInfo(desc.format);
-                    format = CU_AD_FORMAT_HALF;
-                    numChannels = info.channelCount;
-                    elementSize = sizeof(uint16_t) * numChannels;
-                    break;
-                }
-            case Format::RGBA_Unorm_UInt8:
-                {
-                    format = CU_AD_FORMAT_UNSIGNED_INT8;
-                    numChannels = 4;
-                    elementSize = sizeof(uint32_t);
-                    break;
-                }
+            case CU_AD_FORMAT_FLOAT:
+            {
+                elementSize = sizeof(float) * numChannels;
+                break;
+            }
+            case CU_AD_FORMAT_HALF:
+            {
+                elementSize = sizeof(uint16_t) * numChannels;
+                break;
+            }
+            case CU_AD_FORMAT_UNSIGNED_INT8:
+            {
+                elementSize = sizeof(uint8_t) * numChannels;
+                break;
+            }
             default:
-                {
-                    SLANG_ASSERT(!"Only support R_Float32/RGBA_Unorm_UInt8 formats for now");
-                    return SLANG_FAIL;
-                }
+            {
+                SLANG_ASSERT(!"Only support R32_FLOAT/R8G8B8A8_UNORM formats for now");
+                return SLANG_FAIL;
+            }
             }
 
             if (desc.numMipLevels > 1)
@@ -1722,6 +1991,145 @@ public:
         return SLANG_OK;
     }
 
+    virtual SLANG_NO_THROW Result SLANG_MCALL createBufferFromSharedHandle(
+        InteropHandle handle,
+        const IBufferResource::Desc& desc,
+        IBufferResource** outResource) override
+    {
+        if (handle.handleValue == 0)
+        {
+            *outResource = nullptr;
+            return SLANG_OK;
+        }
+
+        RefPtr<MemoryCUDAResource> resource = new MemoryCUDAResource(desc);
+        resource->m_cudaContext = m_context;
+
+        // CUDA manages sharing of buffers through the idea of an
+        // "external memory" object, which represents the relationship
+        // with another API's objects. In order to create this external
+        // memory association, we first need to fill in a descriptor struct.
+        cudaExternalMemoryHandleDesc externalMemoryHandleDesc;
+        memset(&externalMemoryHandleDesc, 0, sizeof(externalMemoryHandleDesc));
+        switch (handle.api)
+        {
+        case InteropHandleAPI::D3D12:
+            externalMemoryHandleDesc.type = cudaExternalMemoryHandleTypeD3D12Resource;
+            break;
+        case InteropHandleAPI::Vulkan:
+            externalMemoryHandleDesc.type = cudaExternalMemoryHandleTypeOpaqueWin32;
+            break;
+        default:
+            return SLANG_FAIL;
+        }
+        externalMemoryHandleDesc.handle.win32.handle = (void*)handle.handleValue;
+        externalMemoryHandleDesc.size = desc.sizeInBytes;
+        externalMemoryHandleDesc.flags = cudaExternalMemoryDedicated;
+
+        // Once we have filled in the descriptor, we can request
+        // that CUDA create the required association between the
+        // external buffer and its own memory.
+        cudaExternalMemory_t externalMemory;
+        SLANG_CUDA_RETURN_ON_FAIL(cudaImportExternalMemory(&externalMemory, &externalMemoryHandleDesc));
+        resource->m_cudaExternalMemory = externalMemory;
+
+        // The CUDA "external memory" handle is not itself a device
+        // pointer, so we need to query for a suitable device address
+        // for the buffer with another call.
+        //
+        // Just as for the external memory, we fill in a descriptor
+        // structure (although in this case we only need to specify
+        // the size).
+        cudaExternalMemoryBufferDesc bufferDesc;
+        memset(&bufferDesc, 0, sizeof(bufferDesc));
+        bufferDesc.size = desc.sizeInBytes;
+
+        // Finally, we can "map" the buffer to get a device address.
+        void* deviceAddress;
+        SLANG_CUDA_RETURN_ON_FAIL(cudaExternalMemoryGetMappedBuffer(&deviceAddress, externalMemory, &bufferDesc));
+        resource->m_cudaMemory = deviceAddress;
+
+        returnComPtr(outResource, resource);
+        return SLANG_OK;
+    }
+
+    virtual SLANG_NO_THROW Result SLANG_MCALL createTextureFromSharedHandle(
+        InteropHandle handle,
+        const ITextureResource::Desc& desc,
+        const size_t size,
+        ITextureResource** outResource) override
+    {
+        if (handle.handleValue == 0)
+        {
+            *outResource = nullptr;
+            return SLANG_OK;
+        }
+
+        RefPtr<TextureCUDAResource> resource = new TextureCUDAResource(desc);
+        resource->m_cudaContext = m_context;
+
+        // CUDA manages sharing of buffers through the idea of an
+        // "external memory" object, which represents the relationship
+        // with another API's objects. In order to create this external
+        // memory association, we first need to fill in a descriptor struct.
+        CUDA_EXTERNAL_MEMORY_HANDLE_DESC externalMemoryHandleDesc;
+        memset(&externalMemoryHandleDesc, 0, sizeof(externalMemoryHandleDesc));
+        switch (handle.api)
+        {
+        case InteropHandleAPI::D3D12:
+            externalMemoryHandleDesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE;
+            break;
+        case InteropHandleAPI::Vulkan:
+            externalMemoryHandleDesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32;
+            break;
+        default:
+            return SLANG_FAIL;
+        }
+        externalMemoryHandleDesc.handle.win32.handle = (void*)handle.handleValue;
+        externalMemoryHandleDesc.size = size;
+        externalMemoryHandleDesc.flags = cudaExternalMemoryDedicated;
+
+        CUexternalMemory externalMemory;
+        SLANG_CUDA_RETURN_ON_FAIL(cuImportExternalMemory(&externalMemory, &externalMemoryHandleDesc));
+        resource->m_cudaExternalMemory = externalMemory;
+
+        FormatInfo formatInfo;
+        SLANG_RETURN_ON_FAIL(gfxGetFormatInfo(desc.format, &formatInfo));
+        CUDA_ARRAY3D_DESCRIPTOR arrayDesc;
+        arrayDesc.Depth = desc.size.depth;
+        arrayDesc.Height = desc.size.height;
+        arrayDesc.Width = desc.size.width;
+        arrayDesc.NumChannels = formatInfo.channelCount;
+        getCUDAFormat(desc.format, &arrayDesc.Format);
+        arrayDesc.Flags = 0; // TODO: Flags? CUDA_ARRAY_LAYERED/SURFACE_LDST/CUBEMAP/TEXTURE_GATHER
+
+        CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC externalMemoryMipDesc;
+        memset(&externalMemoryMipDesc, 0, sizeof(externalMemoryMipDesc));
+        externalMemoryMipDesc.offset = 0;
+        externalMemoryMipDesc.arrayDesc = arrayDesc;
+        externalMemoryMipDesc.numLevels = desc.numMipLevels;
+
+        CUmipmappedArray mipArray;
+        SLANG_CUDA_RETURN_ON_FAIL(cuExternalMemoryGetMappedMipmappedArray(&mipArray, externalMemory, &externalMemoryMipDesc));
+        resource->m_cudaMipMappedArray = mipArray;
+
+        CUarray cuArray;
+        SLANG_CUDA_RETURN_ON_FAIL(cuMipmappedArrayGetLevel(&cuArray, mipArray, 0));
+        resource->m_cudaArray = cuArray;
+
+        CUDA_RESOURCE_DESC surfDesc;
+        memset(&surfDesc, 0, sizeof(surfDesc));
+        surfDesc.resType = CU_RESOURCE_TYPE_ARRAY;
+        surfDesc.res.array.hArray = cuArray;
+
+        CUsurfObject surface;
+        SLANG_CUDA_RETURN_ON_FAIL(cuSurfObjectCreate(&surface, &surfDesc));
+        resource->m_cudaSurfObj = surface;
+
+        returnComPtr(outResource, resource);
+        return SLANG_OK;
+    }
+
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureView(
         ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView) override
     {
@@ -1733,7 +2141,10 @@ public:
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferView(
-        IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView) override
+        IBufferResource* buffer,
+        IBufferResource* counterBuffer,
+        IResourceView::Desc const& desc,
+        IResourceView** outView) override
     {
         RefPtr<CUDAResourceView> view = new CUDAResourceView();
         view->m_desc = desc;
@@ -1772,6 +2183,16 @@ public:
         return SLANG_OK;
     }
 
+    virtual Result createMutableShaderObject(
+        ShaderObjectLayoutBase* layout,
+        IShaderObject** outObject) override
+    {
+        RefPtr<CUDAMutableShaderObject> result = new CUDAMutableShaderObject();
+        SLANG_RETURN_ON_FAIL(result->init(this, dynamic_cast<CUDAShaderObjectLayout*>(layout)));
+        returnComPtr(outObject, result);
+        return SLANG_OK;
+    }
+
     Result createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject)
     {
         auto cudaProgram = dynamic_cast<CUDAShaderProgram*>(program);
@@ -1783,25 +2204,27 @@ public:
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override
+    virtual SLANG_NO_THROW Result SLANG_MCALL createProgram(
+        const IShaderProgram::Desc& desc,
+        IShaderProgram** outProgram,
+        ISlangBlob** outDiagnosticBlob) override
     {
         // If this is a specializable program, we just keep a reference to the slang program and
         // don't actually create any kernels. This program will be specialized later when we know
         // the shader object bindings.
         RefPtr<CUDAShaderProgram> cudaProgram = new CUDAShaderProgram();
-        cudaProgram->slangProgram = desc.slangProgram;
+        cudaProgram->init(desc);
         cudaProgram->cudaContext = m_context;
-        if (desc.slangProgram->getSpecializationParamCount() != 0)
+        if (desc.slangGlobalScope->getSpecializationParamCount() != 0)
         {
-            cudaProgram->layout = new CUDAProgramLayout(this, desc.slangProgram->getLayout());
+            cudaProgram->layout = new CUDAProgramLayout(this, desc.slangGlobalScope->getLayout());
             returnComPtr(outProgram, cudaProgram);
             return SLANG_OK;
         }
 
         ComPtr<ISlangBlob> kernelCode;
         ComPtr<ISlangBlob> diagnostics;
-        auto compileResult = desc.slangProgram->getEntryPointCode(
+        auto compileResult = desc.slangGlobalScope->getEntryPointCode(
             (SlangInt)0, 0, kernelCode.writeRef(), diagnostics.writeRef());
         if (diagnostics)
         {
@@ -1809,20 +2232,22 @@ public:
                 compileResult == SLANG_OK ? DebugMessageType::Warning : DebugMessageType::Error,
                 DebugMessageSource::Slang,
                 (char*)diagnostics->getBufferPointer());
+            if (outDiagnosticBlob)
+                returnComPtr(outDiagnosticBlob, diagnostics);
         }
         SLANG_RETURN_ON_FAIL(compileResult);
         
         SLANG_CUDA_RETURN_ON_FAIL(cuModuleLoadData(&cudaProgram->cudaModule, kernelCode->getBufferPointer()));
-        cudaProgram->kernelName = desc.slangProgram->getLayout()->getEntryPointByIndex(0)->getName();
+        cudaProgram->kernelName = desc.slangGlobalScope->getLayout()->getEntryPointByIndex(0)->getName();
         SLANG_CUDA_RETURN_ON_FAIL(cuModuleGetFunction(
             &cudaProgram->cudaKernel, cudaProgram->cudaModule, cudaProgram->kernelName.getBuffer()));
 
-        auto slangProgram = desc.slangProgram;
-        if( slangProgram )
+        auto slangGlobalScope = desc.slangGlobalScope;
+        if( slangGlobalScope )
         {
-            cudaProgram->slangProgram = slangProgram;
+            cudaProgram->slangGlobalScope = slangGlobalScope;
 
-            auto slangProgramLayout = slangProgram->getLayout();
+            auto slangProgramLayout = slangGlobalScope->getLayout();
             if(!slangProgramLayout)
                 return SLANG_FAIL;
 
@@ -1919,12 +2344,10 @@ public:
     }
     
     virtual SLANG_NO_THROW Result SLANG_MCALL createInputLayout(
-        const InputElementDesc* inputElements,
-        UInt inputElementCount,
+        IInputLayout::Desc const& desc,
         IInputLayout** outLayout) override
     {
-        SLANG_UNUSED(inputElements);
-        SLANG_UNUSED(inputElementCount);
+        SLANG_UNUSED(desc);
         SLANG_UNUSED(outLayout);
         return SLANG_E_NOT_AVAILABLE;
     }
@@ -1944,12 +2367,36 @@ public:
         size_t* outRowPitch,
         size_t* outPixelSize) override
     {
-        SLANG_UNUSED(texture);
-        SLANG_UNUSED(outBlob);
-        SLANG_UNUSED(outRowPitch);
-        SLANG_UNUSED(outPixelSize);
+        auto textureImpl = static_cast<TextureCUDAResource*>(texture);
+        RefPtr<ListBlob> blob = new ListBlob();
 
-        return SLANG_E_NOT_AVAILABLE;
+        auto desc = textureImpl->getDesc();
+        auto width = desc->size.width;
+        auto height = desc->size.height;
+        FormatInfo sizeInfo;
+        SLANG_RETURN_ON_FAIL(gfxGetFormatInfo(desc->format, &sizeInfo));
+        size_t pixelSize = sizeInfo.blockSizeInBytes / sizeInfo.pixelsPerBlock;
+        size_t rowPitch = width * pixelSize;
+        size_t size = height * rowPitch;
+        blob->m_data.setCount((Index)size);
+
+        CUDA_MEMCPY2D copyParam;
+        memset(&copyParam, 0, sizeof(copyParam));
+
+        copyParam.srcMemoryType = CU_MEMORYTYPE_ARRAY;
+        copyParam.srcArray = textureImpl->m_cudaArray;
+
+        copyParam.dstMemoryType = CU_MEMORYTYPE_HOST;
+        copyParam.dstHost = blob->m_data.getBuffer();
+        copyParam.dstPitch = rowPitch;
+        copyParam.WidthInBytes = copyParam.dstPitch;
+        copyParam.Height = height;
+        SLANG_CUDA_RETURN_ON_FAIL(cuMemcpy2D(&copyParam));
+
+        *outRowPitch = rowPitch;
+        *outPixelSize = pixelSize;
+        returnComPtr(outBlob, blob);
+        return SLANG_OK;
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL readBufferResource(
@@ -2059,7 +2506,7 @@ SlangResult SLANG_MCALL createCUDADevice(const IDevice::Desc* desc, IDevice** ou
 {
     SLANG_UNUSED(desc);
     *outDevice = nullptr;
-    return SLANG_OK;
+    return SLANG_FAIL;
 }
 #endif
 

@@ -52,8 +52,7 @@ namespace Slang
             if (auto typeInfo = generatedAnyValueTypes.TryGetValue(size))
                 return typeInfo->Ptr();
             RefPtr<AnyValueTypeInfo> info = new AnyValueTypeInfo();
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+            IRBuilder builder(sharedContext->sharedBuilderStorage);
             builder.setInsertBefore(type);
             auto structType = builder.createStructType();
             info->type = structType;
@@ -147,6 +146,7 @@ namespace Slang
             case kIROp_UInt8Type:
             case kIROp_UInt16Type:
             case kIROp_HalfType:
+            case kIROp_BoolType:
                 context->marshalBasicType(builder, dataType, concreteTypedVar);
                 break;
             case kIROp_VectorType:
@@ -234,6 +234,7 @@ namespace Slang
                 {
                 case kIROp_IntType:
                 case kIROp_FloatType:
+                case kIROp_BoolType:
                 {
                     ensureOffsetAt4ByteBoundary();
                     if (fieldOffset < static_cast<uint32_t>(anyValInfo->fieldKeys.getCount()))
@@ -303,11 +304,11 @@ namespace Slang
                     advanceOffset(2);
                     break;
                 }
+                case kIROp_Int8Type:
+                case kIROp_UInt8Type:
                 case kIROp_UInt64Type:
                 case kIROp_Int64Type:
                 case kIROp_DoubleType:
-                case kIROp_Int8Type:
-                case kIROp_UInt8Type:
                     SLANG_UNIMPLEMENTED_X("AnyValue type packing for non 32-bit elements");
                     break;
                 default:
@@ -342,8 +343,7 @@ namespace Slang
 
         IRFunc* generatePackingFunc(IRType* type, IRAnyValueType* anyValueType)
         {
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+            IRBuilder builder(sharedContext->sharedBuilderStorage);
             builder.setInsertBefore(type);
             auto anyValInfo = ensureAnyValueType(anyValueType);
 
@@ -397,6 +397,7 @@ namespace Slang
                 {
                 case kIROp_IntType:
                 case kIROp_FloatType:
+                case kIROp_BoolType:
                 {
                     ensureOffsetAt4ByteBoundary();
                     if (fieldOffset < static_cast<uint32_t>(anyValInfo->fieldKeys.getCount()))
@@ -504,8 +505,7 @@ namespace Slang
 
         IRFunc* generateUnpackingFunc(IRType* type, IRAnyValueType* anyValueType)
         {
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+            IRBuilder builder(sharedContext->sharedBuilderStorage);
             builder.setInsertBefore(type);
             auto anyValInfo = ensureAnyValueType(anyValueType);
 
@@ -560,9 +560,8 @@ namespace Slang
             auto func = ensureMarshallingFunc(
                 operand->getDataType(),
                 cast<IRAnyValueType>(packInst->getDataType()));
-            IRBuilder builderStorage;
+            IRBuilder builderStorage(sharedContext->sharedBuilderStorage);
             auto builder = &builderStorage;
-            builder->sharedBuilder = &sharedContext->sharedBuilderStorage;
             builder->setInsertBefore(packInst);
             auto callInst = builder->emitCallInst(packInst->getDataType(), func.packFunc, 1, &operand);
             packInst->replaceUsesWith(callInst);
@@ -575,9 +574,8 @@ namespace Slang
             auto func = ensureMarshallingFunc(
                 unpackInst->getDataType(),
                 cast<IRAnyValueType>(operand->getDataType()));
-            IRBuilder builderStorage;
+            IRBuilder builderStorage(sharedContext->sharedBuilderStorage);
             auto builder = &builderStorage;
-            builder->sharedBuilder = &sharedContext->sharedBuilderStorage;
             builder->setInsertBefore(unpackInst);
             auto callInst = builder->emitCallInst(unpackInst->getDataType(), func.unpackFunc, 1, &operand);
             unpackInst->replaceUsesWith(callInst);
@@ -609,8 +607,7 @@ namespace Slang
             // generate along the way.
             //
             SharedIRBuilder* sharedBuilder = &sharedContext->sharedBuilderStorage;
-            sharedBuilder->module = sharedContext->module;
-            sharedBuilder->session = sharedContext->module->session;
+            sharedBuilder->init(sharedContext->module);
 
             sharedContext->addToWorkList(sharedContext->module->getModuleInst());
 

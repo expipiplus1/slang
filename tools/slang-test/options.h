@@ -36,6 +36,15 @@ protected:
     Slang::Dictionary<Slang::String, Slang::RefPtr<TestCategory> > m_categoryMap;
 };
 
+enum class SpawnType
+{
+    Default,                                    ///< Default - typically uses shared library, on CI may use TestServer    
+    UseExe,                                     ///< Tests using executable (for example slangc)
+    UseSharedLibrary,                           ///< Runs testing in process (a crash tan take down the 
+    UseTestServer,                              ///< Use the test server to isolate testing
+    UseFullyIsolatedTestServer,                 ///< Uses a test server for each test (slow!)
+};
+
 struct Options
 {
     char const* appName = "slang-test";
@@ -61,14 +70,19 @@ struct Options
     // force generation of baselines for HLSL tests
     bool generateHLSLBaselines = false;
 
+    // Whether to skip the step of creating test devices to check if an API is actually available.
+    bool skipApiDetection = false;
+
     // Dump expected/actual output on failures, for debugging.
     // This is especially intended for use in continuous
     // integration builds.
     bool dumpOutputOnFailure = false;
 
-    // If set, will force using of executables (not shared library) for tests
-    bool useExes = false;
-
+    // Set the default spawn type to use
+    // Having tests isolated, slows down testing considerably, so using UseSharedLibrary is the most
+    // desirable default usually.
+    SpawnType defaultSpawnType = SpawnType::Default;
+    
     // kind of output to generate
     TestOutputMode outputMode = TestOutputMode::Default;
 
@@ -97,6 +111,9 @@ struct Options
 
     // The adapter to use. If empty will match first found adapter.
     Slang::String adapter;
+
+    // Maximum number of test servers to run.
+    int serverCount = 4;
 
         /// Parse the args, report any errors into stdError, and write the results into optionsOut
     static SlangResult parse(int argc, char** argv, TestCategorySet* categorySet, Slang::WriterHelper stdError, Options* optionsOut);

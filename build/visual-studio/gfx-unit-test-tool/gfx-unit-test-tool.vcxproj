@@ -165,7 +165,7 @@
       <WarningLevel>Level3</WarningLevel>
       <PreprocessorDefinitions>_DEBUG;SLANG_SHARED_LIBRARY_TOOL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -181,7 +181,7 @@
       <WarningLevel>Level3</WarningLevel>
       <PreprocessorDefinitions>_DEBUG;SLANG_SHARED_LIBRARY_TOOL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -268,17 +268,48 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\..\tools\gfx-unit-test\gfx-test-texture-util.h" />
     <ClInclude Include="..\..\..\tools\gfx-unit-test\gfx-test-util.h" />
     <ClInclude Include="..\..\..\tools\unit-test\slang-unit-test.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\buffer-barrier-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\clear-texture-test.cpp" />
     <ClCompile Include="..\..\..\tools\gfx-unit-test\compute-smoke.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\copy-texture-tests.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\create-buffer-from-handle.cpp" />
     <ClCompile Include="..\..\..\tools\gfx-unit-test\existing-device-handle-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\format-unit-tests.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\get-buffer-resource-handle-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\get-cmd-buffer-handle-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\get-cmd-queue-handle-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\get-supported-resource-states-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\get-texture-resource-handle-test.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\gfx-test-texture-util.cpp" />
     <ClCompile Include="..\..\..\tools\gfx-unit-test\gfx-test-util.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\instanced-draw-tests.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\mutable-shader-object.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\nested-parameter-block.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\resolve-resource-tests.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\root-mutable-shader-object.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\root-shader-parameter.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\sampler-array.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\shared-buffers-tests.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx-unit-test\shared-textures-tests.cpp" />
     <ClCompile Include="..\..\..\tools\unit-test\slang-unit-test.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\..\..\tools\gfx-unit-test\buffer-barrier-test.slang" />
     <None Include="..\..\..\tools\gfx-unit-test\compute-smoke.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\compute-trivial.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\format-test-shaders.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\graphics-smoke.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\mutable-shader-object.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\nested-parameter-block.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\resolve-resource-shader.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\root-shader-parameter.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\sampler-array.slang" />
+    <None Include="..\..\..\tools\gfx-unit-test\trivial-copy.slang" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\core\core.vcxproj">
