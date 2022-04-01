@@ -42,9 +42,8 @@ IRFunc* specializeDispatchFunction(SharedGenericsLoweringContext* sharedContext,
     }
     SLANG_ASSERT(callInst && lookupInst && returnInst);
 
-    IRBuilder builderStorage;
+    IRBuilder builderStorage(sharedContext->sharedBuilderStorage);
     auto builder = &builderStorage;
-    builder->sharedBuilder = &sharedContext->sharedBuilderStorage;
     builder->setInsertBefore(dispatchFunc);
 
     // Create a new dispatch func to replace the existing one.
@@ -124,14 +123,14 @@ IRFunc* specializeDispatchFunction(SharedGenericsLoweringContext* sharedContext,
     // the witness table sequential ID passed in.
     builder->setInsertInto(newDispatchFunc);
 
-    
+
     if (witnessTables.getCount() == 1)
     {
         // If there is only 1 case, no switch statement is necessary.
         builder->setInsertInto(newBlock);
         builder->emitBranch(defaultBlock);
     }
-    else
+    else if (witnessTables.getCount() > 1)
     {
         auto breakBlock = builder->emitBlock();
         builder->setInsertInto(breakBlock);
@@ -144,6 +143,21 @@ IRFunc* specializeDispatchFunction(SharedGenericsLoweringContext* sharedContext,
             defaultBlock,
             caseBlocks.getCount(),
             caseBlocks.getBuffer());
+    }
+    else
+    {
+        // We have no witness tables that implements this interface.
+        // Just return a default value.
+        builder->setInsertInto(newBlock);
+        if (callInst->getDataType()->getOp() == kIROp_VoidType)
+        {
+            builder->emitReturn();
+        }
+        else
+        {
+            auto defaultValue = builder->emitConstructorInst(callInst->getDataType(), 0, nullptr);
+            builder->emitReturn(defaultValue);
+        }
     }
     // Remove old implementation.
     dispatchFunc->replaceUsesWith(newDispatchFunc);
@@ -209,8 +223,7 @@ void ensureWitnessTableSequentialIDs(SharedGenericsLoweringContext* sharedContex
             }
 
             // Add a decoration to the inst.
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+            IRBuilder builder(sharedContext->sharedBuilderStorage);
             builder.setInsertBefore(inst);
             builder.addSequentialIDDecoration(inst, seqID);
         }
@@ -232,8 +245,7 @@ void fixupDispatchFuncCall(SharedGenericsLoweringContext* sharedContext, IRFunc*
         {
             if (call->getCallee() != newDispatchFunc)
                 continue;
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+            IRBuilder builder(sharedContext->sharedBuilderStorage);
             builder.setInsertBefore(call);
             List<IRInst*> args;
             for (UInt i = 0; i < call->getArgCount(); i++)

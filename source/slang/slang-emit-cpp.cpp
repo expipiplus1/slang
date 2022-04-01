@@ -2,7 +2,7 @@
 #include "slang-emit-cpp.h"
 
 #include "../core/slang-writer.h"
-
+#include "../core/slang-token-reader.h"
 #include "slang-emit-source-writer.h"
 #include "slang-mangled-lexer.h"
 
@@ -167,6 +167,31 @@ static UnownedStringSlice _getCTypeVecPostFix(IROp op)
     }
 }
 
+static bool _isCppTarget(CodeGenTarget target)
+{
+    switch (target)
+    {
+    case CodeGenTarget::CPPSource:
+    case CodeGenTarget::HostCPPSource:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool _isCppOrCudaTarget(CodeGenTarget target)
+{
+    switch (target)
+    {
+    case CodeGenTarget::CPPSource:
+    case CodeGenTarget::HostCPPSource:
+    case CodeGenTarget::CUDASource:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /* !!!!!!!!!!!!!!!!!!!!!!!! CPPEmitHandler !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
 
 /* static */ UnownedStringSlice CPPSourceEmitter::getBuiltinTypeName(IROp op)
@@ -198,7 +223,7 @@ static UnownedStringSlice _getCTypeVecPostFix(IROp op)
 
 void CPPSourceEmitter::emitTypeDefinition(IRType* inType)
 {
-    if (m_target == CodeGenTarget::CPPSource)
+    if (_isCppTarget(m_target))
     {
         // All types are templates in C++
         return;
@@ -262,6 +287,7 @@ void CPPSourceEmitter::emitTypeDefinition(IRType* inType)
             UnownedStringSlice typeName = _getTypeName(type);
             UnownedStringSlice rowTypeName = _getTypeName(vecType);
 
+            writer->emit("template<>\n");
             writer->emit("struct ");
             writer->emit(typeName);
             writer->emit("\n{\n");
@@ -431,7 +457,7 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
             auto vecCount = int(getIntVal(vecType->getElementCount()));
             auto elemType = vecType->getElementType();
 
-            if (target == CodeGenTarget::CPPSource || target == CodeGenTarget::CUDASource)
+            if (_isCppOrCudaTarget(target))
             {
                 out << "Vector<" << _getTypeName(elemType) << ", " << vecCount << ">";
             }
@@ -457,7 +483,7 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
             const auto rowCount = int(getIntVal(matType->getRowCount()));
             const auto colCount = int(getIntVal(matType->getColumnCount()));
 
-            if (target == CodeGenTarget::CPPSource || target == CodeGenTarget::CUDASource)
+            if (_isCppOrCudaTarget(target))
             {
                 out << "Matrix<" << _getTypeName(elementType) << ", " << rowCount << ", " << colCount << ">";
             }
@@ -539,6 +565,11 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
         case kIROp_RTTIHandleType:
         {
             out << "TypeInfo*";
+            return SLANG_OK;
+        }
+        case kIROp_StringType:
+        {
+            out << "String";
             return SLANG_OK;
         }
         default:
@@ -2325,6 +2356,14 @@ bool CPPSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOut
             m_writer->emit("))");
             return true;
         }
+        case kIROp_StringLit:
+        {
+            m_writer->emit("String(");
+            m_writer->emit(Slang::Misc::EscapeStringLiteral(as<IRStringLit>(inst)->getStringSlice()));
+            m_writer->emit(")");
+            return true;
+        }
+
     }
 }
 
@@ -2360,10 +2399,9 @@ void CPPSourceEmitter::emitPreprocessorDirectivesImpl()
     
     if (m_target == CodeGenTarget::CPPSource)
     {
-        // Put all into an anonymous namespace
-        // This includes any generated types, and generated intrinsics
-        if (!m_compileRequest->getLinkage()->m_heterogeneous)
-            m_writer->emit("namespace { // anonymous \n\n");
+        // When generating kernel code in C++, put all into an anonymous namespace
+        // This includes any generated types, and generated intrinsics.
+        m_writer->emit("namespace { // anonymous \n\n");
         m_writer->emit("#ifdef SLANG_PRELUDE_NAMESPACE\n");
         m_writer->emit("using namespace SLANG_PRELUDE_NAMESPACE;\n");
         m_writer->emit("#endif\n\n");
@@ -2628,108 +2666,7 @@ void CPPSourceEmitter::_emitForwardDeclarations(const List<EmitAction>& actions)
 
 void CPPSourceEmitter::emitModuleImpl(IRModule* module, DiagnosticSink* sink)
 {
-    // If we are emitting a heterogeneous program
-    // Emit the binary blob of each non-CPP target
-    ComponentType* program = m_compileRequest->getProgram();
-    auto linkage = m_compileRequest->getLinkage();
-    if (linkage->m_heterogeneous)
-    {
-        for (auto inst : module->getGlobalInsts())
-        {
-            auto func = as<IRFunc>(inst);
-            if (!func)
-                continue;
-            if (auto entryPointDecoration = func->findDecoration<IREntryPointDecoration>())
-            {
-                String entryPointName  = entryPointDecoration->getName()->getStringSlice();
-                for (int index = 0; index < program->getEntryPointCount(); index++)
-                {
-                    auto entryPoint = program->getEntryPoint(index);
-                    if (entryPointName  == entryPoint->getName()->text)
-                    {
-                        for (auto targetRequest : linkage->targets)
-                        {
-                            // Emit for all non-CPU targets
-                            switch (targetRequest->getTarget())
-                            {
-                            case(CodeGenTarget::CPPSource):
-                            case(CodeGenTarget::CSource):
-                            case(CodeGenTarget::HostCallable):
-                            case(CodeGenTarget::CUDASource):
-
-                                break;
-
-                            default:
-
-                                auto targetProgram = program->getTargetProgram(targetRequest);
-                                CompileResult result =
-                                    targetProgram->getOrCreateEntryPointResult(index, sink);
-
-                                Slang::ComPtr<ISlangBlob> blob;
-                                if (SLANG_FAILED(result.getBlob(blob)))
-                                {
-                                    sink->diagnoseRaw(Severity::Error,
-                                        "Slang heterogeneous error: No blob to emit\n");
-                                    m_writer->emit("size_t __");
-                                    m_writer->emit(entryPointName);
-                                    m_writer->emit("Size = 0;\n");
-                                    m_writer->emit("unsigned char __");
-                                    m_writer->emit(entryPointName);
-                                    m_writer->emit("[1];\n");
-                                }
-
-                                else
-                                {
-                                    auto ptr = (const unsigned char*)blob->getBufferPointer();
-
-                                    m_writer->emit("size_t __");
-                                    m_writer->emit(entryPointName);
-                                    m_writer->emit("Size = ");
-                                    m_writer->emitInt64(blob->getBufferSize());
-                                    m_writer->emit(";\n");
-
-                                    m_writer->emit("unsigned char __");
-                                    m_writer->emit(entryPointName);
-                                    m_writer->emit("[] = {");
-                                    // every 20 bytes, emit a newline
-                                    size_t j = 0;
-                                    for (size_t i = 0; i < blob->getBufferSize(); i++) {
-                                        m_writer->emitUInt64(ptr[i]);
-                                        m_writer->emit(", ");
-                                        if (j == 20)
-                                        {
-                                            m_writer->emit("\n");
-                                            j = 0;
-                                        }
-                                        j++;
-                                    }
-                                    m_writer->emit("};\n");
-                                }
-                            }
-                        }
-                        // Emit a wrapper function for calling the shader blob
-                        m_writer->emit("void ");
-                        m_writer->emit(entryPointName);
-                        m_writer->emit("_wrapper(gfx_Device_0* device, Vector<uint32_t, 3> gridDims, \n");
-                        m_writer->emit("\tRWStructuredBuffer<float> buffer)\n{");
-                       /* m_writer->emit("\n\tgfx_ShaderProgram_0* shaderProgram = loadShaderProgram_0(device, __");
-                        m_writer->emit(entryPointName);
-                        m_writer->emit(", __");
-                        m_writer->emit(entryPointName);
-                        m_writer->emit("Size);");*/
-                        m_writer->emit("\n\tgfx_ShaderProgram_0* shaderProgram = loadShaderProgram_0(device);");
-                        m_writer->emit("\n\tgfx_TransientResourceHeap_0* transientHeap = buildTransientHeap_0(device);");
-                        m_writer->emit("\n\tgfx_PipelineState_0* pipelineState = ");
-                        m_writer->emit("buildPipelineState_0(device, shaderProgram);");
-                        m_writer->emit("\n\tgfx_ResourceView_0* bufferView = createBufferView_0(device, unconvertBuffer_0(buffer));");
-                        m_writer->emit("\n\tdispatchComputation_0(device, transientHeap, pipelineState, ");
-                        m_writer->emit("bufferView, gridDims.x, gridDims.y, gridDims.z);");
-                        m_writer->emit("\n}\n");
-                    }
-                }
-            }
-        }
-    }
+    SLANG_UNUSED(sink);
 
     // Setup all built in types used in the module
     m_typeSet.addAllBuiltinTypes(module);
@@ -2767,9 +2704,8 @@ void CPPSourceEmitter::emitModuleImpl(IRModule* module, DiagnosticSink* sink)
 
     if (m_target == CodeGenTarget::CPPSource)
     {
-        // Need to close the anonymous namespace when outputting for C++
-        if (!linkage->m_heterogeneous)
-            m_writer->emit("} // anonymous\n\n");
+        // Need to close the anonymous namespace when outputting for C++ kernel.
+        m_writer->emit("} // anonymous\n\n");
     }
 
      // Finally we need to output dll entry points

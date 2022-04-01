@@ -24,8 +24,7 @@ namespace Slang
         uint32_t id = 0;
         for (auto rtti : sharedContext->mapTypeToRTTIObject)
         {
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+            IRBuilder builder(sharedContext->sharedBuilderStorage);
             builder.setInsertBefore(rtti.Value);
             IRUse* nextUse = nullptr;
             auto uint2Type = builder.getVectorType(
@@ -56,8 +55,7 @@ namespace Slang
             case kIROp_WitnessTableIDType:
             case kIROp_RTTIHandleType:
                 {
-                    IRBuilder builder;
-                    builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+                    IRBuilder builder(sharedContext->sharedBuilderStorage);
                     builder.setInsertBefore(inst);
                     auto uint2Type = builder.getVectorType(
                         builder.getUIntType(), builder.getIntValue(builder.getIntType(), 2));
@@ -74,8 +72,7 @@ namespace Slang
     // Remove all interface types from module.
     void cleanUpInterfaceTypes(SharedGenericsLoweringContext* sharedContext)
     {
-        IRBuilder builder;
-        builder.sharedBuilder = &sharedContext->sharedBuilderStorage;
+        IRBuilder builder(sharedContext->sharedBuilderStorage);
         builder.setInsertInto(sharedContext->module->getModuleInst());
         auto dummyInterfaceObj = builder.getIntValue(builder.getIntType(), 0);
         List<IRInst*> interfaceInsts;
@@ -117,6 +114,36 @@ namespace Slang
         cleanUpInterfaceTypes(sharedContext);
     }
 
+    void checkTypeConformanceExists(SharedGenericsLoweringContext* context)
+    {
+        HashSet<IRInst*> implementedInterfaces;
+
+        // Add all interface type that are implemented by at least one type to a set.
+        for (auto inst : context->module->getGlobalInsts())
+        {
+            if (inst->getOp() == kIROp_WitnessTable)
+            {
+                auto interfaceType = cast<IRWitnessTableType>(inst->getDataType())->getConformanceType();
+                implementedInterfaces.Add(interfaceType);
+            }
+        }
+        // Check if an interface type has any implementations.
+        workOnModule(context, [&](IRInst* inst)
+            {
+                if (auto lookupWitnessMethod = as<IRLookupWitnessMethod>(inst))
+                {
+                    auto witnessTableType = lookupWitnessMethod->getWitnessTable()->getDataType();
+                    auto interfaceType = cast<IRWitnessTableType>(witnessTableType)->getConformanceType();
+                    if (!implementedInterfaces.Contains(interfaceType))
+                    {
+                        context->sink->diagnose(interfaceType->sourceLoc, Diagnostics::noTypeConformancesFoundForInterface, interfaceType);
+                        // Add to set to prevent duplicate diagnostic messages.
+                        implementedInterfaces.Add(interfaceType);
+                    }
+                }
+            });
+    }
+
     void lowerGenerics(
         TargetRequest*          targetReq,
         IRModule*               module,
@@ -126,6 +153,8 @@ namespace Slang
         sharedContext.targetReq = targetReq;
         sharedContext.module = module;
         sharedContext.sink = sink;
+
+        checkTypeConformanceExists(&sharedContext);
 
         // Replace all `makeExistential` insts with `makeExistentialWithRTTI`
         // before making any other changes. This is necessary because a parameter of

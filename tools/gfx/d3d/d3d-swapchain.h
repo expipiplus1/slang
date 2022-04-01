@@ -35,45 +35,57 @@ public:
 
         m_desc = desc;
 
+        m_desc.format = srgbToLinearFormat(m_desc.format);
+
         // Describe the swap chain.
         DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
         swapChainDesc.BufferCount = desc.imageCount;
         swapChainDesc.BufferDesc.Width = desc.width;
         swapChainDesc.BufferDesc.Height = desc.height;
-        swapChainDesc.BufferDesc.Format = D3DUtil::getMapFormat(desc.format);
+        swapChainDesc.BufferDesc.Format = D3DUtil::getMapFormat(m_desc.format);
         swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapChainDesc.SwapEffect = swapEffect;
         swapChainDesc.OutputWindow = (HWND)window.handleValues[0];
         swapChainDesc.SampleDesc.Count = 1;
         swapChainDesc.Windowed = TRUE;
-
         if (!desc.enableVSync)
         {
             swapChainDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         }
 
         // Swap chain needs the queue so that it can force a flush on it.
-        ComPtr<IDXGISwapChain> swapChain;
-        SLANG_RETURN_ON_FAIL(
-            getDXGIFactory()->CreateSwapChain(getOwningDevice(), &swapChainDesc, swapChain.writeRef()));
-        SLANG_RETURN_ON_FAIL(swapChain->QueryInterface(m_swapChain.writeRef()));
-
-        if (!desc.enableVSync)
+        ComPtr<IDXGIFactory2> dxgiFactory2;
+        getDXGIFactory()->QueryInterface(IID_PPV_ARGS(dxgiFactory2.writeRef()));
+        if (!dxgiFactory2)
         {
-            m_swapChainWaitableObject = m_swapChain->GetFrameLatencyWaitableObject();
-
-            int maxLatency = desc.imageCount - 2;
-
-            // Make sure the maximum latency is in the range required by dx runtime
-            maxLatency = (maxLatency < 1) ? 1 : maxLatency;
-            maxLatency = (maxLatency > DXGI_MAX_SWAP_CHAIN_BUFFERS) ? DXGI_MAX_SWAP_CHAIN_BUFFERS
-                                                                    : maxLatency;
-
-            m_swapChain->SetMaximumFrameLatency(maxLatency);
+            ComPtr<IDXGISwapChain> swapChain;
+            SLANG_RETURN_ON_FAIL(getDXGIFactory()->CreateSwapChain(
+                getOwningDevice(), &swapChainDesc, swapChain.writeRef()));
+            SLANG_RETURN_ON_FAIL(getDXGIFactory()->MakeWindowAssociation(
+                (HWND)window.handleValues[0], DXGI_MWA_NO_ALT_ENTER));
+            SLANG_RETURN_ON_FAIL(swapChain->QueryInterface(m_swapChain.writeRef()));
         }
-
-        SLANG_RETURN_ON_FAIL(getDXGIFactory()->MakeWindowAssociation(
-            (HWND)window.handleValues[0], DXGI_MWA_NO_ALT_ENTER));
+        else
+        {
+            DXGI_SWAP_CHAIN_DESC1 desc1 = {};
+            desc1.BufferCount = swapChainDesc.BufferCount;
+            desc1.BufferUsage = swapChainDesc.BufferUsage;
+            desc1.Flags = swapChainDesc.Flags;
+            desc1.Format = swapChainDesc.BufferDesc.Format;
+            desc1.Height = swapChainDesc.BufferDesc.Height;
+            desc1.Width = swapChainDesc.BufferDesc.Width;
+            desc1.SampleDesc = swapChainDesc.SampleDesc;
+            desc1.SwapEffect = swapChainDesc.SwapEffect;
+            ComPtr<IDXGISwapChain1> swapChain1;
+            SLANG_RETURN_ON_FAIL(dxgiFactory2->CreateSwapChainForHwnd(
+                getOwningDevice(),
+                (HWND)window.handleValues[0],
+                &desc1,
+                nullptr,
+                nullptr,
+                swapChain1.writeRef()));
+            SLANG_RETURN_ON_FAIL(swapChain1->QueryInterface(m_swapChain.writeRef()));
+        }
 
         createSwapchainBufferImages();
         return SLANG_OK;
@@ -87,25 +99,9 @@ public:
     }
     virtual SLANG_NO_THROW Result SLANG_MCALL present() override
     {
-        if (m_swapChainWaitableObject)
+        if (SLANG_FAILED(m_swapChain->Present(m_desc.enableVSync ? 1 : 0, 0)))
         {
-            // check if now is good time to present
-            // This doesn't wait - because the wait time is 0. If it returns WAIT_TIMEOUT it
-            // means that no frame is waiting to be be displayed so there is no point doing a
-            // present.
-            const bool shouldPresent =
-                (WaitForSingleObjectEx(m_swapChainWaitableObject, 0, TRUE) != WAIT_TIMEOUT);
-            if (shouldPresent)
-            {
-                m_swapChain->Present(0, 0);
-            }
-        }
-        else
-        {
-            if (SLANG_FAILED(m_swapChain->Present(1, 0)))
-            {
-                return SLANG_FAIL;
-            }
+            return SLANG_FAIL;
         }
         return SLANG_OK;
     }
@@ -145,7 +141,6 @@ public:
     virtual IDXGIFactory* getDXGIFactory() = 0;
     virtual IUnknown* getOwningDevice() = 0;
     ISwapchain::Desc m_desc;
-    HANDLE m_swapChainWaitableObject = nullptr;
     ComPtr<IDXGISwapChain2> m_swapChain;
     Slang::ShortList<Slang::RefPtr<TextureResource>> m_images;
 };

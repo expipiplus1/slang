@@ -5,6 +5,7 @@
 #include "../core/slang-shared-library.h"
 #include "../core/slang-archive-file-system.h"
 #include "../core/slang-type-text-util.h"
+#include "../core/slang-type-convert-util.h"
 
 #include "slang-check.h"
 #include "slang-parameter-binding.h"
@@ -30,7 +31,7 @@
 #include "slang-serialize-ir.h"
 #include "slang-serialize-container.h"
 
-#include "slang-doc-extractor.h"
+#include "slang-doc-ast.h"
 #include "slang-doc-markdown-writer.h"
 
 #include "slang-check-impl.h"
@@ -119,6 +120,8 @@ void Session::init()
 {
     SLANG_ASSERT(BaseTypeInfo::check());
 
+    _initCodeGenTransitionMap();
+
     ::memset(m_downstreamCompilerLocators, 0, sizeof(m_downstreamCompilerLocators));
     DownstreamCompilerUtil::setDefaultLocators(m_downstreamCompilerLocators);
     m_downstreamCompilerSet = new DownstreamCompilerSet;
@@ -191,6 +194,46 @@ void Session::init()
     m_languagePreludes[Index(SourceLanguage::HLSL)] = get_slang_hlsl_prelude();
 }
 
+void Session::_initCodeGenTransitionMap()
+{
+    // TODO(JS): Might want to do something about these in the future...
+
+    //PassThroughMode getDownstreamCompilerRequiredForTarget(CodeGenTarget target);
+    //SourceLanguage getDefaultSourceLanguageForDownstreamCompiler(PassThroughMode compiler);
+
+    // Set up the default ways to do compilations between code gen targets
+    auto& map = m_codeGenTransitionMap;
+    
+    // TODO(JS): There currently isn't a 'downstream compiler' for direct spirv output. If we did
+    // it would presumably a transition from SlangIR to SPIRV.
+
+    // For C and C++ we default to use the 'genericCCpp' compiler 
+    {
+        const CodeGenTarget sources[] = { CodeGenTarget::CSource, CodeGenTarget::CPPSource };
+        for (auto source : sources)
+        {
+            // We *don't* add a default for host callable, as we will determine what is suitable depending on what
+            // is available. We prefer LLVM if that's available. If it's not we can use generic C/C++ compiler
+
+            map.addTransition(source, CodeGenTarget::ShaderSharedLibrary, PassThroughMode::GenericCCpp);
+            map.addTransition(source, CodeGenTarget::HostExecutable, PassThroughMode::GenericCCpp);
+            map.addTransition(source, CodeGenTarget::ObjectCode, PassThroughMode::GenericCCpp);
+        }
+    }
+
+    
+    // Add all the straightforward transitions
+    map.addTransition(CodeGenTarget::CUDASource, CodeGenTarget::PTX, PassThroughMode::NVRTC);
+    map.addTransition(CodeGenTarget::HLSL, CodeGenTarget::DXBytecode, PassThroughMode::Fxc);
+    map.addTransition(CodeGenTarget::HLSL, CodeGenTarget::DXIL, PassThroughMode::Dxc);
+    map.addTransition(CodeGenTarget::GLSL, CodeGenTarget::SPIRV, PassThroughMode::Glslang);
+
+    // To assembly
+    map.addTransition(CodeGenTarget::SPIRV, CodeGenTarget::SPIRVAssembly, PassThroughMode::Glslang);
+    map.addTransition(CodeGenTarget::DXIL, CodeGenTarget::DXILAssembly, PassThroughMode::Dxc);
+    map.addTransition(CodeGenTarget::DXBytecode, CodeGenTarget::DXBytecodeAssembly, PassThroughMode::Fxc);
+}
+
 void Session::addBuiltins(
     char const*     sourcePath,
     char const*     sourceString)
@@ -257,8 +300,8 @@ SlangResult Session::compileStdLib(slang::CompileStdLibFlags compileFlags)
         // For all the modules add their doc output to docStrings
         for (Module* stdlibModule : stdlibModules)
         { 
-            RefPtr<DocMarkup> markup(new DocMarkup);
-            DocMarkupExtractor::extract(stdlibModule->getModuleDecl(), sourceManager, &sink, markup);
+            RefPtr<ASTMarkup> markup(new ASTMarkup);
+            ASTMarkupUtil::extract(stdlibModule->getModuleDecl(), sourceManager, &sink, markup);
 
             DocMarkdownWriter writer(markup, astBuilder);
             writer.writeAll();
@@ -269,11 +312,14 @@ SlangResult Session::compileStdLib(slang::CompileStdLibFlags compileFlags)
         {
             String fileName("stdlib-doc.md");
 
-            StreamWriter writer(new FileStream(fileName, FileMode::Create));
+            RefPtr<FileStream> stream = new FileStream;
+            SLANG_RETURN_ON_FAIL(stream->init(fileName, FileMode::Create));
+            StreamWriter writer;
+            SLANG_RETURN_ON_FAIL(writer.init(stream));
 
             for (auto& docString : docStrings)
             {
-                writer.Write(docString);
+                SLANG_RETURN_ON_FAIL(writer.write(docString));
             }
         }
     }
@@ -596,9 +642,60 @@ SlangPassThrough SLANG_MCALL Session::getDefaultDownstreamCompiler(SlangSourceLa
     return SlangPassThrough(m_defaultDownstreamCompilers[int(sourceLanguage)]);
 }
 
-DownstreamCompiler* Session::getDefaultDownstreamCompiler(SourceLanguage sourceLanguage)
+void Session::setDownstreamCompilerForTransition(SlangCompileTarget source, SlangCompileTarget target, SlangPassThrough compiler)
 {
-    return getOrLoadDownstreamCompiler(m_defaultDownstreamCompilers[int(sourceLanguage)], nullptr);
+    if (compiler == SLANG_PASS_THROUGH_NONE)
+    {
+        // Removing the transition means a default can be used
+        m_codeGenTransitionMap.removeTransition(CodeGenTarget(source), CodeGenTarget(target));
+    }
+    else
+    {
+        m_codeGenTransitionMap.addTransition(CodeGenTarget(source), CodeGenTarget(target), PassThroughMode(compiler));
+    }
+}
+
+SlangPassThrough Session::getDownstreamCompilerForTransition(SlangCompileTarget inSource, SlangCompileTarget inTarget)
+{
+    const CodeGenTarget source = CodeGenTarget(inSource);
+    const CodeGenTarget target = CodeGenTarget(inTarget);
+
+    if (m_codeGenTransitionMap.hasTransition(source, target))
+    {
+        return (SlangPassThrough)m_codeGenTransitionMap.getTransition(source, target);
+    }
+
+    // Special case host-callable
+    if (target == CodeGenTarget::ShaderHostCallable)
+    {
+        if (source == CodeGenTarget::CSource || source == CodeGenTarget::CPPSource)
+        {
+            // We prefer LLVM if it's available
+            DownstreamCompiler* llvm = getOrLoadDownstreamCompiler(PassThroughMode::LLVM, nullptr);
+            if (llvm)
+            {
+                return SLANG_PASS_THROUGH_LLVM;
+            }
+        }
+    }
+
+    // Use the legacy 'sourceLanguage' default mechanism.
+    // This says nothing about the target type, so it is *assumed* the target type is possible
+    // If not it will fail when trying to compile to an unknown target
+    const SourceLanguage sourceLanguage = (SourceLanguage)TypeConvertUtil::getSourceLanguageFromTarget(inSource);
+    if (sourceLanguage != SourceLanguage::Unknown)
+    {
+        return getDefaultDownstreamCompiler(SlangSourceLanguage(sourceLanguage));
+    }
+
+    // Unknwon
+    return SLANG_PASS_THROUGH_NONE;
+}
+
+DownstreamCompiler* Session::getDownstreamCompiler(CodeGenTarget source, CodeGenTarget target)
+{
+    PassThroughMode compilerType = (PassThroughMode)getDownstreamCompilerForTransition(SlangCompileTarget(source), SlangCompileTarget(target));
+    return getOrLoadDownstreamCompiler(compilerType, nullptr);
 }
 
 Profile getEffectiveProfile(EntryPoint* entryPoint, TargetRequest* target)
@@ -802,6 +899,7 @@ void Linkage::addTarget(
     target->addTargetFlags(desc.flags);
     target->setTargetProfile(Profile(desc.profile));
     target->setLineDirectiveMode(LineDirectiveMode(desc.lineDirectiveMode));
+    target->setForceGLSLScalarBufferLayout(desc.forceGLSLScalarBufferLayout);
 }
 
 #if 0
@@ -822,11 +920,11 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModule(
     const char*     moduleName,
     slang::IBlob**  outDiagnostics)
 {
+    DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
     try
     {
         auto name = getNamePool()->getName(moduleName);
 
-        DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
         auto module = findOrImportModule(name, SourceLoc(), &sink);
         sink.getBlobIfNeeded(outDiagnostics);
 
@@ -835,6 +933,7 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModule(
     }
     catch (const AbortCompilationException&)
     {
+        sink.getBlobIfNeeded(outDiagnostics);
         return nullptr;
     }
 }
@@ -979,7 +1078,7 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
                 ConstantBufferType* cbType = getASTBuilder()->create<ConstantBufferType>();
                 cbType->elementType = type;
                 cbType->declRef = getASTBuilder()->getBuiltinDeclRef(
-                    "ConstantBuffer", makeConstArrayView<Val*>(static_cast<Val*>(type)));
+                    "ConstantBuffer", makeConstArrayViewSingle<Val*>(static_cast<Val*>(type)));
                 containerTypeReflection = cbType;
             }
             break;
@@ -988,7 +1087,7 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
                 ParameterBlockType* pbType = getASTBuilder()->create<ParameterBlockType>();
                 pbType->elementType = type;
                 pbType->declRef = getASTBuilder()->getBuiltinDeclRef(
-                    "ParameterBlock", makeConstArrayView<Val*>(static_cast<Val*>(type)));
+                    "ParameterBlock", makeConstArrayViewSingle<Val*>(static_cast<Val*>(type)));
                 containerTypeReflection = pbType;
             }
             break;
@@ -998,7 +1097,7 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::getContainerType(
                     getASTBuilder()->create<HLSLStructuredBufferType>();
                 sbType->elementType = type;
                 sbType->declRef = getASTBuilder()->getBuiltinDeclRef(
-                    "HLSLStructuredBufferType", makeConstArrayView<Val*>(static_cast<Val*>(type)));
+                    "HLSLStructuredBufferType", makeConstArrayViewSingle<Val*>(static_cast<Val*>(type)));
                 containerTypeReflection = sbType;
             }
             break;
@@ -1058,6 +1157,10 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::getTypeConformanceWitnessSequent
 {
     auto subType = asInternal(type);
     auto supType = asInternal(interfaceType);
+
+    if (!subType || !supType)
+        return SLANG_FAIL;
+
     auto name = getMangledNameForConformanceWitness(subType->getASTBuilder(), subType, supType);
     auto interfaceName = getMangledTypeName(supType->getASTBuilder(), supType);
     uint32_t resultIndex = 0;
@@ -1223,9 +1326,9 @@ CapabilitySet TargetRequest::getTargetCaps()
         break;
 
     case CodeGenTarget::CPPSource:
-    case CodeGenTarget::Executable:
-    case CodeGenTarget::SharedLibrary:
-    case CodeGenTarget::HostCallable:
+    case CodeGenTarget::HostExecutable:
+    case CodeGenTarget::ShaderSharedLibrary:
+    case CodeGenTarget::ShaderHostCallable:
         atoms.add(CapabilityAtom::CPP);
         break;
 
@@ -1938,7 +2041,7 @@ void FrontEndCompileRequest::generateIR()
             // Verify debug information
             if (SLANG_FAILED(SerialContainerUtil::verifyIRSerialize(irModule, getSession(), options)))
             {
-                getSink()->diagnose(irModule->moduleInst->sourceLoc, Diagnostics::serialDebugVerificationFailed);
+                getSink()->diagnose(irModule->getModuleInst()->sourceLoc, Diagnostics::serialDebugVerificationFailed);
             }
         }
 
@@ -2047,8 +2150,8 @@ SlangResult FrontEndCompileRequest::executeActionsInner()
         {
             for (TranslationUnitRequest* translationUnit : translationUnits)
             {
-                RefPtr<DocMarkup> markup(new DocMarkup);
-                DocMarkupExtractor::extract(translationUnit->getModuleDecl(), getSourceManager(), getSink(), markup);
+                RefPtr<ASTMarkup> markup(new ASTMarkup);
+                ASTMarkupUtil::extract(translationUnit->getModuleDecl(), getSourceManager(), getSink(), markup);
 
                 // Convert to markdown            
                 DocMarkdownWriter markdownWriter(markup, astBuilder);
@@ -3058,6 +3161,15 @@ SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::specialize(
     return SLANG_OK;
 }
 
+SLANG_NO_THROW SlangResult SLANG_MCALL
+    ComponentType::renameEntryPoint(const char* newName, IComponentType** outEntryPoint)
+{
+    RefPtr<RenamedEntryPointComponentType> result =
+        new RenamedEntryPointComponentType(this, newName);
+    *outEntryPoint = result.detach();
+    return SLANG_OK;
+}
+
 RefPtr<ComponentType> fillRequirements(
     ComponentType* inComponentType);
 
@@ -3092,6 +3204,13 @@ struct EnumerateModulesVisitor : ComponentTypeVisitor
     void* m_userData;
 
     void visitEntryPoint(EntryPoint*, EntryPoint::EntryPointSpecializationInfo*) SLANG_OVERRIDE {}
+
+    void visitRenamedEntryPoint(
+        RenamedEntryPointComponentType* entryPoint,
+        EntryPoint::EntryPointSpecializationInfo* specializationInfo) SLANG_OVERRIDE
+    {
+        entryPoint->getBase()->acceptVisitor(this, specializationInfo);
+    }
 
     void visitModule(Module* module, Module::ModuleSpecializationInfo*) SLANG_OVERRIDE
     {
@@ -3133,6 +3252,13 @@ struct EnumerateIRModulesVisitor : ComponentTypeVisitor
     void* m_userData;
 
     void visitEntryPoint(EntryPoint*, EntryPoint::EntryPointSpecializationInfo*) SLANG_OVERRIDE {}
+
+    void visitRenamedEntryPoint(
+        RenamedEntryPointComponentType* entryPoint,
+        EntryPoint::EntryPointSpecializationInfo* specializationInfo) SLANG_OVERRIDE
+    {
+        entryPoint->getBase()->acceptVisitor(this, specializationInfo);
+    }
 
     void visitModule(Module* module, Module::ModuleSpecializationInfo*) SLANG_OVERRIDE
     {
@@ -3223,6 +3349,7 @@ CompositeComponentType::CompositeComponentType(
         {
             m_entryPoints.add(child->getEntryPoint(cc));
             m_entryPointMangledNames.add(child->getEntryPointMangledName(cc));
+            m_entryPointNameOverrides.add(child->getEntryPointNameOverride(cc));
         }
 
         auto childShaderParamCount = child->getShaderParamCount();
@@ -3274,6 +3401,11 @@ String CompositeComponentType::getEntryPointMangledName(Index index)
     return m_entryPointMangledNames[index];
 }
 
+String CompositeComponentType::getEntryPointNameOverride(Index index)
+{
+    return m_entryPointNameOverrides[index];
+}
+
 Index CompositeComponentType::getShaderParamCount()
 {
     return m_shaderParams.getCount();
@@ -3318,7 +3450,6 @@ void CompositeComponentType::acceptVisitor(ComponentTypeVisitor* visitor, Specia
 {
     visitor->visitComposite(this, as<CompositeSpecializationInfo>(specializationInfo));
 }
-
 
 RefPtr<ComponentType::SpecializationInfo> CompositeComponentType::_validateSpecializationArgsImpl(
     SpecializationArg const*    args,
@@ -3452,6 +3583,13 @@ struct SpecializationArgModuleCollector : ComponentTypeVisitor
 
         collectReferencedModules(specializationInfo->specializedFuncDeclRef);
         collectReferencedModules(specializationInfo->existentialSpecializationArgs);
+    }
+
+    void visitRenamedEntryPoint(
+        RenamedEntryPointComponentType* entryPoint,
+        EntryPoint::EntryPointSpecializationInfo* specializationInfo) SLANG_OVERRIDE
+    {
+        entryPoint->getBase()->acceptVisitor(this, specializationInfo);
     }
 
     void visitModule(Module* module, Module::ModuleSpecializationInfo* specializationInfo) SLANG_OVERRIDE
@@ -3681,6 +3819,7 @@ SpecializedComponentType::SpecializedComponentType(
     struct EntryPointMangledNameCollector : ComponentTypeVisitor
     {
         List<String>* mangledEntryPointNames;
+        List<String>* entryPointNameOverrides;
 
         void visitEntryPoint(EntryPoint* entryPoint, EntryPoint::EntryPointSpecializationInfo* specializationInfo)  SLANG_OVERRIDE
         {
@@ -3689,6 +3828,15 @@ SpecializedComponentType::SpecializedComponentType(
                 funcDeclRef = specializationInfo->specializedFuncDeclRef;
 
             (*mangledEntryPointNames).add(getMangledName(m_astBuilder, funcDeclRef));
+            (*entryPointNameOverrides).add(entryPoint->getEntryPointNameOverride(0));
+        }
+
+        void visitRenamedEntryPoint(
+            RenamedEntryPointComponentType* entryPoint,
+            EntryPoint::EntryPointSpecializationInfo* specializationInfo) SLANG_OVERRIDE
+        {
+            entryPoint->getBase()->acceptVisitor(this, specializationInfo);
+            (*entryPointNameOverrides).getLast() = entryPoint->getEntryPointNameOverride(0);
         }
 
         void visitModule(Module*, Module::ModuleSpecializationInfo*) SLANG_OVERRIDE
@@ -3713,6 +3861,7 @@ SpecializedComponentType::SpecializedComponentType(
     //
     EntryPointMangledNameCollector collector(getLinkage()->getASTBuilder());
     collector.mangledEntryPointNames = &m_entryPointMangledNames;
+    collector.entryPointNameOverrides = &m_entryPointNameOverrides;
     collector.visitSpecialized(this);
 }
 
@@ -3736,6 +3885,28 @@ RefPtr<ComponentType> SpecializedComponentType::getRequirement(Index index)
 String SpecializedComponentType::getEntryPointMangledName(Index index)
 {
     return m_entryPointMangledNames[index];
+}
+
+String SpecializedComponentType::getEntryPointNameOverride(Index index)
+{
+    return m_entryPointNameOverrides[index];
+}
+
+// RenamedEntryPointComponentType
+
+RenamedEntryPointComponentType::RenamedEntryPointComponentType(
+    ComponentType* base, String newName)
+    : ComponentType(base->getLinkage())
+    , m_base(base)
+    , m_entryPointNameOverride(newName)
+{
+}
+
+void RenamedEntryPointComponentType::acceptVisitor(
+    ComponentTypeVisitor* visitor, SpecializationInfo* specializationInfo)
+{
+    visitor->visitRenamedEntryPoint(
+        this, as<EntryPoint::EntryPointSpecializationInfo>(specializationInfo));
 }
 
 void ComponentTypeVisitor::visitChildren(CompositeComponentType* composite, CompositeComponentType::CompositeSpecializationInfo* specializationInfo)
@@ -4017,6 +4188,11 @@ void EndToEndCompileRequest::setTargetFlags(int targetIndex, SlangTargetFlags fl
     getLinkage()->targets[targetIndex]->addTargetFlags(flags);
 }
 
+void EndToEndCompileRequest::setTargetForceGLSLScalarBufferLayout(int targetIndex, bool value)
+{
+    getLinkage()->targets[targetIndex]->setForceGLSLScalarBufferLayout(value);
+}
+
 void EndToEndCompileRequest::setTargetFloatingPointMode(int targetIndex, SlangFloatingPointMode  mode)
 {
     getLinkage()->targets[targetIndex]->setFloatingPointMode(FloatingPointMode(mode));
@@ -4102,7 +4278,7 @@ char const* EndToEndCompileRequest::getDiagnosticOutput()
 
 SlangResult EndToEndCompileRequest::getDiagnosticOutputBlob(ISlangBlob** outBlob)   
 {
-    if (!outBlob) return SLANG_ERROR_INVALID_PARAMETER;
+    if (!outBlob) return SLANG_E_INVALID_ARG;
 
     if (!m_diagnosticOutputBlob)
     {
@@ -4447,14 +4623,14 @@ static SlangResult _getEntryPointResult(
     Index targetCount = linkage->targets.getCount();
     if ((targetIndex < 0) || (targetIndex >= targetCount))
     {
-        return SLANG_ERROR_INVALID_PARAMETER;
+        return SLANG_E_INVALID_ARG;
     }
     auto targetReq = linkage->targets[targetIndex];
 
     Index entryPointCount = req->m_entryPoints.getCount();
     if ((entryPointIndex < 0) || (entryPointIndex >= entryPointCount))
     {
-        return SLANG_ERROR_INVALID_PARAMETER;
+        return SLANG_E_INVALID_ARG;
     }
     auto entryPointReq = program->getEntryPoint(entryPointIndex);
 
@@ -4477,7 +4653,7 @@ static SlangResult _getWholeProgramResult(
     Index targetCount = linkage->targets.getCount();
     if ((targetIndex < 0) || (targetIndex >= targetCount))
     {
-        return SLANG_ERROR_INVALID_PARAMETER;
+        return SLANG_E_INVALID_ARG;
     }
     auto targetReq = linkage->targets[targetIndex];
 
@@ -4490,7 +4666,7 @@ static SlangResult _getWholeProgramResult(
 
 SlangResult EndToEndCompileRequest::getEntryPointCodeBlob(int entryPointIndex, int targetIndex, ISlangBlob** outBlob)
 {
-    if (!outBlob) return SLANG_ERROR_INVALID_PARAMETER;
+    if (!outBlob) return SLANG_E_INVALID_ARG;
 
     CompileResult* compileResult = nullptr;
     SLANG_RETURN_ON_FAIL(_getEntryPointResult(this, entryPointIndex, targetIndex, &compileResult));
@@ -4503,7 +4679,7 @@ SlangResult EndToEndCompileRequest::getEntryPointCodeBlob(int entryPointIndex, i
 
 SlangResult EndToEndCompileRequest::getEntryPointHostCallable(int entryPointIndex, int targetIndex, ISlangSharedLibrary** outSharedLibrary)
 {
-    if (!outSharedLibrary) return SLANG_ERROR_INVALID_PARAMETER;
+    if (!outSharedLibrary) return SLANG_E_INVALID_ARG;
 
     CompileResult* compileResult = nullptr;
     SLANG_RETURN_ON_FAIL(_getEntryPointResult(this, entryPointIndex, targetIndex, &compileResult));
@@ -4517,7 +4693,7 @@ SlangResult EndToEndCompileRequest::getEntryPointHostCallable(int entryPointInde
 SlangResult EndToEndCompileRequest::getTargetCodeBlob(int targetIndex, ISlangBlob** outBlob)
 {
     if (!outBlob)
-        return SLANG_ERROR_INVALID_PARAMETER;
+        return SLANG_E_INVALID_ARG;
 
     CompileResult* compileResult = nullptr;
     SLANG_RETURN_ON_FAIL(_getWholeProgramResult(this, targetIndex, &compileResult));
@@ -4531,7 +4707,7 @@ SlangResult EndToEndCompileRequest::getTargetCodeBlob(int targetIndex, ISlangBlo
 SlangResult EndToEndCompileRequest::getTargetHostCallable(int targetIndex,ISlangSharedLibrary** outSharedLibrary)
 {
     if (!outSharedLibrary)
-        return SLANG_ERROR_INVALID_PARAMETER;
+        return SLANG_E_INVALID_ARG;
 
     CompileResult* compileResult = nullptr;
     SLANG_RETURN_ON_FAIL(_getWholeProgramResult(this, targetIndex, &compileResult));
@@ -4576,7 +4752,7 @@ SlangResult EndToEndCompileRequest::getContainerCode(ISlangBlob** outBlob)
 SlangResult EndToEndCompileRequest::loadRepro(ISlangFileSystem* fileSystem, const void* data, size_t size)
 {
     List<uint8_t> buffer;
-    SLANG_RETURN_ON_FAIL(ReproUtil::loadState((const uint8_t*)data, size, buffer));
+    SLANG_RETURN_ON_FAIL(ReproUtil::loadState((const uint8_t*)data, size, getSink(), buffer));
 
     MemoryOffsetBase base;
     base.set(buffer.getBuffer(), buffer.getCount());
@@ -4678,5 +4854,3 @@ SlangResult EndToEndCompileRequest::getEntryPoint(SlangInt entryPointIndex, slan
 }
 
 } // namespace Slang
-
-

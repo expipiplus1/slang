@@ -78,6 +78,7 @@ struct CLikeSourceEmitter::ComputeEmitActionsContext
             return SourceLanguage::C;
         }
         case CodeGenTarget::CPPSource:
+        case CodeGenTarget::HostCPPSource:
         {
             return SourceLanguage::CPP;
         }
@@ -98,6 +99,7 @@ CLikeSourceEmitter::CLikeSourceEmitter(const Desc& desc)
     m_targetCaps = desc.targetCaps;
 
     m_compileRequest = desc.compileRequest;
+    m_targetRequest = desc.targetRequest;
     m_entryPointStage = desc.entryPointStage;
     m_effectiveProfile = desc.effectiveProfile;
 }
@@ -167,6 +169,18 @@ void CLikeSourceEmitter::emitDeclarator(DeclaratorInfo* declarator)
             m_writer->emit("[");
             m_writer->emit(arrayDeclarator->elementCount);
             m_writer->emit("]");
+        }
+        break;
+
+    case DeclaratorInfo::Flavor::Attributed:
+        {
+            auto attributedDeclarator = (AttributedDeclaratorInfo*)declarator;
+            auto instWithAttributes = attributedDeclarator->instWithAttributes;
+            for(auto attr : instWithAttributes->getAllAttrs())
+            {
+                _emitPostfixTypeAttr(attr);
+            }
+            emitDeclarator(attributedDeclarator->next);
         }
         break;
 
@@ -249,16 +263,24 @@ List<IRWitnessTableEntry*> CLikeSourceEmitter::getSortedWitnessTableEntries(IRWi
     return sortedWitnessTableEntries;
 }
 
-void CLikeSourceEmitter::_emitArrayType(IRArrayType* arrayType, DeclaratorInfo* declarator)
+void CLikeSourceEmitter::_emitPrefixTypeAttr(IRAttr* attr)
 {
-    SizedArrayDeclaratorInfo arrayDeclarator(declarator, arrayType->getElementCount());
-    _emitType(arrayType->getElementType(), &arrayDeclarator);
+    SLANG_UNUSED(attr);
+
+    // By defualt we will not emit any attributes.
+    //
+    // TODO: If `const` ever surfaces as a type attribute in our IR,
+    // we may need to handle it here.
 }
 
-void CLikeSourceEmitter::_emitUnsizedArrayType(IRUnsizedArrayType* arrayType, DeclaratorInfo* declarator)
+void CLikeSourceEmitter::_emitPostfixTypeAttr(IRAttr* attr)
 {
-    UnsizedArrayDeclaratorInfo arrayDeclarator(declarator);
-    _emitType(arrayType->getElementType(), &arrayDeclarator);
+    SLANG_UNUSED(attr);
+
+    // By defualt we will not emit any attributes.
+    //
+    // TODO: If `const` ever surfaces as a type attribute in our IR,
+    // we may need to handle it here.
 }
 
 void CLikeSourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
@@ -278,11 +300,31 @@ void CLikeSourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
         break;
 
     case kIROp_ArrayType:
-        _emitArrayType(cast<IRArrayType>(type), declarator);
+        {
+            auto arrayType = cast<IRArrayType>(type);
+            SizedArrayDeclaratorInfo arrayDeclarator(declarator, arrayType->getElementCount());
+            _emitType(arrayType->getElementType(), &arrayDeclarator);
+        }
         break;
 
     case kIROp_UnsizedArrayType:
-        _emitUnsizedArrayType(cast<IRUnsizedArrayType>(type), declarator);
+        {
+            auto arrayType = cast<IRUnsizedArrayType>(type);
+            UnsizedArrayDeclaratorInfo arrayDeclarator(declarator);
+            _emitType(arrayType->getElementType(), &arrayDeclarator);
+        }
+        break;
+
+    case kIROp_AttributedType:
+        {
+            auto attributedType = cast<IRAttributedType>(type);
+            for(auto attr : attributedType->getAllAttrs())
+            {
+                _emitPrefixTypeAttr(attr);
+            }
+            AttributedDeclaratorInfo attributedDeclarator(declarator, attributedType);
+            _emitType(attributedType->getBaseType(), &attributedDeclarator);
+        }
         break;
     }
 
@@ -739,6 +781,13 @@ String CLikeSourceEmitter::generateName(IRInst* inst)
         return generateEntryPointNameImpl(entryPointDecor);
     }
 
+    // If the instruction has a linkage decoration, just use that.
+    if (auto externCppDecoration = inst->findDecoration<IRExternCppDecoration>())
+    {
+        // Just use the linkages mangled name directly.
+        return externCppDecoration->getName();
+    }
+
     // If we have a name hint on the instruction, then we will try to use that
     // to provide the basis for the actual name in the output code.
     if(auto nameHintDecoration = inst->findDecoration<IRNameHintDecoration>())
@@ -787,53 +836,43 @@ void CLikeSourceEmitter::emitSimpleValueImpl(IRInst* inst)
             switch (type->getBaseType())
             {
                 default:
-                case BaseType::Int8:
-                case BaseType::Int16:
+                
                 case BaseType::Int:
                 {
-                    // NOTE! This hack is required, otherwise we get different results across targets.
-                    // You'd hope that outputting L suffix would be enough to make this work, and not require a cast, but testing shows L suffix
-                    // does not have the same meaning across targets.
-                    //
-                    // For example
-                    // 
-                    // uint64_t v = 0x80000000;
-                    // 
-                    // When output this becomes...
-                    // v_0 = uint64_t(-2147483648L);
-                    // 
-                    // On MSVC/Gcc/Clang this is equal to 0x80000000, elsewhere it's 0xffffffff80000000 elsewhere.
-                    // Note that '-' isn't the issue because v0 = uint64_t(0x80000000L); produces the same issue
-                    // 
-                    // If we use a cast, we get the same result across targets (which is why the hack is here).
-                    //
-                    // Why? It's not clear - it seems likely that it's related to the order of how the promotion takes place.
-                    // 
-                    // If we convert from int32_t -> uint64_t, there are two possible scenarios
-                    // 1) int32_t -> int64_t -> uint64_t  (ie widen first then do sign type change)
-                    // 2) int32_t -> uint32_t -> uint64_t (ie do sign type change then widen)
-                    //
-                    // 2 would produce what we see on C++, 1 what we see everywhere else.
-                    // 
-                    // Why having a cast or having a suffix would make a difference though is not clear. It is also possible that the
-                    // L suffix is just ignored, and the literal is really a 'non typed' int literal in C++.
-
-                    // This little hack is needed for gcc that if we have the expression
-                    // int(-0x80000000) we get the warning: warning :  integer overflow in expression [-Woverflow]
-                    // 0x80000000 and -0x80000000 mean the same thing when casted to 32 bit int, so we just flip the value here.
-                    IRIntegerValue value = litInst->value.intVal;
-                    value = (value == -0x80000000ll) ? -value : value;
-
                     m_writer->emit("int(");
-                    m_writer->emit(value);
+                    m_writer->emit(int32_t(litInst->value.intVal));
+                    m_writer->emit(")");
+                    return;
+                }
+                case BaseType::Int8:
+                {
+                    m_writer->emit("int8_t(");
+                    m_writer->emit(int8_t(litInst->value.intVal));
+                    m_writer->emit(")");
+                    return;
+                }
+                case BaseType::Int16:
+                {
+                    m_writer->emit("int16_t(");
+                    m_writer->emit(int16_t(litInst->value.intVal));
                     m_writer->emit(")");
                     return;
                 }
                 case BaseType::UInt8:
+                {
+                    m_writer->emit(UInt(uint8_t(litInst->value.intVal)));
+                    m_writer->emit("U");
+                    break;
+                }
                 case BaseType::UInt16:
+                {
+                    m_writer->emit(UInt(uint16_t(litInst->value.intVal)));
+                    m_writer->emit("U");
+                    break;
+                }
                 case BaseType::UInt:
                 {
-                    m_writer->emit(UInt(litInst->value.intVal));
+                    m_writer->emit(UInt(uint32_t(litInst->value.intVal)));
                     m_writer->emit("U");
                     break;
                 }
@@ -947,6 +986,7 @@ bool CLikeSourceEmitter::shouldFoldInstIntoUseSites(IRInst* inst)
     //
     case kIROp_makeStruct:
     case kIROp_makeArray:
+    case kIROp_swizzleSet:
         return false;
 
     }
@@ -2734,7 +2774,7 @@ void CLikeSourceEmitter::emitParamTypeImpl(IRType* type, String const& name)
         // Note: There is no HLSL/GLSL equivalent for by-reference parameters,
         // so we don't actually expect to encounter these in user code.
         m_writer->emit("inout ");
-        type = inOutType->getValueType();
+        type = refType->getValueType();
     }
 
     emitType(type, name);

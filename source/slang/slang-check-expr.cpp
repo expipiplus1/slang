@@ -101,24 +101,14 @@ namespace Slang
         // immutable temporary so that we can use
         // it directly.
         //
-        auto interfaceDecl = interfaceDeclRef.getDecl();
         return maybeMoveTemp(expr, [&](DeclRef<VarDeclBase> varDeclRef)
         {
             ExtractExistentialType* openedType = m_astBuilder->create<ExtractExistentialType>();
             openedType->declRef = varDeclRef;
+            openedType->originalInterfaceType = expr->type.type;
+            openedType->originalInterfaceDeclRef = interfaceDeclRef;
 
-            ExtractExistentialSubtypeWitness* openedWitness = m_astBuilder->create<ExtractExistentialSubtypeWitness>();
-            openedWitness->sub = openedType;
-            openedWitness->sup = expr->type.type;
-            openedWitness->declRef = varDeclRef;
-
-            ThisTypeSubstitution* openedThisType = m_astBuilder->create<ThisTypeSubstitution>();
-            openedThisType->outer = interfaceDeclRef.substitutions.substitutions;
-            openedThisType->interfaceDecl = interfaceDecl;
-            openedThisType->witness = openedWitness;
-
-            DeclRef<InterfaceDecl> substDeclRef = DeclRef<InterfaceDecl>(interfaceDecl, openedThisType);
-            openedType->interfaceDeclRef = substDeclRef;
+            DeclRef<InterfaceDecl> substDeclRef = openedType->getSpecializedInterfaceDeclRef();
 
             ExtractExistentialValueExpr* openedValue = m_astBuilder->create<ExtractExistentialValueExpr>();
             openedValue->declRef = varDeclRef;
@@ -879,6 +869,13 @@ namespace Slang
         if (auto intLitExpr = expr.as<IntegerLiteralExpr>())
         {
             return getIntVal(intLitExpr);
+        }
+
+        if (auto boolLitExpr = expr.as<BoolLiteralExpr>())
+        {
+            // If it's a boolean, we allow promotion to int.
+            const IntegerLiteralValue value = IntegerLiteralValue(boolLitExpr.getExpr()->value);
+            return m_astBuilder->create<ConstantIntVal>(value);
         }
 
         // it is possible that we are referring to a generic value param
@@ -2143,6 +2140,55 @@ namespace Slang
         expr->type = m_astBuilder->getTypeType(andType);
 
         return expr;
+    }
+
+    Expr* SemanticsExprVisitor::visitModifiedTypeExpr(ModifiedTypeExpr* expr)
+    {
+        // The base type should be a proper type (not an expression, generic, etc.)
+        //
+        expr->base = CheckProperType(expr->base);
+        auto baseType = expr->base.type;
+
+        // We will check the modifiers that were applied to the type expression
+        // one by one, and collect a list of the ones that should modify the
+        // resulting `Type`.
+        //
+        List<Val*> modifierVals;
+        for( auto modifier : expr->modifiers )
+        {
+            auto modifierVal = checkTypeModifier(modifier, baseType);
+            if(!modifierVal)
+                continue;
+            modifierVals.add(modifierVal);
+        }
+
+        auto modifiedType = m_astBuilder->getModifiedType(baseType, modifierVals);
+        expr->type = m_astBuilder->getTypeType(modifiedType);
+
+        return expr;
+    }
+
+    Val* SemanticsExprVisitor::checkTypeModifier(Modifier* modifier, Type* type)
+    {
+        SLANG_UNUSED(type);
+
+        if( auto unormModifier = as<UNormModifier>(modifier) )
+        {
+            // TODO: validate that `type` is either `float` or a vector of `float`s
+            return m_astBuilder->getUNormModifierVal();
+
+        }
+        else if( auto snormModifier = as<SNormModifier>(modifier) )
+        {
+            // TODO: validate that `type` is either `float` or a vector of `float`s
+            return m_astBuilder->getSNormModifierVal();
+        }
+        else
+        {
+            // TODO: more complete error message here
+            getSink()->diagnose(modifier, Diagnostics::unexpected, "unknown type modifier in semantic checking");
+            return nullptr;
+        }
     }
 
 }

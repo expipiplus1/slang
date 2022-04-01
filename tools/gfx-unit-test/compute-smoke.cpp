@@ -19,7 +19,7 @@ namespace gfx_test
 
         ComPtr<IShaderProgram> shaderProgram;
         slang::ProgramLayout* slangReflection;
-        GFX_CHECK_CALL_ABORT(loadShaderProgram(device, shaderProgram, "compute-smoke", slangReflection));
+        GFX_CHECK_CALL_ABORT(loadComputeProgram(device, shaderProgram, "compute-smoke", "computeMain", slangReflection));
 
         ComputePipelineStateDesc pipelineDesc = {};
         pipelineDesc.program = shaderProgram.get();
@@ -39,7 +39,7 @@ namespace gfx_test
             ResourceState::CopyDestination,
             ResourceState::CopySource);
         bufferDesc.defaultState = ResourceState::UnorderedAccess;
-        bufferDesc.cpuAccessFlags = AccessFlag::Write | AccessFlag::Read;
+        bufferDesc.memoryType = MemoryType::DeviceLocal;
 
         ComPtr<IBufferResource> numbersBuffer;
         GFX_CHECK_CALL_ABORT(device->createBufferResource(
@@ -51,7 +51,8 @@ namespace gfx_test
         IResourceView::Desc viewDesc = {};
         viewDesc.type = IResourceView::Type::UnorderedAccess;
         viewDesc.format = Format::Unknown;
-        GFX_CHECK_CALL_ABORT(device->createBufferView(numbersBuffer, viewDesc, bufferView.writeRef()));
+        GFX_CHECK_CALL_ABORT(
+            device->createBufferView(numbersBuffer, nullptr, viewDesc, bufferView.writeRef()));
 
         // We have done all the set up work, now it is time to start recording a command buffer for
         // GPU execution.
@@ -87,7 +88,7 @@ namespace gfx_test
             encoder->endEncoding();
             commandBuffer->close();
             queue->executeCommandBuffer(commandBuffer);
-            queue->wait();
+            queue->waitOnHost();
         }
 
         compareComputeResult(
@@ -96,49 +97,14 @@ namespace gfx_test
             Slang::makeArray<float>(11.0f, 12.0f, 13.0f, 14.0f));
     }
 
-    void computeSmokeTestAPI(UnitTestContext* context, Slang::RenderApiFlag::Enum api)
-    {
-        if ((api & context->enabledApis) == 0)
-        {
-            SLANG_IGNORE_TEST
-        }
-        Slang::ComPtr<IDevice> device;
-        IDevice::Desc deviceDesc = {};
-        switch (api)
-        {
-        case Slang::RenderApiFlag::D3D11:
-            deviceDesc.deviceType = gfx::DeviceType::DirectX11;
-            break;
-        case Slang::RenderApiFlag::D3D12:
-            deviceDesc.deviceType = gfx::DeviceType::DirectX12;
-            break;
-        case Slang::RenderApiFlag::Vulkan:
-            deviceDesc.deviceType = gfx::DeviceType::Vulkan;
-            break;
-        default:
-            SLANG_IGNORE_TEST
-        }
-        deviceDesc.slang.slangGlobalSession = context->slangGlobalSession;
-        const char* searchPaths[] = { "", "../../tools/gfx-unit-test", "tools/gfx-unit-test" };
-        deviceDesc.slang.searchPathCount = (SlangInt)SLANG_COUNT_OF(searchPaths);
-        deviceDesc.slang.searchPaths = searchPaths;
-        auto createDeviceResult = gfxCreateDevice(&deviceDesc, device.writeRef());
-        if (SLANG_FAILED(createDeviceResult))
-        {
-            SLANG_IGNORE_TEST
-        }
-
-        computeSmokeTestImpl(device, context);
-    }
-
     SLANG_UNIT_TEST(computeSmokeD3D11)
     {
-        computeSmokeTestAPI(unitTestContext, Slang::RenderApiFlag::D3D11);
+        runTestImpl(computeSmokeTestImpl, unitTestContext, Slang::RenderApiFlag::D3D11);
     }
 
     SLANG_UNIT_TEST(computeSmokeVulkan)
     {
-        computeSmokeTestAPI(unitTestContext, Slang::RenderApiFlag::Vulkan);
+        runTestImpl(computeSmokeTestImpl, unitTestContext, Slang::RenderApiFlag::Vulkan);
     }
 
 }

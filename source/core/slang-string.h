@@ -62,7 +62,7 @@ namespace Slang
         return (((unsigned char)ch) & 0xC0) == 0x80;
     }
 
-    struct UnownedStringSlice
+    struct SLANG_RT_API UnownedStringSlice
     {
     public:
         typedef UnownedStringSlice ThisType;
@@ -168,6 +168,9 @@ namespace Slang
             /// Trims any 'c' from the start or the end, and returns as a substring
         UnownedStringSlice trim(char c) const;
 
+            /// Trims any horizonatl whitespace from start and returns as a substring
+        UnownedStringSlice trimStart() const;
+
         HashCode getHashCode() const
         {
             return Slang::getHashCode(m_begin, size_t(m_end - m_begin)); 
@@ -187,7 +190,7 @@ namespace Slang
 
     // A `StringRepresentation` provides the backing storage for
     // all reference-counted string-related types.
-    class StringRepresentation : public RefObject
+    class SLANG_RT_API StringRepresentation : public RefObject
     {
     public:
         Index length;
@@ -206,6 +209,9 @@ namespace Slang
         {
             return (const char*)(this + 1);
         }
+
+            /// Set the contents to be the slice. Must be enough capacity to hold the slice. 
+        void setContents(const UnownedStringSlice& slice);
 
         static const char* getData(const StringRepresentation* stringRep)
         {
@@ -243,6 +249,11 @@ namespace Slang
             return createWithCapacityAndLength(length, length);
         }
 
+            /// Create a representation from the slice. If slice is empty will return nullptr.
+        static StringRepresentation* create(const UnownedStringSlice& slice);
+            /// Same as create, but representation will have refcount of 1 (if not nullptr)
+        static StringRepresentation* createWithReference(const UnownedStringSlice& slice);
+
         StringRepresentation* cloneWithCapacity(Index newCapacity)
         {
             StringRepresentation* newObj = createWithCapacityAndLength(newCapacity, length);
@@ -275,7 +286,7 @@ namespace Slang
 
 
 
-    struct UnownedTerminatedStringSlice : public UnownedStringSlice
+    struct SLANG_RT_API UnownedTerminatedStringSlice : public UnownedStringSlice
     {
     public:
         UnownedTerminatedStringSlice(char const* b)
@@ -283,7 +294,7 @@ namespace Slang
         {}
     };
 
-    struct StringSlice
+    struct SLANG_RT_API StringSlice
     {
     public:
         StringSlice();
@@ -322,7 +333,7 @@ namespace Slang
     };
 
     /// String as expected by underlying platform APIs
-    class OSString
+    class SLANG_RT_API OSString
     {
     public:
             /// Default
@@ -383,7 +394,7 @@ namespace Slang
     @brief Represents a UTF-8 encoded string.
     */
 
-    class String
+    class SLANG_RT_API String
     {
         friend struct StringSlice;
         friend class StringBuilder;
@@ -409,7 +420,7 @@ namespace Slang
         static String fromWString(const wchar_t * wstr);
         static String fromWString(const wchar_t * wstr, const wchar_t * wend);
         static String fromWChar(const wchar_t ch);
-        static String fromUnicodePoint(unsigned int codePoint);
+        static String fromUnicodePoint(Char32 codePoint);
         String()
         {
         }
@@ -619,9 +630,9 @@ namespace Slang
                 len = getLength() - id;
 #if _DEBUG
             if (id < 0 || id >= getLength() || (id + len) > getLength())
-                throw "SubString: index out of range.";
+                SLANG_ASSERT_FAILURE("SubString: index out of range.");
             if (len < 0)
-                throw "SubString: length less than zero.";
+                SLANG_ASSERT_FAILURE("SubString: length less than zero.");
 #endif
             return StringSlice(m_buffer, id, id + len);
         }
@@ -826,7 +837,7 @@ namespace Slang
         }
     };
 
-    class StringBuilder : public String
+    class SLANG_RT_API StringBuilder : public String
     {
     private:
         enum { InitialSize = 1024 };
@@ -997,9 +1008,9 @@ namespace Slang
         {
 #if _DEBUG
             if (id >= length || id < 0)
-                throw "Remove: Index out of range.";
+                SLANG_ASSERT_FAILURE("Remove: Index out of range.");
             if (len < 0)
-                throw "Remove: remove length smaller than zero.";
+                SLANG_ASSERT_FAILURE("Remove: remove length smaller than zero.");
 #endif
             int actualDelLength = ((id + len) >= length) ? (length - id) : len;
             for (int i = id + actualDelLength; i <= length; i++)

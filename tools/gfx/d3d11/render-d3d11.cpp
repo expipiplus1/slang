@@ -10,6 +10,7 @@
 #include "../d3d/d3d-util.h"
 #include "../d3d/d3d-swapchain.h"
 #include "../nvapi/nvapi-util.h"
+#include "../mutable-shader-object.h"
 
 // In order to use the Slang API, we need to include its header
 
@@ -92,12 +93,12 @@ public:
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferView(
         IBufferResource* buffer,
+        IBufferResource* counterBuffer,
         IResourceView::Desc const& desc,
         IResourceView** outView) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createInputLayout(
-        const InputElementDesc* inputElements,
-        UInt inputElementCount,
+        IInputLayout::Desc const& desc,
         IInputLayout** outLayout) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createQueryPool(
@@ -108,12 +109,15 @@ public:
         ShaderObjectLayoutBase** outLayout) override;
     virtual Result createShaderObject(ShaderObjectLayoutBase* layout, IShaderObject** outObject)
         override;
+    virtual Result createMutableShaderObject(ShaderObjectLayoutBase* layout, IShaderObject** outObject) override;
     virtual Result createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject)
         override;
     virtual void bindRootShaderObject(IShaderObject* shaderObject) override;
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override;
+    virtual SLANG_NO_THROW Result SLANG_MCALL createProgram(
+        const IShaderProgram::Desc& desc,
+        IShaderProgram** outProgram,
+        ISlangBlob** outDiagnosticBlob) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createGraphicsPipelineState(
         const GraphicsPipelineStateDesc& desc, IPipelineState** outState) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createComputePipelineState(
@@ -133,17 +137,29 @@ public:
     virtual void setPrimitiveTopology(PrimitiveTopology topology) override;
 
     virtual void setVertexBuffers(
-        UInt startSlot,
-        UInt slotCount,
+        uint32_t startSlot,
+        uint32_t slotCount,
         IBufferResource* const* buffers,
-        const UInt* strides,
-        const UInt* offsets) override;
-    virtual void setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset) override;
+        const uint32_t* offsets) override;
+    virtual void setIndexBuffer(
+        IBufferResource* buffer, Format indexFormat, uint32_t offset) override;
     virtual void setViewports(UInt count, Viewport const* viewports) override;
     virtual void setScissorRects(UInt count, ScissorRect const* rects) override;
     virtual void setPipelineState(IPipelineState* state) override;
-    virtual void draw(UInt vertexCount, UInt startVertex) override;
-    virtual void drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex) override;
+    virtual void draw(uint32_t vertexCount, uint32_t startVertex) override;
+    virtual void drawIndexed(
+        uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex) override;
+    virtual void drawInstanced(
+        uint32_t vertexCount,
+        uint32_t instanceCount,
+        uint32_t startVertex,
+        uint32_t startInstanceLocation) override;
+    virtual void drawIndexedInstanced(
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t startIndexLocation,
+        int32_t baseVertexLocation,
+        uint32_t startInstanceLocation) override;
     virtual void dispatchCompute(int x, int y, int z) override;
     virtual void submitGpuWork() override {}
     virtual void waitForGpu() override
@@ -215,6 +231,20 @@ protected:
         {
             return 0;
         }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            map(MemoryRange* rangeToRead, void** outPointer) override
+        {
+            SLANG_UNUSED(rangeToRead);
+            SLANG_UNUSED(outPointer);
+            return SLANG_FAIL;
+        }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL unmap(MemoryRange* writtenRange) override
+        {
+            SLANG_UNUSED(writtenRange);
+            return SLANG_FAIL;
+        }
     };
     class TextureResourceImpl : public TextureResource
     {
@@ -229,16 +259,8 @@ protected:
 
     };
 
-    class SamplerStateImpl : public ISamplerState, public ComObject
+    class SamplerStateImpl : public SamplerStateBase
     {
-    public:
-        SLANG_COM_OBJECT_IUNKNOWN_ALL
-        ISamplerState* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ISamplerState)
-                return static_cast<ISamplerState*>(this);
-            return nullptr;
-        }
     public:
         ComPtr<ID3D11SamplerState> m_sampler;
     };
@@ -291,19 +313,8 @@ protected:
         IFramebufferLayout::AttachmentLayout m_depthStencil;
     };
 
-    class FramebufferImpl
-        : public IFramebuffer
-        , public ComObject
+    class FramebufferImpl : public FramebufferBase
     {
-    public:
-        SLANG_COM_OBJECT_IUNKNOWN_ALL
-        IFramebuffer* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IFramebuffer)
-                return static_cast<IFramebuffer*>(this);
-            return nullptr;
-        }
-
     public:
         ShortList<RefPtr<RenderTargetViewImpl>, kMaxRTVs> renderTargetViews;
         ShortList<ID3D11RenderTargetView*, kMaxRTVs> d3dRenderTargetViews;
@@ -359,24 +370,25 @@ protected:
             m_renderer->m_immediateContext->ClearState();
             return D3DSwapchainBase::resize(width, height);
         }
+        virtual SLANG_NO_THROW bool SLANG_MCALL isOccluded() override
+        {
+            return false;
+        }
+        virtual SLANG_NO_THROW Result SLANG_MCALL setFullScreenMode(bool mode) override
+        {
+            return SLANG_FAIL;
+        }
     };
 
     class InputLayoutImpl: public InputLayoutBase
 	{
     public:
 		ComPtr<ID3D11InputLayout> m_layout;
+        List<UINT> m_vertexStreamStrides;
 	};
 
-    class QueryPoolImpl : public IQueryPool, public ComObject
+    class QueryPoolImpl : public QueryPoolBase
     {
-    public:
-        SLANG_COM_OBJECT_IUNKNOWN_ALL;
-        IQueryPool* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IQueryPool)
-                return static_cast<IQueryPool*>(this);
-            return nullptr;
-        }
     public:
         List<ComPtr<ID3D11Query>> m_queries;
         RefPtr<D3D11Device> m_device;
@@ -1265,6 +1277,16 @@ protected:
             return SLANG_OK;
         }
 
+        virtual SLANG_NO_THROW const void* SLANG_MCALL getRawData() override
+        {
+            return m_data.getBuffer();
+        }
+
+        virtual SLANG_NO_THROW size_t SLANG_MCALL getSize() override
+        {
+            return (size_t)m_data.getCount();
+        }
+
         SLANG_NO_THROW Result SLANG_MCALL
             setData(ShaderOffset const& inOffset, void const* data, size_t inSize) SLANG_OVERRIDE
         {
@@ -1289,6 +1311,8 @@ protected:
             }
 
             memcpy(dest + offset, data, size);
+
+            m_isConstantBufferDirty = true;
 
             return SLANG_OK;
         }
@@ -1510,49 +1534,43 @@ protected:
             D3D11Device*            device,
             ShaderObjectLayoutImpl* specializedLayout)
         {
-            // If we have already created a buffer to hold ordinary data, then we should
-            // simply re-use that buffer rather than re-create it.
-            //
-            // TODO: Simply re-using the buffer without any kind of validation checks
-            // means that we are assuming that users cannot or will not perform any `set`
-            // operations on a shader object once an operation has requested this buffer
-            // be created. We need to enforce that rule if we want to rely on it.
-            //
-            if (m_ordinaryDataBuffer)
-                return SLANG_OK;
-
             auto specializedOrdinaryDataSize = specializedLayout->getTotalOrdinaryDataSize();
             if (specializedOrdinaryDataSize == 0)
                 return SLANG_OK;
 
-            // Once we have computed how large the buffer should be, we can allocate
-            // it using the existing public `IDevice` API.
-            //
+            // If we have already created a buffer to hold ordinary data, then we should
+            // simply re-use that buffer rather than re-create it.
+            if (!m_ordinaryDataBuffer)
+            {
+                ComPtr<IBufferResource> bufferResourcePtr;
+                IBufferResource::Desc bufferDesc = {};
+                bufferDesc.type = IResource::Type::Buffer;
+                bufferDesc.sizeInBytes = specializedOrdinaryDataSize;
+                bufferDesc.defaultState = ResourceState::ConstantBuffer;
+                bufferDesc.allowedStates =
+                    ResourceStateSet(ResourceState::ConstantBuffer, ResourceState::CopyDestination);
+                bufferDesc.memoryType = MemoryType::Upload;
+                SLANG_RETURN_ON_FAIL(
+                    device->createBufferResource(bufferDesc, nullptr, bufferResourcePtr.writeRef()));
+                m_ordinaryDataBuffer = static_cast<BufferResourceImpl*>(bufferResourcePtr.get());
+            }
 
-            ComPtr<IBufferResource> bufferResourcePtr;
-            IBufferResource::Desc bufferDesc = {};
-            bufferDesc.type = IResource::Type::Buffer;
-            bufferDesc.sizeInBytes = specializedOrdinaryDataSize;
-            bufferDesc.defaultState = ResourceState::ConstantBuffer;
-            bufferDesc.allowedStates =
-                ResourceStateSet(ResourceState::ConstantBuffer, ResourceState::CopyDestination);
-            bufferDesc.cpuAccessFlags |= AccessFlag::Write;
-            SLANG_RETURN_ON_FAIL(
-                device->createBufferResource(bufferDesc, nullptr, bufferResourcePtr.writeRef()));
-            m_ordinaryDataBuffer = static_cast<BufferResourceImpl*>(bufferResourcePtr.get());
+            if (m_isConstantBufferDirty)
+            {
+                // Once the buffer is allocated, we can use `_writeOrdinaryData` to fill it in.
+                //
+                // Note that `_writeOrdinaryData` is potentially recursive in the case
+                // where this object contains interface/existential-type fields, so we
+                // don't need or want to inline it into this call site.
+                //
 
-            // Once the buffer is allocated, we can use `_writeOrdinaryData` to fill it in.
-            //
-            // Note that `_writeOrdinaryData` is potentially recursive in the case
-            // where this object contains interface/existential-type fields, so we
-            // don't need or want to inline it into this call site.
-            //
-
-            auto ordinaryData = device->map(m_ordinaryDataBuffer, gfx::MapFlavor::WriteDiscard);
-            auto result = _writeOrdinaryData(ordinaryData, specializedOrdinaryDataSize, specializedLayout);
-            device->unmap(m_ordinaryDataBuffer, 0, specializedOrdinaryDataSize);
-            
-            return result;
+                auto ordinaryData = device->map(m_ordinaryDataBuffer, gfx::MapFlavor::WriteDiscard);
+                auto result = _writeOrdinaryData(ordinaryData, specializedOrdinaryDataSize, specializedLayout);
+                device->unmap(m_ordinaryDataBuffer, 0, specializedOrdinaryDataSize);
+                m_isConstantBufferDirty = false;
+                return result;
+            }
+            return SLANG_OK;
         }
 
             /// Bind the buffer for ordinary/uniform data, if needed
@@ -1776,6 +1794,8 @@ protected:
             /// Created on demand with `_createOrdinaryDataBufferIfNeeded()`
         RefPtr<BufferResourceImpl> m_ordinaryDataBuffer;
 
+        bool m_isConstantBufferDirty = true;
+
             /// Get the layout of this shader object with specialization arguments considered
             ///
             /// This operation should only be called after the shader object has been
@@ -1814,16 +1834,20 @@ protected:
         RefPtr<ShaderObjectLayoutImpl> m_specializedLayout;
     };
 
+    class MutableShaderObjectImpl
+        : public MutableShaderObject<
+        MutableShaderObjectImpl,
+        ShaderObjectLayoutImpl>
+    {};
+
     class RootShaderObjectImpl : public ShaderObjectImpl
     {
         typedef ShaderObjectImpl Super;
 
     public:
-        // Override default reference counting behavior to disable lifetime management via ComPtr.
-        // Root objects are managed by command buffer and does not need to be freed by the user.
-        SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-        SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-    public:
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
+
         static Result create(IDevice* device, RootShaderObjectLayoutImpl* layout, RootShaderObjectImpl** outShaderObject)
         {
             RefPtr<RootShaderObjectImpl> object = new RootShaderObjectImpl();
@@ -2047,6 +2071,65 @@ SlangResult SLANG_MCALL createD3D11Device(const IDevice::Desc* desc, IDevice** o
     return SLANG_OK;
 }
 
+static void initSrvDesc(IResource::Type resourceType, const ITextureResource::Desc& textureDesc, DXGI_FORMAT pixelFormat, D3D11_SHADER_RESOURCE_VIEW_DESC& descOut)
+{
+    // create SRV
+    descOut = D3D11_SHADER_RESOURCE_VIEW_DESC();
+
+    descOut.Format = (pixelFormat == DXGI_FORMAT_UNKNOWN) ? D3DUtil::calcFormat(D3DUtil::USAGE_SRV, D3DUtil::getMapFormat(textureDesc.format)) : pixelFormat;
+    const int arraySize = calcEffectiveArraySize(textureDesc);
+    if (arraySize <= 1)
+    {
+        switch (textureDesc.type)
+        {
+        case IResource::Type::Texture1D:  descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1D; break;
+        case IResource::Type::Texture2D:  descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; break;
+        case IResource::Type::Texture3D:  descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D; break;
+        default: assert(!"Unknown dimension");
+        }
+
+        descOut.Texture2D.MipLevels = textureDesc.numMipLevels;
+        descOut.Texture2D.MostDetailedMip = 0;
+    }
+    else if (resourceType == IResource::Type::TextureCube)
+    {
+        if (textureDesc.arraySize > 1)
+        {
+            descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+
+            descOut.TextureCubeArray.NumCubes = textureDesc.arraySize;
+            descOut.TextureCubeArray.First2DArrayFace = 0;
+            descOut.TextureCubeArray.MipLevels = textureDesc.numMipLevels;
+            descOut.TextureCubeArray.MostDetailedMip = 0;
+        }
+        else
+        {
+            descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+
+            descOut.TextureCube.MipLevels = textureDesc.numMipLevels;
+            descOut.TextureCube.MostDetailedMip = 0;
+        }
+    }
+    else
+    {
+        assert(textureDesc.size.depth > 1 || arraySize > 1);
+
+        switch (textureDesc.type)
+        {
+        case IResource::Type::Texture1D:  descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1DARRAY; break;
+        case IResource::Type::Texture2D:  descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY; break;
+        case IResource::Type::Texture3D:  descOut.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D; break;
+
+        default: assert(!"Unknown dimension");
+        }
+
+        descOut.Texture2DArray.ArraySize = max(textureDesc.size.depth, arraySize);
+        descOut.Texture2DArray.MostDetailedMip = 0;
+        descOut.Texture2DArray.MipLevels = textureDesc.numMipLevels;
+        descOut.Texture2DArray.FirstArraySlice = 0;
+    }
+}
+
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ScopeNVAPI !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 SlangResult D3D11Device::ScopeNVAPI::init(D3D11Device* device, Index regIndex)
@@ -2087,7 +2170,7 @@ D3D11Device::ScopeNVAPI::~ScopeNVAPI()
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!! Renderer interface !!!!!!!!!!!!!!!!!!!!!!!!!!
 
-static bool _isSupportedNVAPIOp(IUnknown* dev, uint32_t op)
+static bool isSupportedNVAPIOp(IUnknown* dev, uint32_t op)
 {
 #ifdef GFX_NVAPI
     {
@@ -2264,11 +2347,11 @@ SlangResult D3D11Device::initialize(const Desc& desc)
             return SLANG_E_NOT_AVAILABLE;
         }
 
-        if (_isSupportedNVAPIOp(m_device, NV_EXTN_OP_UINT64_ATOMIC ))
+        if (isSupportedNVAPIOp(m_device, NV_EXTN_OP_UINT64_ATOMIC ))
         {
             m_features.add("atomic-int64");
         }
-        if (_isSupportedNVAPIOp(m_device, NV_EXTN_OP_FP32_ATOMIC))
+        if (isSupportedNVAPIOp(m_device, NV_EXTN_OP_FP32_ATOMIC))
         {
             m_features.add("atomic-float");
         }
@@ -2364,7 +2447,7 @@ Result D3D11Device::createFramebuffer(
         framebuffer->d3dRenderTargetViews[i] = framebuffer->renderTargetViews[i]->m_rtv;
     }
     framebuffer->depthStencilView = static_cast<DepthStencilViewImpl*>(desc.depthStencilView);
-    framebuffer->d3dDepthStencilView = framebuffer->depthStencilView->m_dsv;
+    framebuffer->d3dDepthStencilView = framebuffer->depthStencilView ? framebuffer->depthStencilView->m_dsv : nullptr;
     returnComPtr(outFramebuffer, framebuffer);
     return SLANG_OK;
 }
@@ -2404,7 +2487,9 @@ SlangResult D3D11Device::readTextureResource(
         return E_INVALIDARG;
     }
 
-    size_t bytesPerPixel = sizeof(uint32_t);
+    FormatInfo sizeInfo;
+    gfxGetFormatInfo(texture->getDesc()->format, &sizeInfo);
+    size_t bytesPerPixel = sizeInfo.blockSizeInBytes / sizeInfo.pixelsPerBlock;
     size_t rowPitch = int(texture->getDesc()->size.width) * bytesPerPixel;
     size_t bufferSize = rowPitch * int(texture->getDesc()->size.height);
     if (outRowPitch)
@@ -2463,7 +2548,7 @@ SlangResult D3D11Device::readTextureResource(
     }
 }
 
-static D3D11_BIND_FLAG _calcResourceFlag(ResourceState state)
+static D3D11_BIND_FLAG calcResourceFlag(ResourceState state)
 {
     switch (state)
     {
@@ -2496,21 +2581,24 @@ static int _calcResourceBindFlags(ResourceStateSet allowedStates)
     {
         auto state = (ResourceState)i;
         if (allowedStates.contains(state))
-            dstFlags |= _calcResourceFlag(state);
+            dstFlags |= calcResourceFlag(state);
     }
     return dstFlags;
 }
 
-static int _calcResourceAccessFlags(int accessFlags)
+static int _calcResourceAccessFlags(MemoryType memType)
 {
-    switch (accessFlags)
+    switch (memType)
     {
-        case 0:         return 0;
-        case AccessFlag::Read:            return D3D11_CPU_ACCESS_READ;
-        case AccessFlag::Write:           return D3D11_CPU_ACCESS_WRITE;
-        case AccessFlag::Read |
-             AccessFlag::Write:           return D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
-        default: assert(!"Invalid flags"); return 0;
+    case MemoryType::DeviceLocal:
+        return 0;
+    case MemoryType::ReadBack:
+        return D3D11_CPU_ACCESS_READ;
+    case MemoryType::Upload:
+        return D3D11_CPU_ACCESS_WRITE;
+    default:
+        assert(!"Invalid flags");
+        return 0;
     }
 }
 
@@ -2556,7 +2644,7 @@ Result D3D11Device::createTextureResource(const ITextureResource::Desc& descIn, 
         subResourcesPtr = subRes.getBuffer();
     }
 
-    const int accessFlags = _calcResourceAccessFlags(srcDesc.cpuAccessFlags);
+    const int accessFlags = _calcResourceAccessFlags(srcDesc.memoryType);
 
     RefPtr<TextureResourceImpl> texture(new TextureResourceImpl(srcDesc));
     
@@ -2662,15 +2750,20 @@ Result D3D11Device::createBufferResource(const IBufferResource::Desc& descIn, co
     bufferDesc.ByteWidth = UINT(alignedSizeInBytes);
     bufferDesc.BindFlags = d3dBindFlags;
     // For read we'll need to do some staging
-    bufferDesc.CPUAccessFlags =
-        _calcResourceAccessFlags(descIn.cpuAccessFlags & AccessFlag::Write);
+    bufferDesc.CPUAccessFlags = _calcResourceAccessFlags(descIn.memoryType);
     bufferDesc.Usage = D3D11_USAGE_DEFAULT;
 
     // If written by CPU, make it dynamic
-    if ((descIn.cpuAccessFlags & AccessFlag::Write) &&
+    if (descIn.memoryType == MemoryType::Upload &&
         !descIn.allowedStates.contains(ResourceState::UnorderedAccess))
     {
         bufferDesc.Usage = D3D11_USAGE_DYNAMIC;
+    }
+
+    if (srcDesc.memoryType == MemoryType::ReadBack)
+    {
+        bufferDesc.CPUAccessFlags |= D3D11_CPU_ACCESS_READ;
+        bufferDesc.Usage = D3D11_USAGE_STAGING;
     }
 
     switch (descIn.defaultState)
@@ -2698,7 +2791,7 @@ Result D3D11Device::createBufferResource(const IBufferResource::Desc& descIn, co
         }
     }
 
-    if (srcDesc.cpuAccessFlags & AccessFlag::Write)
+    if (srcDesc.memoryType == MemoryType::Upload)
     {
         bufferDesc.CPUAccessFlags |= D3D11_CPU_ACCESS_WRITE;
     }
@@ -2711,8 +2804,7 @@ Result D3D11Device::createBufferResource(const IBufferResource::Desc& descIn, co
     SLANG_RETURN_ON_FAIL(m_device->CreateBuffer(&bufferDesc, initData ? &subResourceData : nullptr, buffer->m_buffer.writeRef()));
     buffer->m_d3dUsage = bufferDesc.Usage;
 
-    if ((srcDesc.cpuAccessFlags & AccessFlag::Read) ||
-        ((srcDesc.cpuAccessFlags & AccessFlag::Write) && bufferDesc.Usage != D3D11_USAGE_DYNAMIC))
+    if (srcDesc.memoryType == MemoryType::ReadBack || bufferDesc.Usage != D3D11_USAGE_DYNAMIC)
     {
         D3D11_BUFFER_DESC bufDesc = {};
         bufDesc.BindFlags = 0;
@@ -2907,8 +2999,11 @@ Result D3D11Device::createTextureView(ITextureResource* texture, IResourceView::
 
     case IResourceView::Type::ShaderResource:
         {
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+            initSrvDesc(resourceImpl->getType(), *resourceImpl->getDesc(), D3DUtil::getMapFormat(desc.format), srvDesc);
+
             ComPtr<ID3D11ShaderResourceView> srv;
-            SLANG_RETURN_ON_FAIL(m_device->CreateShaderResourceView(resourceImpl->m_resource, nullptr, srv.writeRef()));
+            SLANG_RETURN_ON_FAIL(m_device->CreateShaderResourceView(resourceImpl->m_resource, &srvDesc, srv.writeRef()));
 
             RefPtr<ShaderResourceViewImpl> viewImpl = new ShaderResourceViewImpl();
             viewImpl->m_type = ResourceViewImpl::Type::SRV;
@@ -2922,7 +3017,11 @@ Result D3D11Device::createTextureView(ITextureResource* texture, IResourceView::
     }
 }
 
-Result D3D11Device::createBufferView(IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView)
+Result D3D11Device::createBufferView(
+    IBufferResource* buffer,
+    IBufferResource* counterBuffer,
+    IResourceView::Desc const& desc,
+    IResourceView** outView)
 {
     auto resourceImpl = (BufferResourceImpl*) buffer;
     auto resourceDesc = *resourceImpl->getDesc();
@@ -2951,7 +3050,9 @@ Result D3D11Device::createBufferView(IBufferResource* buffer, IResourceView::Des
             }
             else
             {
-                uavDesc.Buffer.NumElements = UINT(resourceDesc.sizeInBytes / gfxGetFormatSize(desc.format));
+                FormatInfo sizeInfo;
+                gfxGetFormatInfo(desc.format, &sizeInfo);
+                uavDesc.Buffer.NumElements = UINT(resourceDesc.sizeInBytes / (sizeInfo.blockSizeInBytes / sizeInfo.pixelsPerBlock));
             }
 
             ComPtr<ID3D11UnorderedAccessView> uav;
@@ -2998,7 +3099,9 @@ Result D3D11Device::createBufferView(IBufferResource* buffer, IResourceView::Des
             }
             else
             {
-                srvDesc.Buffer.NumElements = UINT(resourceDesc.sizeInBytes / gfxGetFormatSize(desc.format));
+                FormatInfo sizeInfo;
+                gfxGetFormatInfo(desc.format, &sizeInfo);
+                srvDesc.Buffer.NumElements = UINT(resourceDesc.sizeInBytes / (sizeInfo.blockSizeInBytes / sizeInfo.pixelsPerBlock));
             }
 
             ComPtr<ID3D11ShaderResourceView> srv;
@@ -3015,7 +3118,7 @@ Result D3D11Device::createBufferView(IBufferResource* buffer, IResourceView::Des
     }
 }
 
-Result D3D11Device::createInputLayout(const InputElementDesc* inputElementsIn, UInt inputElementCount, IInputLayout** outLayout)
+Result D3D11Device::createInputLayout(IInputLayout::Desc const& desc, IInputLayout** outLayout)
 {
     D3D11_INPUT_ELEMENT_DESC inputElements[16] = {};
 
@@ -3024,15 +3127,21 @@ Result D3D11Device::createInputLayout(const InputElementDesc* inputElementsIn, U
 
     hlslCursor += sprintf(hlslCursor, "float4 main(\n");
 
-    for (UInt ii = 0; ii < inputElementCount; ++ii)
+    auto inputElementCount = desc.inputElementCount;
+    auto inputElementsIn = desc.inputElements;
+    for (Int ii = 0; ii < inputElementCount; ++ii)
     {
+        auto vertexStreamIndex = inputElementsIn[ii].bufferSlotIndex;
+        auto& vertexStream = desc.vertexStreams[vertexStreamIndex];
+
         inputElements[ii].SemanticName = inputElementsIn[ii].semanticName;
         inputElements[ii].SemanticIndex = (UINT)inputElementsIn[ii].semanticIndex;
         inputElements[ii].Format = D3DUtil::getMapFormat(inputElementsIn[ii].format);
-        inputElements[ii].InputSlot = 0;
+        inputElements[ii].InputSlot = (UINT)vertexStreamIndex;
         inputElements[ii].AlignedByteOffset = (UINT)inputElementsIn[ii].offset;
-        inputElements[ii].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-        inputElements[ii].InstanceDataStepRate = 0;
+        inputElements[ii].InputSlotClass =
+            (vertexStream.slotClass == InputSlotClass::PerInstance) ? D3D11_INPUT_PER_INSTANCE_DATA : D3D11_INPUT_PER_VERTEX_DATA;
+        inputElements[ii].InstanceDataStepRate = (UINT)vertexStream.instanceDataStepRate;
 
         if (ii != 0)
         {
@@ -3042,17 +3151,17 @@ Result D3D11Device::createInputLayout(const InputElementDesc* inputElementsIn, U
         char const* typeName = "Unknown";
         switch (inputElementsIn[ii].format)
         {
-            case Format::RGBA_Float32:
-            case Format::RGBA_Unorm_UInt8:
+            case Format::R32G32B32A32_FLOAT:
+            case Format::R8G8B8A8_UNORM:
                 typeName = "float4";
                 break;
-            case Format::RGB_Float32:
+            case Format::R32G32B32_FLOAT:
                 typeName = "float3";
                 break;
-            case Format::RG_Float32:
+            case Format::R32G32_FLOAT:
                 typeName = "float2";
                 break;
-            case Format::R_Float32:
+            case Format::R32_FLOAT:
                 typeName = "float";
                 break;
             default:
@@ -3077,6 +3186,13 @@ Result D3D11Device::createInputLayout(const InputElementDesc* inputElementsIn, U
 
     RefPtr<InputLayoutImpl> impl = new InputLayoutImpl;
     impl->m_layout.swap(inputLayout);
+
+    auto vertexStreamCount = desc.vertexStreamCount;
+    impl->m_vertexStreamStrides.setCount(vertexStreamCount);
+    for (Int i = 0; i < vertexStreamCount; ++i)
+    {
+        impl->m_vertexStreamStrides[i] = desc.vertexStreams[i].stride;
+    }
 
     returnComPtr(outLayout, impl);
     return SLANG_OK;
@@ -3188,10 +3304,15 @@ void D3D11Device::setPrimitiveTopology(PrimitiveTopology topology)
     m_immediateContext->IASetPrimitiveTopology(D3DUtil::getPrimitiveTopology(topology));
 }
 
-void D3D11Device::setVertexBuffers(UInt startSlot, UInt slotCount, IBufferResource*const* buffersIn, const UInt* stridesIn, const UInt* offsetsIn)
+void D3D11Device::setVertexBuffers(
+    uint32_t startSlot,
+    uint32_t slotCount,
+    IBufferResource* const* buffersIn,
+    const uint32_t* offsetsIn)
 {
     static const int kMaxVertexBuffers = 16;
 	assert(slotCount <= kMaxVertexBuffers);
+    assert(m_currentPipelineState); // The pipeline state should be created before setting vertex buffers.
 
     UINT vertexStrides[kMaxVertexBuffers];
     UINT vertexOffsets[kMaxVertexBuffers];
@@ -3201,7 +3322,8 @@ void D3D11Device::setVertexBuffers(UInt startSlot, UInt slotCount, IBufferResour
 
     for (UInt ii = 0; ii < slotCount; ++ii)
     {
-        vertexStrides[ii] = (UINT)stridesIn[ii];
+        auto inputLayout = (InputLayoutImpl*)m_currentPipelineState->inputLayout.Ptr();
+        vertexStrides[ii] = inputLayout->m_vertexStreamStrides[startSlot + ii];
         vertexOffsets[ii] = (UINT)offsetsIn[ii];
 		dxBuffers[ii] = buffers[ii]->m_buffer;
 	}
@@ -3209,7 +3331,7 @@ void D3D11Device::setVertexBuffers(UInt startSlot, UInt slotCount, IBufferResour
     m_immediateContext->IASetVertexBuffers((UINT)startSlot, (UINT)slotCount, dxBuffers, &vertexStrides[0], &vertexOffsets[0]);
 }
 
-void D3D11Device::setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset)
+void D3D11Device::setIndexBuffer(IBufferResource* buffer, Format indexFormat, uint32_t offset)
 {
     DXGI_FORMAT dxFormat = D3DUtil::getMapFormat(indexFormat);
     m_immediateContext->IASetIndexBuffer(((BufferResourceImpl*)buffer)->m_buffer, dxFormat, UINT(offset));
@@ -3329,35 +3451,66 @@ void D3D11Device::setPipelineState(IPipelineState* state)
     /// ...
 }
 
-void D3D11Device::draw(UInt vertexCount, UInt startVertex)
+void D3D11Device::draw(uint32_t vertexCount, uint32_t startVertex)
 {
     _flushGraphicsState();
-    m_immediateContext->Draw((UINT)vertexCount, (UINT)startVertex);
+    m_immediateContext->Draw(vertexCount, startVertex);
 }
 
-void D3D11Device::drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex)
+void D3D11Device::drawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex)
 {
     _flushGraphicsState();
-    m_immediateContext->DrawIndexed((UINT)indexCount, (UINT)startIndex, (INT)baseVertex);
+    m_immediateContext->DrawIndexed(indexCount, startIndex, baseVertex);
 }
 
-Result D3D11Device::createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram)
+void D3D11Device::drawInstanced(
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t startVertex,
+    uint32_t startInstanceLocation)
 {
-    SLANG_ASSERT(desc.slangProgram);
+    _flushGraphicsState();
+    m_immediateContext->DrawInstanced(
+        vertexCount,
+        instanceCount,
+        startVertex,
+        startInstanceLocation);
+}
 
-    if (desc.slangProgram->getSpecializationParamCount() != 0)
+void D3D11Device::drawIndexedInstanced(
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t startIndexLocation,
+    int32_t baseVertexLocation,
+    uint32_t startInstanceLocation)
+{
+    _flushGraphicsState();
+    m_immediateContext->DrawIndexedInstanced(
+        indexCount,
+        instanceCount,
+        startIndexLocation,
+        baseVertexLocation,
+        startInstanceLocation);
+}
+
+Result D3D11Device::createProgram(
+    const IShaderProgram::Desc& desc, IShaderProgram** outProgram, ISlangBlob** outDiagnosticBlob)
+{
+    SLANG_ASSERT(desc.slangGlobalScope);
+
+    if (desc.slangGlobalScope->getSpecializationParamCount() != 0)
     {
         // For a specializable program, we don't invoke any actual slang compilation yet.
         RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl();
-        shaderProgram->slangProgram = desc.slangProgram;
+        shaderProgram->init(desc);
         returnComPtr(outProgram, shaderProgram);
         return SLANG_OK;
     }
 
     // If the program is already specialized, compile and create shader kernels now.
     SlangInt targetIndex = 0;
-    auto slangProgram = desc.slangProgram;
-    auto programLayout = slangProgram->getLayout(targetIndex);
+    auto slangGlobalScope = desc.slangGlobalScope;
+    auto programLayout = slangGlobalScope->getLayout(targetIndex);
     if (!programLayout)
         return SLANG_FAIL;
     SlangUInt entryPointCount = programLayout->getEntryPointCount();
@@ -3365,7 +3518,7 @@ Result D3D11Device::createProgram(const IShaderProgram::Desc& desc, IShaderProgr
         return SLANG_FAIL;
 
     RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl();
-    shaderProgram->slangProgram = desc.slangProgram;
+    shaderProgram->slangGlobalScope = desc.slangGlobalScope;
 
     ScopeNVAPI scopeNVAPI;
     SLANG_RETURN_ON_FAIL(scopeNVAPI.init(this, 0));
@@ -3374,7 +3527,7 @@ Result D3D11Device::createProgram(const IShaderProgram::Desc& desc, IShaderProgr
         ComPtr<ISlangBlob> kernelCode;
         ComPtr<ISlangBlob> diagnostics;
 
-        auto compileResult = slangProgram->getEntryPointCode(
+        auto compileResult = slangGlobalScope->getEntryPointCode(
             (SlangInt)i, 0, kernelCode.writeRef(), diagnostics.writeRef());
 
         if (diagnostics)
@@ -3383,6 +3536,8 @@ Result D3D11Device::createProgram(const IShaderProgram::Desc& desc, IShaderProgr
                 compileResult == SLANG_OK ? DebugMessageType::Warning : DebugMessageType::Error,
                 DebugMessageSource::Slang,
                 (char*)diagnostics->getBufferPointer());
+            if (outDiagnosticBlob)
+                returnComPtr(outDiagnosticBlob, diagnostics);
         }
 
         SLANG_RETURN_ON_FAIL(compileResult);
@@ -3567,13 +3722,26 @@ Result D3D11Device::createShaderObject(ShaderObjectLayoutBase* layout, IShaderOb
     return SLANG_OK;
 }
 
+Result D3D11Device::createMutableShaderObject(
+    ShaderObjectLayoutBase* layout,
+    IShaderObject** outObject)
+{
+    auto layoutImpl = static_cast<ShaderObjectLayoutImpl*>(layout);
+
+    RefPtr<MutableShaderObjectImpl> result = new MutableShaderObjectImpl();
+    SLANG_RETURN_ON_FAIL(result->init(this, layoutImpl));
+    returnComPtr(outObject, result);
+
+    return SLANG_OK;
+}
+
 Result D3D11Device::createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject)
 {
     auto programImpl = static_cast<ShaderProgramImpl*>(program);
     RefPtr<RootShaderObjectImpl> shaderObject;
     RefPtr<RootShaderObjectLayoutImpl> rootLayout;
     SLANG_RETURN_ON_FAIL(RootShaderObjectLayoutImpl::create(
-        this, programImpl->slangProgram, programImpl->slangProgram->getLayout(), rootLayout.writeRef()));
+        this, programImpl->slangGlobalScope, programImpl->slangGlobalScope->getLayout(), rootLayout.writeRef()));
     SLANG_RETURN_ON_FAIL(RootShaderObjectImpl::create(
         this, rootLayout.Ptr(), shaderObject.writeRef()));
     returnRefPtrMove(outObject, shaderObject);
@@ -3779,7 +3947,7 @@ Result D3D11Device::createGraphicsPipelineState(const GraphicsPipelineStateDesc&
         }
 
         dstDesc.IndependentBlendEnable = srcDesc.targetCount > 1;
-        dstDesc.AlphaToCoverageEnable = srcDesc.alphaToCoverateEnable;
+        dstDesc.AlphaToCoverageEnable = srcDesc.alphaToCoverageEnable;
 
         SLANG_RETURN_ON_FAIL(m_device->CreateBlendState(
             &dstDesc,

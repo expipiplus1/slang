@@ -108,6 +108,7 @@ DIAGNOSTIC(    70, Error, cannotMatchOutputFileToEntryPoint, "the output path '$
 
 DIAGNOSTIC(    80, Error, duplicateOutputPathsForEntryPointAndTarget, "multiple output paths have been specified entry point '$0' on target '$1'")
 DIAGNOSTIC(    81, Error, duplicateOutputPathsForTarget, "multiple output paths have been specified for target '$0'")
+DIAGNOSTIC(    82, Error, duplicateDependencyOutputPaths, "the -dep argument can only be specified once")
 
 DIAGNOSTIC(    82, Error, unableToWriteReproFile, "unable to write repro file '%0'")
 DIAGNOSTIC(    83, Error, unableToWriteModuleContainer, "unable to write module container '%0'")
@@ -118,6 +119,12 @@ DIAGNOSTIC(    86, Error, unableToCreateModuleContainer, "unable to create modul
 DIAGNOSTIC(    87, Error, unableToSetDefaultDownstreamCompiler, "unable to set default downstream compiler for source language '%0' to '%1'")
 
 DIAGNOSTIC(    88, Error, unknownArchiveType, "archive type '%0' is unknown")
+DIAGNOSTIC(    89, Error, expectingSlangRiffContainer, "expecting a slang riff container")
+DIAGNOSTIC(    90, Error, incompatibleRiffSemanticVersion, "incompatible riff semantic version %0 expecting %1")
+DIAGNOSTIC(    91, Error, riffHashMismatch, "riff hash mismatch - incompatible riff")
+DIAGNOSTIC(    92, Error, unableToCreateDirectory, "unable to create directory '$0'")
+DIAGNOSTIC(    93, Error, unableExtractReproToDirectory, "unable to extract repro to directory '$0'")
+DIAGNOSTIC(    94, Error, unableToReadRiff, "unable to read as 'riff'/not a 'riff' file")
 
 //
 // 001xx - Downstream Compilers
@@ -545,14 +552,18 @@ DIAGNOSTIC(51090, Error, cannotGenerateCodeForExternComponentType, "cannot gener
 DIAGNOSTIC(51091, Error, typeCannotBePlacedInATexture, "type '$0' cannot be placed in a texture.")
 DIAGNOSTIC(51092, Error, stageDoesntHaveInputWorld, "'$0' doesn't appear to have any input world")
 
+DIAGNOSTIC(50100, Error, noTypeConformancesFoundForInterface, "No type conformances are found for interface '$0'. Code generation for current target requires at least one implementation type present in the linkage.")
+
 DIAGNOSTIC(52000, Error, multiLevelBreakUnsupported, "control flow appears to require multi-level `break`, which Slang does not yet support")
 
 DIAGNOSTIC(52001, Warning, dxilNotFound, "dxil shared library not found, so 'dxc' output cannot be signed! Shader code will not be runnable in non-development environments.")
 
-DIAGNOSTIC(52002, Error, passThroughCompilerNotFound, "Could not find a suitable pass-through compiler for '$0'.")
+DIAGNOSTIC(52002, Error, passThroughCompilerNotFound, "could not find a suitable pass-through compiler for '$0'.")
 
-DIAGNOSTIC(52004, Error, unableToWriteFile, "Unable to write file '$0'")
-DIAGNOSTIC(52005, Error, unableToReadFile, "Unable to read file '$0'")
+DIAGNOSTIC(52004, Error, unableToWriteFile, "unable to write file '$0'")
+DIAGNOSTIC(52005, Error, unableToReadFile, "unable to read file '$0'")
+
+DIAGNOSTIC(52006, Error, compilerNotDefinedForTransition, "compiler not defined for transition '$0' to '$1'.")
 
 //
 // 8xxxx - Issues specific to a particular library/technology/platform/etc.

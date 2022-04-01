@@ -67,12 +67,12 @@ struct DownstreamDiagnostic
         /// Given diagnostics in inText that are colon delimited, use lineParser to do per line parsing.
     static SlangResult parseColonDelimitedDiagnostics(const UnownedStringSlice& inText, Int pathIndex, LineParser lineParser, List<DownstreamDiagnostic>& outDiagnostics);
 
-    Severity severity;              ///< The severity of error
-    Stage stage;                    ///< The stage the error came from
-    String text;                    ///< The text of the error
-    String code;                    ///< The compiler specific error code
-    String filePath;                ///< The path the error originated from
-    Int fileLine;                   ///< The line number the error came from
+    Severity severity = Severity::Unknown;          ///< The severity of error
+    Stage stage = Stage::Compile;                   ///< The stage the error came from
+    String text;                                    ///< The text of the error
+    String code;                                    ///< The compiler specific error code
+    String filePath;                                ///< The path the error originated from
+    Int fileLine = 0;                               ///< The line number the error came from
 };
 
 struct DownstreamDiagnostics
@@ -274,7 +274,7 @@ public:
 
         OptimizationLevel optimizationLevel = OptimizationLevel::Default;
         DebugInfoType debugInfoType = DebugInfoType::Standard;
-        SlangCompileTarget targetType = SLANG_EXECUTABLE;
+        SlangCompileTarget targetType = SLANG_HOST_EXECUTABLE;
         SlangSourceLanguage sourceLanguage = SLANG_SOURCE_LANGUAGE_CPP;
         FloatingPointMode floatingPointMode = FloatingPointMode::Default;
         PipelineType pipelineType = PipelineType::Unknown;
@@ -301,6 +301,9 @@ public:
 
         List<String> includePaths;
         List<String> libraryPaths;
+
+            /// Libraries to link against.
+        List<String> libraries;
 
         List<CapabilityVersion> requiredCapabilityVersions;
 
@@ -360,9 +363,7 @@ public:
         /// True if this compiler can compile the specified language
     static bool canCompile(SlangPassThrough compiler, SlangSourceLanguage sourceLanguage);
 
-        /// Given a source language return as the equivalent compile target
-    static SlangCompileTarget getCompileTarget(SlangSourceLanguage sourceLanguage);
-
+    
 protected:
     static Infos s_infos;
 
@@ -421,10 +422,10 @@ public:
     virtual SlangResult calcArgs(const CompileOptions& options, CommandLine& cmdLine) = 0;
     virtual SlangResult parseOutput(const ExecuteResult& exeResult, DownstreamDiagnostics& output) = 0;
 
-    CommandLineDownstreamCompiler(const Desc& desc, const String& exeName) :
+    CommandLineDownstreamCompiler(const Desc& desc, const ExecutableLocation& exe) :
         Super(desc)
     {
-        m_cmdLine.setExecutableFilename(exeName);
+        m_cmdLine.setExecutableLocation(exe);
     }
 
     CommandLineDownstreamCompiler(const Desc& desc, const CommandLine& cmdLine) :

@@ -63,7 +63,7 @@ using namespace Slang;
 static void _outputProfileTime(uint64_t startTicks, uint64_t endTicks)
 {
     WriterHelper out = StdWriters::getOut();
-    double time = double(endTicks - startTicks) / ProcessUtil::getClockFrequency();
+    double time = double(endTicks - startTicks) / Process::getClockFrequency();
     out.print("profile-time=%g\n", time);
 }
 
@@ -78,6 +78,13 @@ struct ShaderOutputPlan
     };
 
     List<Item> items;
+};
+
+enum class PipelineType
+{
+    Graphics,
+    Compute,
+    RayTracing,
 };
 
 class RenderTestApp
@@ -202,12 +209,11 @@ struct AssignValsFromLayoutContext
         ComPtr<IBufferResource> bufferResource;
         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::createBufferResource(srcBuffer, /*entry.isOutput,*/ bufferSize, bufferData.getBuffer(), device, bufferResource));
 
-        IResourceView::Desc viewDesc;
+        IResourceView::Desc viewDesc = {};
         viewDesc.type = IResourceView::Type::UnorderedAccess;
         viewDesc.format = srcBuffer.format;
-        auto bufferView = device->createBufferView(
-            bufferResource,
-            viewDesc);
+        viewDesc.bufferElementSize = srcVal->bufferDesc.stride;
+        auto bufferView = device->createBufferView(bufferResource, nullptr, viewDesc);
         dstCursor.setResource(bufferView);
         maybeAddOutput(dstCursor, srcVal, bufferResource);
 
@@ -225,7 +231,7 @@ struct AssignValsFromLayoutContext
 
         auto sampler = _createSamplerState(device, samplerEntry->samplerDesc);
 
-        IResourceView::Desc viewDesc;
+        IResourceView::Desc viewDesc = {};
         viewDesc.type = IResourceView::Type::ShaderResource;
         auto textureView = device->createTextureView(
             texture,
@@ -252,7 +258,7 @@ struct AssignValsFromLayoutContext
         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::generateTextureResource(
             srcVal->textureDesc, defaultState, device, texture));
 
-        IResourceView::Desc viewDesc;
+        IResourceView::Desc viewDesc = {};
         viewDesc.type = viewType;
         viewDesc.format = texture->getDesc()->format;
         auto textureView = device->createTextureView(
@@ -539,19 +545,19 @@ SlangResult RenderTestApp::initialize(
                 // fixed/known set of attributes.
                 //
                 const InputElementDesc inputElements[] = {
-                    { "A", 0, Format::RGB_Float32, offsetof(Vertex, position) },
-                    { "A", 1, Format::RGB_Float32, offsetof(Vertex, color) },
-                    { "A", 2, Format::RG_Float32,  offsetof(Vertex, uv) },
+                    { "A", 0, Format::R32G32B32_FLOAT, offsetof(Vertex, position) },
+                    { "A", 1, Format::R32G32B32_FLOAT, offsetof(Vertex, color) },
+                    { "A", 2, Format::R32G32_FLOAT,  offsetof(Vertex, uv) },
                 };
 
                 ComPtr<IInputLayout> inputLayout;
                 SLANG_RETURN_ON_FAIL(device->createInputLayout(
-                    inputElements, SLANG_COUNT_OF(inputElements), inputLayout.writeRef()));
+                    sizeof(Vertex), inputElements, SLANG_COUNT_OF(inputElements), inputLayout.writeRef()));
 
                 IBufferResource::Desc vertexBufferDesc;
                 vertexBufferDesc.type = IResource::Type::Buffer;
                 vertexBufferDesc.sizeInBytes = kVertexCount * sizeof(Vertex);
-                vertexBufferDesc.cpuAccessFlags = AccessFlag::Write;
+                vertexBufferDesc.memoryType = MemoryType::Upload;
                 vertexBufferDesc.defaultState = ResourceState::VertexBuffer;
                 vertexBufferDesc.allowedStates = ResourceStateSet(ResourceState::VertexBuffer);
 
@@ -600,7 +606,7 @@ void RenderTestApp::_initializeRenderPass()
     depthBufferDesc.size.height = gWindowHeight;
     depthBufferDesc.size.depth = 1;
     depthBufferDesc.numMipLevels = 1;
-    depthBufferDesc.format = Format::D_Float32;
+    depthBufferDesc.format = Format::D32_FLOAT;
     depthBufferDesc.defaultState = ResourceState::DepthWrite;
     depthBufferDesc.allowedStates = ResourceState::DepthWrite;
 
@@ -613,29 +619,29 @@ void RenderTestApp::_initializeRenderPass()
     colorBufferDesc.size.height = gWindowHeight;
     colorBufferDesc.size.depth = 1;
     colorBufferDesc.numMipLevels = 1;
-    colorBufferDesc.format = Format::RGBA_Unorm_UInt8;
+    colorBufferDesc.format = Format::R8G8B8A8_UNORM;
     colorBufferDesc.defaultState = ResourceState::RenderTarget;
     colorBufferDesc.allowedStates = ResourceState::RenderTarget;
     m_colorBuffer = m_device->createTextureResource(colorBufferDesc, nullptr);
 
-    gfx::IResourceView::Desc colorBufferViewDesc;
+    gfx::IResourceView::Desc colorBufferViewDesc = {};
     memset(&colorBufferViewDesc, 0, sizeof(colorBufferViewDesc));
-    colorBufferViewDesc.format = gfx::Format::RGBA_Unorm_UInt8;
+    colorBufferViewDesc.format = gfx::Format::R8G8B8A8_UNORM;
     colorBufferViewDesc.renderTarget.shape = gfx::IResource::Type::Texture2D;
     colorBufferViewDesc.type = gfx::IResourceView::Type::RenderTarget;
     ComPtr<gfx::IResourceView> rtv =
         m_device->createTextureView(m_colorBuffer.get(), colorBufferViewDesc);
 
-    gfx::IResourceView::Desc depthBufferViewDesc;
+    gfx::IResourceView::Desc depthBufferViewDesc = {};
     memset(&depthBufferViewDesc, 0, sizeof(depthBufferViewDesc));
-    depthBufferViewDesc.format = gfx::Format::D_Float32;
+    depthBufferViewDesc.format = gfx::Format::D32_FLOAT;
     depthBufferViewDesc.renderTarget.shape = gfx::IResource::Type::Texture2D;
     depthBufferViewDesc.type = gfx::IResourceView::Type::DepthStencil;
     ComPtr<gfx::IResourceView> dsv =
         m_device->createTextureView(depthBufferResource.get(), depthBufferViewDesc);
 
-    IFramebufferLayout::AttachmentLayout colorAttachment = {gfx::Format::RGBA_Unorm_UInt8, 1};
-    IFramebufferLayout::AttachmentLayout depthAttachment = {gfx::Format::D_Float32, 1};
+    IFramebufferLayout::AttachmentLayout colorAttachment = {gfx::Format::R8G8B8A8_UNORM, 1};
+    IFramebufferLayout::AttachmentLayout depthAttachment = {gfx::Format::D32_FLOAT, 1};
     gfx::IFramebufferLayout::Desc framebufferLayoutDesc;
     framebufferLayoutDesc.renderTargetCount = 1;
     framebufferLayoutDesc.renderTargets = &colorAttachment;
@@ -671,14 +677,14 @@ void RenderTestApp::_initializeAccelerationStructure()
 {
     if (!m_device->hasFeature("ray-tracing"))
         return;
-    IBufferResource::Desc vertexBufferDesc;
+    IBufferResource::Desc vertexBufferDesc = {};
     vertexBufferDesc.type = IResource::Type::Buffer;
     vertexBufferDesc.sizeInBytes = kVertexCount * sizeof(Vertex);
     vertexBufferDesc.defaultState = ResourceState::ShaderResource;
     ComPtr<IBufferResource> vertexBuffer =
         m_device->createBufferResource(vertexBufferDesc, &kVertexData[0]);
 
-    IBufferResource::Desc transformBufferDesc;
+    IBufferResource::Desc transformBufferDesc = {};
     transformBufferDesc.type = IResource::Type::Buffer;
     transformBufferDesc.sizeInBytes = sizeof(float) * 12;
     transformBufferDesc.defaultState = ResourceState::ShaderResource;
@@ -689,13 +695,13 @@ void RenderTestApp::_initializeAccelerationStructure()
 
     // Build bottom level acceleration structure.
     {
-        IAccelerationStructure::BuildInputs accelerationStructureBuildInputs;
-        IAccelerationStructure::PrebuildInfo accelerationStructurePrebuildInfo;
+        IAccelerationStructure::BuildInputs accelerationStructureBuildInputs = {};
+        IAccelerationStructure::PrebuildInfo accelerationStructurePrebuildInfo = {};
         accelerationStructureBuildInputs.descCount = 1;
         accelerationStructureBuildInputs.kind = IAccelerationStructure::Kind::BottomLevel;
         accelerationStructureBuildInputs.flags =
             IAccelerationStructure::BuildFlags::AllowCompaction;
-        IAccelerationStructure::GeometryDesc geomDesc;
+        IAccelerationStructure::GeometryDesc geomDesc = {};
         geomDesc.flags = IAccelerationStructure::GeometryFlags::Opaque;
         geomDesc.type = IAccelerationStructure::GeometryType::Triangles;
         geomDesc.content.triangles.indexCount = 0;
@@ -703,7 +709,7 @@ void RenderTestApp::_initializeAccelerationStructure()
         geomDesc.content.triangles.indexFormat = Format::Unknown;
         geomDesc.content.triangles.vertexCount = kVertexCount;
         geomDesc.content.triangles.vertexData = vertexBuffer->getDeviceAddress();
-        geomDesc.content.triangles.vertexFormat = Format::RGB_Float32;
+        geomDesc.content.triangles.vertexFormat = Format::R32G32B32_FLOAT;
         geomDesc.content.triangles.vertexStride = sizeof(Vertex);
         geomDesc.content.triangles.transform3x4 = transformBuffer->getDeviceAddress();
         accelerationStructureBuildInputs.geometryDescs = &geomDesc;
@@ -712,12 +718,12 @@ void RenderTestApp::_initializeAccelerationStructure()
         m_device->getAccelerationStructurePrebuildInfo(
             accelerationStructureBuildInputs, &accelerationStructurePrebuildInfo);
         // Allocate buffers for acceleration structure.
-        IBufferResource::Desc asDraftBufferDesc;
+        IBufferResource::Desc asDraftBufferDesc = {};
         asDraftBufferDesc.type = IResource::Type::Buffer;
         asDraftBufferDesc.defaultState = ResourceState::AccelerationStructure;
         asDraftBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.resultDataMaxSize;
         ComPtr<IBufferResource> draftBuffer = m_device->createBufferResource(asDraftBufferDesc);
-        IBufferResource::Desc scratchBufferDesc;
+        IBufferResource::Desc scratchBufferDesc = {};
         scratchBufferDesc.type = IResource::Type::Buffer;
         scratchBufferDesc.defaultState = ResourceState::UnorderedAccess;
         scratchBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.scratchDataSize;
@@ -725,18 +731,20 @@ void RenderTestApp::_initializeAccelerationStructure()
 
         // Build acceleration structure.
         ComPtr<IQueryPool> compactedSizeQuery;
-        IQueryPool::Desc queryPoolDesc;
+        IQueryPool::Desc queryPoolDesc = {};
         queryPoolDesc.count = 1;
         queryPoolDesc.type = QueryType::AccelerationStructureCompactedSize;
         m_device->createQueryPool(queryPoolDesc, compactedSizeQuery.writeRef());
 
         ComPtr<IAccelerationStructure> draftAS;
-        IAccelerationStructure::CreateDesc draftCreateDesc;
+        IAccelerationStructure::CreateDesc draftCreateDesc = {};
         draftCreateDesc.buffer = draftBuffer;
         draftCreateDesc.kind = IAccelerationStructure::Kind::BottomLevel;
         draftCreateDesc.offset = 0;
         draftCreateDesc.size = accelerationStructurePrebuildInfo.resultDataMaxSize;
         m_device->createAccelerationStructure(draftCreateDesc, draftAS.writeRef());
+
+        compactedSizeQuery->reset();
 
         auto commandBuffer = m_transientHeap->createCommandBuffer();
         auto encoder = commandBuffer->encodeRayTracingCommands();
@@ -751,11 +759,11 @@ void RenderTestApp::_initializeAccelerationStructure()
         encoder->endEncoding();
         commandBuffer->close();
         m_queue->executeCommandBuffer(commandBuffer);
-        m_queue->wait();
+        m_queue->waitOnHost();
 
         uint64_t compactedSize = 0;
         compactedSizeQuery->getResult(0, 1, &compactedSize);
-        IBufferResource::Desc asBufferDesc;
+        IBufferResource::Desc asBufferDesc = {};
         asBufferDesc.type = IResource::Type::Buffer;
         asBufferDesc.defaultState = ResourceState::AccelerationStructure;
         asBufferDesc.sizeInBytes = compactedSize;
@@ -774,7 +782,7 @@ void RenderTestApp::_initializeAccelerationStructure()
         encoder->endEncoding();
         commandBuffer->close();
         m_queue->executeCommandBuffer(commandBuffer);
-        m_queue->wait();
+        m_queue->waitOnHost();
     }
 
     // Build top level acceleration structure.
@@ -792,11 +800,11 @@ void RenderTestApp::_initializeAccelerationStructure()
             1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
         memcpy(&instanceDescs[0].transform[0][0], transformMatrix, sizeof(float) * 12);
 
-        IBufferResource::Desc instanceBufferDesc;
+        IBufferResource::Desc instanceBufferDesc = {};
         instanceBufferDesc.type = IResource::Type::Buffer;
         instanceBufferDesc.sizeInBytes =
             instanceDescs.getCount() * sizeof(IAccelerationStructure::InstanceDesc);
-        instanceBufferDesc.defaultState = ResourceState::ShaderResource;
+        instanceBufferDesc.defaultState = ResourceState::AccelerationStructureBuildInput;
         ComPtr<IBufferResource> instanceBuffer =
             m_device->createBufferResource(instanceBufferDesc, instanceDescs.getBuffer());
 
@@ -810,19 +818,19 @@ void RenderTestApp::_initializeAccelerationStructure()
         m_device->getAccelerationStructurePrebuildInfo(
             accelerationStructureBuildInputs, &accelerationStructurePrebuildInfo);
 
-        IBufferResource::Desc asBufferDesc;
+        IBufferResource::Desc asBufferDesc = {};
         asBufferDesc.type = IResource::Type::Buffer;
         asBufferDesc.defaultState = ResourceState::AccelerationStructure;
-        asBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.resultDataMaxSize;
+        asBufferDesc.sizeInBytes = (size_t)accelerationStructurePrebuildInfo.resultDataMaxSize;
         m_tlasBuffer = m_device->createBufferResource(asBufferDesc);
 
-        IBufferResource::Desc scratchBufferDesc;
+        IBufferResource::Desc scratchBufferDesc = {};
         scratchBufferDesc.type = IResource::Type::Buffer;
         scratchBufferDesc.defaultState = ResourceState::UnorderedAccess;
-        scratchBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.scratchDataSize;
+        scratchBufferDesc.sizeInBytes = (size_t)accelerationStructurePrebuildInfo.scratchDataSize;
         ComPtr<IBufferResource> scratchBuffer = m_device->createBufferResource(scratchBufferDesc);
 
-        IAccelerationStructure::CreateDesc createDesc;
+        IAccelerationStructure::CreateDesc createDesc = {};
         createDesc.buffer = m_tlasBuffer;
         createDesc.kind = IAccelerationStructure::Kind::TopLevel;
         createDesc.offset = 0;
@@ -840,7 +848,7 @@ void RenderTestApp::_initializeAccelerationStructure()
         encoder->endEncoding();
         commandBuffer->close();
         m_queue->executeCommandBuffer(commandBuffer);
-        m_queue->wait();
+        m_queue->waitOnHost();
     }
 }
 
@@ -856,11 +864,10 @@ void RenderTestApp::setProjectionMatrix(IShaderObject* rootObject)
 void RenderTestApp::renderFrame(IRenderCommandEncoder* encoder)
 {
     auto pipelineType = PipelineType::Graphics;
+    applyBinding(pipelineType, encoder);
 
 	encoder->setPrimitiveTopology(PrimitiveTopology::TriangleList);
-    encoder->setVertexBuffer(0, m_vertexBuffer, sizeof(Vertex));
-
-    applyBinding(pipelineType, encoder);
+    encoder->setVertexBuffer(0, m_vertexBuffer);
 
 	encoder->draw(3);
 }
@@ -883,7 +890,7 @@ void RenderTestApp::finalize()
 Result RenderTestApp::writeBindingOutput(const String& fileName)
 {
     // Wait until everything is complete
-    m_queue->wait();
+    m_queue->waitOnHost();
 
     FILE * f = fopen(fileName.getBuffer(), "wb");
     if (!f)
@@ -902,7 +909,7 @@ Result RenderTestApp::writeBindingOutput(const String& fileName)
             const size_t bufferSize = bufferDesc.sizeInBytes;
 
             ComPtr<ISlangBlob> blob;
-            if(bufferDesc.cpuAccessFlags & AccessFlag::Read)
+            if(bufferDesc.memoryType == MemoryType::ReadBack)
             {
                 // The buffer is already allocated for CPU access, so we can read it back directly.
                 //
@@ -913,7 +920,7 @@ Result RenderTestApp::writeBindingOutput(const String& fileName)
                 // The buffer is not CPU-readable, so we will copy it using a staging buffer.
 
                 auto stagingBufferDesc = bufferDesc;
-                stagingBufferDesc.cpuAccessFlags = AccessFlag::Read;
+                stagingBufferDesc.memoryType = MemoryType::ReadBack;
                 stagingBufferDesc.allowedStates =
                     ResourceStateSet(ResourceState::CopyDestination, ResourceState::CopySource);
                 stagingBufferDesc.defaultState = ResourceState::CopyDestination;
@@ -932,6 +939,7 @@ Result RenderTestApp::writeBindingOutput(const String& fileName)
 
                 commandBuffer->close();
                 m_queue->executeCommandBuffer(commandBuffer);
+                m_transientHeap->finish();
                 m_transientHeap->synchronizeAndReset();
 
                 m_device->readBufferResource(stagingBuffer, 0, bufferSize, blob.writeRef());
@@ -991,9 +999,9 @@ Result RenderTestApp::update()
     }
     commandBuffer->close();
 
-    m_startTicks = ProcessUtil::getClockTick();
+    m_startTicks = Process::getClockTick();
     m_queue->executeCommandBuffer(commandBuffer);
-    m_queue->wait();
+    m_queue->waitOnHost();
 
     // If we are in a mode where output is requested, we need to snapshot the back buffer here
     if (m_options.outputPath.getLength() || m_options.performanceProfile)
@@ -1030,7 +1038,7 @@ Result RenderTestApp::update()
             // Note we don't do the same with screen rendering -> as that will do a lot of work, which may swamp any computation
             // so can only really profile compute shaders at the moment
 
-            const uint64_t endTicks = ProcessUtil::getClockTick();
+            const uint64_t endTicks = Process::getClockTick();
 
             _outputProfileTime(m_startTicks, endTicks);
         }
@@ -1196,7 +1204,7 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
             slangPassThrough = SLANG_PASS_THROUGH_GLSLANG;
 			break;
         case DeviceType::CPU:
-            input.target = SLANG_HOST_CALLABLE;
+            input.target = SLANG_SHADER_HOST_CALLABLE;
             input.profile = "";
             nativeLanguage = SLANG_SOURCE_LANGUAGE_CPP;
             slangPassThrough = SLANG_PASS_THROUGH_GENERIC_C_CPP;
@@ -1227,25 +1235,6 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
 
         default:
             break;
-    }
-
-    switch( options.shaderType )
-    {
-    case Options::ShaderProgramType::Graphics:
-    case Options::ShaderProgramType::GraphicsCompute:
-        input.pipelineType = PipelineType::Graphics;
-        break;
-
-    case Options::ShaderProgramType::Compute:
-        input.pipelineType = PipelineType::Compute;
-        break;
-
-    case Options::ShaderProgramType::RayTracing:
-        input.pipelineType = PipelineType::RayTracing;
-        break;
-
-    default:
-        break;
     }
 
     if (options.sourceLanguage != SLANG_SOURCE_LANGUAGE_UNKNOWN)
@@ -1358,7 +1347,7 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         
         desc.nvapiExtnSlot = int(nvapiExtnSlot);
         desc.slang.slangGlobalSession = session;
-
+        desc.slang.targetProfile = options.profileName.getBuffer();
         {
             SlangResult res = gfxCreateDevice(&desc, device.writeRef());
             if (SLANG_FAILED(res))

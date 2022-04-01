@@ -2,6 +2,8 @@
 
 #include "slang-gfx.h"
 #include "source/core/slang-basic.h"
+#include "source/core/slang-render-api-util.h"
+#include "tools/unit-test/slang-unit-test.h"
 
 namespace gfx_test
 {
@@ -9,17 +11,48 @@ namespace gfx_test
     void diagnoseIfNeeded(ISlangWriter* diagnosticWriter, slang::IBlob* diagnosticsBlob);
 
         /// Loads a compute shader module and produces a `gfx::IShaderProgram`.
-    Slang::Result loadShaderProgram(
+    Slang::Result loadComputeProgram(
         gfx::IDevice* device,
         Slang::ComPtr<gfx::IShaderProgram>& outShaderProgram,
         const char* shaderModuleName,
+        const char* entryPointName,
+        slang::ProgramLayout*& slangReflection);
+
+    Slang::Result loadGraphicsProgram(
+        gfx::IDevice* device,
+        Slang::ComPtr<gfx::IShaderProgram>& outShaderProgram,
+        const char* shaderModuleName,
+        const char* vertexEntryPointName,
+        const char* fragmentEntryPointName,
         slang::ProgramLayout*& slangReflection);
 
         /// Reads back the content of `buffer` and compares it against `expectedResult`.
     void compareComputeResult(
         gfx::IDevice* device,
         gfx::IBufferResource* buffer,
-        uint8_t* expectedResult,
+        size_t offset,
+        const void* expectedResult,
+        size_t expectedBufferSize);
+
+    /// Reads back the content of `texture` and compares it against `expectedResult`.
+    void compareComputeResult(
+        gfx::IDevice* device,
+        gfx::ITextureResource* texture,
+        gfx::ResourceState state,
+        void* expectedResult,
+        size_t expectedResultRowPitch,
+        size_t rowCount);
+
+    void compareComputeResultFuzzy(
+        const float* result,
+        float* expectedResult,
+        size_t expectedBufferSize);
+
+        /// Reads back the content of `buffer` and compares it against `expectedResult` with a set tolerance.
+    void compareComputeResultFuzzy(
+        gfx::IDevice* device,
+        gfx::IBufferResource* buffer,
+        float* expectedResult,
         size_t expectedBufferSize);
 
     template<typename T, Slang::Index count>
@@ -32,7 +65,46 @@ namespace gfx_test
         size_t bufferSize = sizeof(T) * count;
         expectedBuffer.setCount(bufferSize);
         memcpy(expectedBuffer.getBuffer(), expectedResult.begin(), bufferSize);
-        return compareComputeResult(device, buffer, expectedBuffer.getBuffer(), bufferSize);
+        if (std::is_same<T, float>::value) return compareComputeResultFuzzy(device, buffer, (float*)expectedBuffer.getBuffer(), bufferSize);
+        return compareComputeResult(device, buffer, 0, expectedBuffer.getBuffer(), bufferSize);
+    }
+    
+    Slang::ComPtr<gfx::IDevice> createTestingDevice(UnitTestContext* context, Slang::RenderApiFlag::Enum api);
+
+    void initializeRenderDoc();
+    void renderDocBeginFrame();
+    void renderDocEndFrame();
+
+    template<typename ImplFunc>
+    void runTestImpl(const ImplFunc& f, UnitTestContext* context, Slang::RenderApiFlag::Enum api)
+    {
+        if ((api & context->enabledApis) == 0)
+        {
+            SLANG_IGNORE_TEST
+        }
+        auto device = createTestingDevice(context, api);
+        if (!device)
+        {
+            SLANG_IGNORE_TEST
+        }
+#if SLANG_WIN32
+        // Skip d3d12 tests on x86 now since dxc doesn't function correctly there on Windows 11.
+        if (api == Slang::RenderApiFlag::D3D12)
+        {
+            SLANG_IGNORE_TEST
+        }
+#endif
+        try
+        {
+            renderDocBeginFrame();
+            f(device, context);
+        }
+        catch (AbortTestException& e)
+        {
+            renderDocEndFrame();
+            throw e;
+        }
+        renderDocEndFrame();
     }
 
 #define GFX_CHECK_CALL(x) SLANG_CHECK(!SLANG_FAILED(x))
