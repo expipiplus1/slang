@@ -2138,9 +2138,8 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
 
         // Set up options
         SerialContainerUtil::WriteOptions options;
-        
-        options.compressionType = linkage->serialCompressionType;
 
+        options.compressionType = linkage->serialCompressionType;
         if (linkage->m_obfuscateCode)
         {
             // If code is obfuscated, we *disable* AST output as it is not obfuscated and will reveal
