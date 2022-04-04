@@ -23,12 +23,11 @@ TestCategory* TestCategorySet::add(String const& name, TestCategory* parent)
 
 TestCategory* TestCategorySet::find(String const& name)
 {
-    RefPtr<TestCategory> category;
-    if (!m_categoryMap.TryGetValue(name, category))
+    if (auto category = m_categoryMap.TryGetValue(name))
     {
-        return nullptr;
+        return category->Ptr();
     }
-    return category;
+    return nullptr;
 }
 
 TestCategory* TestCategorySet::findOrError(String const& name)
@@ -81,6 +80,7 @@ static bool _isSubCommand(const char* arg)
     while (argCursor != argEnd)
     {
         char const* arg = *argCursor++;
+
         if (arg[0] != '-')
         {
             // We need to determine if this is a command, the confusion is that
@@ -125,9 +125,17 @@ static bool _isSubCommand(const char* arg)
             }
             optionsOut->binDir = *argCursor++;
         }
-        else if (strcmp(arg, "-useexes") == 0)
+        else if (strcmp(arg, "-use-shared-library") == 0)
         {
-            optionsOut->useExes = true;
+            optionsOut->defaultSpawnType = SpawnType::UseSharedLibrary;
+        }
+        else if (strcmp(arg, "-use-test-server") == 0)
+        {
+            optionsOut->defaultSpawnType = SpawnType::UseTestServer;
+        }
+        else if (strcmp(arg, "-use-fully-isolated-test-server") == 0)
+        {
+            optionsOut->defaultSpawnType = SpawnType::UseFullyIsolatedTestServer;
         }
         else if (strcmp(arg, "-v") == 0)
         {
@@ -185,6 +193,19 @@ static bool _isSubCommand(const char* arg)
                 return SLANG_FAIL;
             }
             optionsOut->adapter = *argCursor++;
+        }
+        else if (strcmp(arg, "-server-count") == 0)
+        {
+            if (argCursor == argEnd)
+            {
+                stdError.print("error: expected operand for '%s'\n", arg);
+                return SLANG_FAIL;
+            }
+            optionsOut->serverCount = StringToInt(* argCursor++);
+            if (optionsOut->serverCount <= 0)
+            {
+                optionsOut->serverCount = 1;
+            }
         }
         else if (strcmp(arg, "-appveyor") == 0)
         {
@@ -265,6 +286,10 @@ static bool _isSubCommand(const char* arg)
                 stdError.print("error: unable to parse api expression '%s'\n", apiList);
                 return res;
             }
+        }
+        else if (strcmp(arg, "-skip-api-detection") == 0)
+        {
+            optionsOut->skipApiDetection = true;
         }
         else
         {

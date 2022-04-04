@@ -263,8 +263,7 @@ Result loadShaderProgram(gfx::IDevice* device, ComPtr<gfx::IShaderProgram>& outS
     SLANG_RETURN_ON_FAIL(result);
 
     gfx::IShaderProgram::Desc programDesc = {};
-    programDesc.pipelineType = gfx::PipelineType::Graphics;
-    programDesc.slangProgram = linkedProgram.get();
+    programDesc.slangGlobalScope = linkedProgram.get();
     auto shaderProgram = device->createProgram(programDesc);
     outShaderProgram = shaderProgram;
     return SLANG_OK;
@@ -282,9 +281,10 @@ Result initialize()
     gWindow->events.mouseDown = [this](const platform::MouseEventArgs& e) { handleEvent(e); };
 
     InputElementDesc inputElements[] = {
-        { "POSITION", 0, Format::RG_Float32, offsetof(FullScreenTriangle::Vertex, position) },
+        { "POSITION", 0, Format::R32G32_FLOAT, offsetof(FullScreenTriangle::Vertex, position) },
     };
     auto inputLayout = gDevice->createInputLayout(
+        sizeof(FullScreenTriangle::Vertex),
         &inputElements[0],
         SLANG_COUNT_OF(inputElements));
     if(!inputLayout) return SLANG_FAIL;
@@ -368,7 +368,7 @@ virtual void renderFrame(int frameIndex) override
     auto constantBuffer = rootObject->getObject(ShaderOffset());
     constantBuffer->setData(ShaderOffset(), &uniforms, sizeof(uniforms));
 
-    encoder->setVertexBuffer(0, gVertexBuffer, sizeof(FullScreenTriangle::Vertex));
+    encoder->setVertexBuffer(0, gVertexBuffer);
     encoder->setPrimitiveTopology(PrimitiveTopology::TriangleList);
     encoder->draw(3);
     encoder->endEncoding();

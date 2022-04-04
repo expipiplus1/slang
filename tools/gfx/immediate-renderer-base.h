@@ -60,14 +60,26 @@ public:
     virtual void setScissorRects(UInt count, const ScissorRect* scissors) = 0;
     virtual void setPrimitiveTopology(PrimitiveTopology topology) = 0;
     virtual void setVertexBuffers(
-        UInt startSlot,
-        UInt slotCount,
+        uint32_t startSlot,
+        uint32_t slotCount,
         IBufferResource* const* buffers,
-        const UInt* strides,
-        const UInt* offsets) = 0;
-    virtual void setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset = 0) = 0;
-    virtual void draw(UInt vertexCount, UInt startVertex = 0) = 0;
-    virtual void drawIndexed(UInt indexCount, UInt startIndex = 0, UInt baseVertex = 0) = 0;
+        const uint32_t* offsets) = 0;
+    virtual void setIndexBuffer(
+        IBufferResource* buffer, Format indexFormat, uint32_t offset = 0) = 0;
+    virtual void draw(uint32_t vertexCount, uint32_t startVertex = 0) = 0;
+    virtual void drawIndexed(
+        uint32_t indexCount, uint32_t startIndex = 0, uint32_t baseVertex = 0) = 0;
+    virtual void drawInstanced(
+        uint32_t vertexCount,
+        uint32_t instanceCount,
+        uint32_t startVertex,
+        uint32_t startInstanceLocation) = 0;
+    virtual void drawIndexedInstanced(
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t startIndexLocation,
+        int32_t baseVertexLocation,
+        uint32_t startInstanceLocation) = 0;
     virtual void setStencilReference(uint32_t referenceValue) = 0;
     virtual void dispatchCompute(int x, int y, int z) = 0;
     virtual void copyBuffer(
@@ -137,35 +149,60 @@ public:
         SLANG_UNUSED(topology);
     }
     virtual void setVertexBuffers(
-        UInt startSlot,
-        UInt slotCount,
+        uint32_t startSlot,
+        uint32_t slotCount,
         IBufferResource* const* buffers,
-        const UInt* strides,
-        const UInt* offsets) override
+        const uint32_t* offsets) override
     {
         SLANG_UNUSED(startSlot);
         SLANG_UNUSED(slotCount);
         SLANG_UNUSED(buffers);
-        SLANG_UNUSED(strides);
         SLANG_UNUSED(offsets);
     }
-    virtual void setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset = 0)
+    virtual void setIndexBuffer(
+        IBufferResource* buffer, Format indexFormat, uint32_t offset = 0)
         override
     {
         SLANG_UNUSED(buffer);
         SLANG_UNUSED(indexFormat);
         SLANG_UNUSED(offset);
     }
-    virtual void draw(UInt vertexCount, UInt startVertex = 0) override
+    virtual void draw(uint32_t vertexCount, uint32_t startVertex = 0) override
     {
         SLANG_UNUSED(vertexCount);
         SLANG_UNUSED(startVertex);
     }
-    virtual void drawIndexed(UInt indexCount, UInt startIndex = 0, UInt baseVertex = 0) override
+    virtual void drawIndexed(
+        uint32_t indexCount, uint32_t startIndex = 0, uint32_t baseVertex = 0) override
     {
         SLANG_UNUSED(indexCount);
         SLANG_UNUSED(startIndex);
         SLANG_UNUSED(baseVertex);
+    }
+    virtual void drawInstanced(
+        uint32_t vertexCount,
+        uint32_t instanceCount,
+        uint32_t startVertex,
+        uint32_t startInstanceLocation) override
+    {
+        SLANG_UNUSED(vertexCount);
+        SLANG_UNUSED(instanceCount);
+        SLANG_UNUSED(startVertex);
+        SLANG_UNUSED(startInstanceLocation);
+    }
+
+    virtual void drawIndexedInstanced(
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t startIndexLocation,
+        int32_t baseVertexLocation,
+        uint32_t startInstanceLocation) override
+    {
+        SLANG_UNUSED(indexCount);
+        SLANG_UNUSED(instanceCount);
+        SLANG_UNUSED(startIndexLocation);
+        SLANG_UNUSED(baseVertexLocation);
+        SLANG_UNUSED(startInstanceLocation);
     }
     virtual void setStencilReference(uint32_t referenceValue) override
     {
@@ -207,12 +244,10 @@ public:
     }
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createInputLayout(
-        const InputElementDesc* inputElements,
-        UInt inputElementCount,
+        IInputLayout::Desc const& desc,
         IInputLayout** outLayout) override
     {
-        SLANG_UNUSED(inputElements);
-        SLANG_UNUSED(inputElementCount);
+        SLANG_UNUSED(desc);
         SLANG_UNUSED(outLayout);
         return SLANG_E_NOT_AVAILABLE;
     }

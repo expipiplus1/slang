@@ -155,9 +155,7 @@ void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 
 // Load and compile shader code from souce.
 gfx::Result loadShaderProgram(
-    gfx::IDevice*         device,
-    gfx::PipelineType pipelineType,
-    gfx::IShaderProgram**   outProgram)
+    gfx::IDevice* device, bool isRayTracingPipeline, gfx::IShaderProgram** outProgram)
 {
     ComPtr<slang::ISession> slangSession;
     slangSession = device->getSlangSession();
@@ -170,7 +168,7 @@ gfx::Result loadShaderProgram(
 
     Slang::List<slang::IComponentType*> componentTypes;
     componentTypes.add(module);
-    if (pipelineType == PipelineType::RayTracing)
+    if (isRayTracingPipeline)
     {
         ComPtr<slang::IEntryPoint> entryPoint;
         SLANG_RETURN_ON_FAIL(module->findEntryPointByName("rayGenShader", entryPoint.writeRef()));
@@ -203,8 +201,7 @@ gfx::Result loadShaderProgram(
     SLANG_RETURN_ON_FAIL(result);
 
     gfx::IShaderProgram::Desc programDesc = {};
-    programDesc.pipelineType = pipelineType;
-    programDesc.slangProgram = linkedProgram;
+    programDesc.slangGlobalScope = linkedProgram;
     SLANG_RETURN_ON_FAIL(device->createProgram(programDesc, outProgram));
 
     return SLANG_OK;
@@ -225,6 +222,7 @@ ComPtr<gfx::IBufferResource> gTLASBuffer;
 ComPtr<gfx::IAccelerationStructure> gTLAS;
 ComPtr<gfx::ITextureResource> gResultTexture;
 ComPtr<gfx::IResourceView> gResultTextureUAV;
+ComPtr<gfx::IShaderTable> gShaderTable;
 
 uint64_t lastTime = 0;
 
@@ -328,7 +326,8 @@ Slang::Result initialize()
     IResourceView::Desc primitiveSRVDesc = {};
     primitiveSRVDesc.format = Format::Unknown;
     primitiveSRVDesc.type = IResourceView::Type::ShaderResource;
-    gPrimitiveBufferSRV = gDevice->createBufferView(gPrimitiveBuffer, primitiveSRVDesc);
+    primitiveSRVDesc.bufferElementSize = sizeof(Primitive);
+    gPrimitiveBufferSRV = gDevice->createBufferView(gPrimitiveBuffer, nullptr, primitiveSRVDesc);
 
     IBufferResource::Desc transformBufferDesc;
     transformBufferDesc.type = IResource::Type::Buffer;
@@ -352,10 +351,10 @@ Slang::Result initialize()
         geomDesc.type = IAccelerationStructure::GeometryType::Triangles;
         geomDesc.content.triangles.indexCount = kIndexCount;
         geomDesc.content.triangles.indexData = gIndexBuffer->getDeviceAddress();
-        geomDesc.content.triangles.indexFormat = Format::R_UInt32;
+        geomDesc.content.triangles.indexFormat = Format::R32_UINT;
         geomDesc.content.triangles.vertexCount = kVertexCount;
         geomDesc.content.triangles.vertexData = gVertexBuffer->getDeviceAddress();
-        geomDesc.content.triangles.vertexFormat = Format::RGB_Float32;
+        geomDesc.content.triangles.vertexFormat = Format::R32G32B32_FLOAT;
         geomDesc.content.triangles.vertexStride = sizeof(Vertex);
         geomDesc.content.triangles.transform3x4 = gTransformBuffer->getDeviceAddress();
         accelerationStructureBuildInputs.geometryDescs = &geomDesc;
@@ -367,12 +366,12 @@ Slang::Result initialize()
         IBufferResource::Desc asDraftBufferDesc;
         asDraftBufferDesc.type = IResource::Type::Buffer;
         asDraftBufferDesc.defaultState = ResourceState::AccelerationStructure;
-        asDraftBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.resultDataMaxSize;
+        asDraftBufferDesc.sizeInBytes = (size_t)accelerationStructurePrebuildInfo.resultDataMaxSize;
         ComPtr<IBufferResource> draftBuffer = gDevice->createBufferResource(asDraftBufferDesc);
         IBufferResource::Desc scratchBufferDesc;
         scratchBufferDesc.type = IResource::Type::Buffer;
         scratchBufferDesc.defaultState = ResourceState::UnorderedAccess;
-        scratchBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.scratchDataSize;
+        scratchBufferDesc.sizeInBytes = (size_t)accelerationStructurePrebuildInfo.scratchDataSize;
         ComPtr<IBufferResource> scratchBuffer = gDevice->createBufferResource(scratchBufferDesc);
 
         // Build acceleration structure.
@@ -392,6 +391,8 @@ Slang::Result initialize()
         SLANG_RETURN_ON_FAIL(
             gDevice->createAccelerationStructure(draftCreateDesc, draftAS.writeRef()));
 
+        compactedSizeQuery->reset();
+
         auto commandBuffer = gTransientHeaps[0]->createCommandBuffer();
         auto encoder = commandBuffer->encodeRayTracingCommands();
         IAccelerationStructure::BuildDesc buildDesc = {};
@@ -405,20 +406,20 @@ Slang::Result initialize()
         encoder->endEncoding();
         commandBuffer->close();
         gQueue->executeCommandBuffer(commandBuffer);
-        gQueue->wait();
+        gQueue->waitOnHost();
 
         uint64_t compactedSize = 0;
         compactedSizeQuery->getResult(0, 1, &compactedSize);
         IBufferResource::Desc asBufferDesc;
         asBufferDesc.type = IResource::Type::Buffer;
         asBufferDesc.defaultState = ResourceState::AccelerationStructure;
-        asBufferDesc.sizeInBytes = compactedSize;
+        asBufferDesc.sizeInBytes = (size_t)compactedSize;
         gBLASBuffer = gDevice->createBufferResource(asBufferDesc);
         IAccelerationStructure::CreateDesc createDesc;
         createDesc.buffer = gBLASBuffer;
         createDesc.kind = IAccelerationStructure::Kind::BottomLevel;
         createDesc.offset = 0;
-        createDesc.size = compactedSize;
+        createDesc.size = (size_t)compactedSize;
         gDevice->createAccelerationStructure(createDesc, gBLAS.writeRef());
 
         commandBuffer = gTransientHeaps[0]->createCommandBuffer();
@@ -427,7 +428,7 @@ Slang::Result initialize()
         encoder->endEncoding();
         commandBuffer->close();
         gQueue->executeCommandBuffer(commandBuffer);
-        gQueue->wait();
+        gQueue->waitOnHost();
     }
 
     // Build top level acceleration structure.
@@ -465,20 +466,20 @@ Slang::Result initialize()
         IBufferResource::Desc asBufferDesc;
         asBufferDesc.type = IResource::Type::Buffer;
         asBufferDesc.defaultState = ResourceState::AccelerationStructure;
-        asBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.resultDataMaxSize;
+        asBufferDesc.sizeInBytes = (size_t)accelerationStructurePrebuildInfo.resultDataMaxSize;
         gTLASBuffer = gDevice->createBufferResource(asBufferDesc);
 
         IBufferResource::Desc scratchBufferDesc;
         scratchBufferDesc.type = IResource::Type::Buffer;
         scratchBufferDesc.defaultState = ResourceState::UnorderedAccess;
-        scratchBufferDesc.sizeInBytes = accelerationStructurePrebuildInfo.scratchDataSize;
+        scratchBufferDesc.sizeInBytes = (size_t)accelerationStructurePrebuildInfo.scratchDataSize;
         ComPtr<IBufferResource> scratchBuffer = gDevice->createBufferResource(scratchBufferDesc);
 
         IAccelerationStructure::CreateDesc createDesc;
         createDesc.buffer = gTLASBuffer;
         createDesc.kind = IAccelerationStructure::Kind::TopLevel;
         createDesc.offset = 0;
-        createDesc.size = accelerationStructurePrebuildInfo.resultDataMaxSize;
+        createDesc.size = (size_t)accelerationStructurePrebuildInfo.resultDataMaxSize;
         SLANG_RETURN_ON_FAIL(gDevice->createAccelerationStructure(createDesc, gTLAS.writeRef()));
 
         auto commandBuffer = gTransientHeaps[0]->createCommandBuffer();
@@ -491,7 +492,7 @@ Slang::Result initialize()
         encoder->endEncoding();
         commandBuffer->close();
         gQueue->executeCommandBuffer(commandBuffer);
-        gQueue->wait();
+        gQueue->waitOnHost();
     }
 
     IBufferResource::Desc fullScreenVertexBufferDesc;
@@ -505,14 +506,14 @@ Slang::Result initialize()
         return SLANG_FAIL;
 
     InputElementDesc inputElements[] = {
-        {"POSITION", 0, Format::RG_Float32, offsetof(FullScreenTriangle::Vertex, position)},
+        {"POSITION", 0, Format::R32G32_FLOAT, offsetof(FullScreenTriangle::Vertex, position)},
     };
-    auto inputLayout = gDevice->createInputLayout(&inputElements[0], SLANG_COUNT_OF(inputElements));
+    auto inputLayout = gDevice->createInputLayout(sizeof(FullScreenTriangle::Vertex), &inputElements[0], SLANG_COUNT_OF(inputElements));
     if (!inputLayout)
         return SLANG_FAIL;
 
     ComPtr<IShaderProgram> shaderProgram;
-    SLANG_RETURN_ON_FAIL(loadShaderProgram(gDevice, PipelineType::Graphics, shaderProgram.writeRef()));
+    SLANG_RETURN_ON_FAIL(loadShaderProgram(gDevice, false, shaderProgram.writeRef()));
     GraphicsPipelineStateDesc desc;
     desc.inputLayout = inputLayout;
     desc.program = shaderProgram;
@@ -521,25 +522,38 @@ Slang::Result initialize()
     if (!gPresentPipelineState)
         return SLANG_FAIL;
 
+    const char* hitgroupNames[] = {"hitgroup0", "hitgroup1"};
+
     ComPtr<IShaderProgram> rayTracingProgram;
     SLANG_RETURN_ON_FAIL(
-        loadShaderProgram(gDevice, PipelineType::RayTracing, rayTracingProgram.writeRef()));
+        loadShaderProgram(gDevice, true, rayTracingProgram.writeRef()));
     RayTracingPipelineStateDesc rtpDesc = {};
     rtpDesc.program = rayTracingProgram;
     rtpDesc.hitGroupCount = 2;
     HitGroupDesc hitGroups[2];
     hitGroups[0].closestHitEntryPoint = "closestHitShader";
+    hitGroups[0].hitGroupName = hitgroupNames[0];
     hitGroups[1].closestHitEntryPoint = "shadowRayHitShader";
+    hitGroups[1].hitGroupName = hitgroupNames[1];
     rtpDesc.hitGroups = hitGroups;
     rtpDesc.maxRayPayloadSize = 64;
     rtpDesc.maxRecursion = 2;
-    rtpDesc.shaderTableHitGroupCount = 2;
-    int32_t shaderTable[] = {0, 1};
-    rtpDesc.shaderTableHitGroupIndices = shaderTable;
     SLANG_RETURN_ON_FAIL(
         gDevice->createRayTracingPipelineState(rtpDesc, gRenderPipelineState.writeRef()));
     if (!gRenderPipelineState)
         return SLANG_FAIL;
+
+    IShaderTable::Desc shaderTableDesc = {};
+    const char* raygenName = "rayGenShader";
+    const char* missName = "missShader";
+    shaderTableDesc.program = rayTracingProgram;
+    shaderTableDesc.hitGroupCount = 2;
+    shaderTableDesc.hitGroupNames = hitgroupNames;
+    shaderTableDesc.rayGenShaderCount = 1;
+    shaderTableDesc.rayGenShaderEntryPointNames = &raygenName;
+    shaderTableDesc.missShaderCount = 1;
+    shaderTableDesc.missShaderEntryPointNames = &missName;
+    SLANG_RETURN_ON_FAIL(gDevice->createShaderTable(shaderTableDesc, gShaderTable.writeRef()));
 
     createResultTexture();
     return SLANG_OK;
@@ -554,7 +568,7 @@ void createResultTexture()
     resultTextureDesc.size.height = windowHeight;
     resultTextureDesc.size.depth = 1;
     resultTextureDesc.defaultState = ResourceState::UnorderedAccess;
-    resultTextureDesc.format = Format::RGBA_Float16;
+    resultTextureDesc.format = Format::R16G16B16A16_FLOAT;
     gResultTexture = gDevice->createTextureResource(resultTextureDesc);
     IResourceView::Desc resultUAVDesc = {};
     resultUAVDesc.format = resultTextureDesc.format;
@@ -626,7 +640,7 @@ virtual void renderFrame(int frameBufferIndex) override
         cursor["uniforms"].setData(&gUniforms, sizeof(Uniforms));
         cursor["sceneBVH"].setResource(gTLAS);
         cursor["primitiveBuffer"].setResource(gPrimitiveBufferSRV);
-        renderEncoder->dispatchRays(nullptr, windowWidth, windowHeight, 1);
+        renderEncoder->dispatchRays(0, gShaderTable, windowWidth, windowHeight, 1);
         renderEncoder->endEncoding();
         renderCommandBuffer->close();
         gQueue->executeCommandBuffer(renderCommandBuffer);
@@ -646,7 +660,7 @@ virtual void renderFrame(int frameBufferIndex) override
         auto cursor = ShaderCursor(rootObject->getEntryPoint(1));
         cursor["t"].setResource(gResultTextureUAV);
         presentEncoder->setVertexBuffer(
-            0, gFullScreenVertexBuffer, sizeof(FullScreenTriangle::Vertex));
+            0, gFullScreenVertexBuffer);
         presentEncoder->setPrimitiveTopology(PrimitiveTopology::TriangleList);
         presentEncoder->draw(3);
         presentEncoder->endEncoding();

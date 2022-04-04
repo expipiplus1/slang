@@ -1034,7 +1034,7 @@ static void addLinkageDecoration(
         inst = outerGeneric;
     }
 
-    if(isImportedDecl(context, decl))
+    if (isImportedDecl(context, decl))
     {
         builder->addImportDecoration(inst, mangledName);
     }
@@ -1046,6 +1046,10 @@ static void addLinkageDecoration(
     {
         builder->addPublicDecoration(inst);
         builder->addKeepAliveDecoration(inst);
+    }
+    if (decl->findModifier<ExternCppModifier>())
+    {
+        builder->addExternCppDecoration(inst, mangledName);
     }
 }
 
@@ -1083,7 +1087,7 @@ IRStructKey* getInterfaceRequirementKey(
     IRBuilder builderStorage = *context->irBuilder;
     auto builder = &builderStorage;
 
-    builder->setInsertInto(builder->sharedBuilder->module->getModuleInst());
+    builder->setInsertInto(builder->getModule());
 
     // Construct a key to serve as the representation of
     // this requirement in the IR, and to allow lookup
@@ -1259,9 +1263,8 @@ struct ValLoweringVisitor : ValVisitor<ValLoweringVisitor, LoweredValInfo, Lower
                 auto irFunc = getBuilder()->createFunc();
                 irSatisfyingVal = irFunc;
 
-                IRBuilder subBuilderStorage;
+                IRBuilder subBuilderStorage(getBuilder()->getSharedBuilder());
                 auto subBuilder = &subBuilderStorage;
-                subBuilder->sharedBuilder = getBuilder()->sharedBuilder;
                 subBuilder->setInsertInto(irFunc);
 
                 // We will start by setting up the function parameters,
@@ -1776,6 +1779,34 @@ struct ValLoweringVisitor : ValVisitor<ValLoweringVisitor, LoweredValInfo, Lower
 
         auto irType = getBuilder()->getConjunctionType(left, right);
         return LoweredValInfo::simple(irType);
+    }
+
+    LoweredValInfo visitModifiedType(ModifiedType* astType)
+    {
+        IRType* irBase = lowerType(context, astType->base);
+
+        List<IRAttr*> irAttrs;
+        for(auto astModifier : astType->modifiers)
+        {
+            IRAttr* irAttr = (IRAttr*) lowerSimpleVal(context, astModifier);
+            if(irAttr)
+                irAttrs.add(irAttr);
+        }
+
+        auto irType = getBuilder()->getAttributedType(irBase, irAttrs);
+        return LoweredValInfo::simple(irType);
+    }
+
+    LoweredValInfo visitUNormModifierVal(UNormModifierVal* astVal)
+    {
+        SLANG_UNUSED(astVal);
+        return LoweredValInfo::simple(getBuilder()->getAttr(kIROp_UNormAttr));
+    }
+
+    LoweredValInfo visitSNormModifierVal(SNormModifierVal* astVal)
+    {
+        SLANG_UNUSED(astVal);
+        return LoweredValInfo::simple(getBuilder()->getAttr(kIROp_SNormAttr));
     }
 
     // We do not expect to encounter the following types in ASTs that have
@@ -2976,15 +3007,17 @@ struct ExprLoweringVisitorBase : ExprVisitor<Derived, LoweredValInfo>
         UNREACHABLE_RETURN(LoweredValInfo());
     }
 
-    LoweredValInfo getDefaultVal(VarDeclBase* decl)
+    LoweredValInfo getDefaultVal(DeclRef<VarDeclBase> decl)
     {
-        if(auto initExpr = decl->initExpr)
+        if(auto initExpr = decl.getDecl()->initExpr)
         {
             return lowerRValueExpr(context, initExpr);
         }
         else
         {
-            return getDefaultVal(decl->type);
+            Type* type = decl.substitute(getASTBuilder(), decl.getDecl()->type);
+            SLANG_ASSERT(type);
+            return getDefaultVal(type);
         }
     }
 
@@ -3621,6 +3654,12 @@ struct ExprLoweringVisitorBase : ExprVisitor<Derived, LoweredValInfo>
         UNREACHABLE_RETURN(LoweredValInfo());
     }
 
+    LoweredValInfo visitModifierCastExpr(
+        ModifierCastExpr* expr)
+    {
+        return this->dispatch(expr->valueArg);
+    }
+
     LoweredValInfo subscriptValue(
         IRType*         type,
         LoweredValInfo  baseVal,
@@ -3702,6 +3741,12 @@ struct ExprLoweringVisitorBase : ExprVisitor<Derived, LoweredValInfo>
     LoweredValInfo visitAndTypeExpr(AndTypeExpr* /*expr*/)
     {
         SLANG_UNIMPLEMENTED_X("'&' type expression during code generation");
+        UNREACHABLE_RETURN(LoweredValInfo());
+    }
+
+    LoweredValInfo visitModifiedTypeExpr(ModifiedTypeExpr* /*expr*/)
+    {
+        SLANG_UNIMPLEMENTED_X("type expression during code generation");
         UNREACHABLE_RETURN(LoweredValInfo());
     }
 
@@ -5909,7 +5954,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         // IR global variable under the parent of its containing
         // function.
         //
-        auto parent = getBuilder()->insertIntoParent;
+        auto parent = getBuilder()->getInsertLoc().getParent();
         if(auto block = as<IRBlock>(parent))
             parent = block->getParent();
 
@@ -6695,8 +6740,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             //       return f : ftype;
             //    }
             // ```
-            IRBuilder typeBuilder;
-            typeBuilder.sharedBuilder = subBuilder->sharedBuilder;
+            IRBuilder typeBuilder(subBuilder->getSharedBuilder());
             IRCloneEnv cloneEnv = {};
             if (returnType)
             {
@@ -7546,9 +7590,8 @@ LoweredValInfo ensureDecl(
         env = env->outer;
     }
 
-    IRBuilder subIRBuilder;
-    subIRBuilder.sharedBuilder = context->irBuilder->sharedBuilder;
-    subIRBuilder.setInsertInto(subIRBuilder.sharedBuilder->module->getModuleInst());
+    IRBuilder subIRBuilder(context->irBuilder->getSharedBuilder());
+    subIRBuilder.setInsertInto(subIRBuilder.getModule());
 
     IRGenEnv subEnv;
     subEnv.outer = context->env;
@@ -7806,7 +7849,8 @@ LoweredValInfo emitDeclRef(
 
 static void lowerFrontEndEntryPointToIR(
     IRGenContext*   context,
-    EntryPoint*     entryPoint)
+    EntryPoint*     entryPoint,
+    String moduleName)
 {
     // TODO: We should emit an entry point as a dedicated IR function
     // (distinct from the IR function used if it were called normally),
@@ -7837,7 +7881,7 @@ static void lowerFrontEndEntryPointToIR(
 
     {
         Name* entryPointName = entryPoint->getFuncDecl()->getName();
-        builder->addEntryPointDecoration(instToDecorate, entryPoint->getProfile(), entryPointName->text.getUnownedSlice());
+        builder->addEntryPointDecoration(instToDecorate, entryPoint->getProfile(), entryPointName->text.getUnownedSlice(), moduleName.getUnownedSlice());
     }
 
     // Go through the entry point parameters creating decorations from layout as appropriate
@@ -7960,14 +8004,15 @@ static void ensureAllDeclsRec(
     }
 }
 
-IRModule* generateIRForTranslationUnit(
+RefPtr<IRModule> generateIRForTranslationUnit(
     ASTBuilder* astBuilder,
     TranslationUnitRequest* translationUnit)
 {
+    auto session = translationUnit->getSession();
     auto compileRequest = translationUnit->compileRequest;
 
     SharedIRGenContext sharedContextStorage(
-        translationUnit->getSession(),
+        session,
         translationUnit->compileRequest->getSink(),
         translationUnit->compileRequest->getLinkage()->m_obfuscateCode,
         translationUnit->getModuleDecl());
@@ -7976,17 +8021,13 @@ IRModule* generateIRForTranslationUnit(
     IRGenContext contextStorage(sharedContext, astBuilder);
     IRGenContext* context = &contextStorage;
 
-    SharedIRBuilder sharedBuilderStorage;
+    RefPtr<IRModule> module = IRModule::create(session);
+
+    SharedIRBuilder sharedBuilderStorage(module);
     SharedIRBuilder* sharedBuilder = &sharedBuilderStorage;
-    sharedBuilder->module = nullptr;
-    sharedBuilder->session = compileRequest->getSession();
 
-    IRBuilder builderStorage;
+    IRBuilder builderStorage(sharedBuilder);
     IRBuilder* builder = &builderStorage;
-    builder->sharedBuilder = sharedBuilder;
-
-    IRModule* module = builder->createModule();
-    sharedBuilder->module = module;
 
     context->irBuilder = builder;
 
@@ -8000,7 +8041,11 @@ IRModule* generateIRForTranslationUnit(
     // in case they require special handling.
     for (auto entryPoint : translationUnit->getEntryPoints())
     {
-        lowerFrontEndEntryPointToIR(context, entryPoint);
+        List<SourceFile*> sources = translationUnit->getSourceFiles();
+        SourceFile* source = sources.getFirst();
+        PathInfo pInfo = source->getPathInfo();
+        String path = pInfo.getMostUniqueIdentity();
+        lowerFrontEndEntryPointToIR(context, entryPoint, Path::getFileNameWithoutExt(path));
     }
 
     //
@@ -8142,10 +8187,7 @@ IRModule* generateIRForTranslationUnit(
     {
         DiagnosticSinkWriter writer(compileRequest->getSink());
 
-        IRDumpOptions options;
-        options.sourceManager = compileRequest->getSourceManager();
-
-        dumpIR(module, options, "LOWER-TO-IR", &writer);
+        dumpIR(module, compileRequest->m_irDumpOptions, "LOWER-TO-IR", compileRequest->getSourceManager(), &writer);
     }
 
     return module;
@@ -8179,19 +8221,15 @@ struct SpecializedComponentTypeIRGenContext : ComponentTypeVisitor
         IRGenContext contextStorage(sharedContext, linkage->getASTBuilder());
         context = &contextStorage;
 
-        SharedIRBuilder sharedBuilderStorage;
+        RefPtr<IRModule> module = IRModule::create(session);
+
+        SharedIRBuilder sharedBuilderStorage(module);
         SharedIRBuilder* sharedBuilder = &sharedBuilderStorage;
-        sharedBuilder->module = nullptr;
-        sharedBuilder->session = session;
 
-        IRBuilder builderStorage;
+        IRBuilder builderStorage(sharedBuilder);
         builder = &builderStorage;
-        builder->sharedBuilder = sharedBuilder;
 
-        RefPtr<IRModule> module = builder->createModule();
-        sharedBuilder->module = module;
-
-        builder->setInsertInto(module->getModuleInst());
+        builder->setInsertInto(module);
 
         context->irBuilder = builder;
 
@@ -8208,6 +8246,13 @@ struct SpecializedComponentTypeIRGenContext : ComponentTypeVisitor
         // point is being specialized.
         //
         lowerProgramEntryPointToIR(context, entryPoint, specializationInfo);
+    }
+
+    void visitRenamedEntryPoint(
+        RenamedEntryPointComponentType* entryPoint,
+        EntryPoint::EntryPointSpecializationInfo* specializationInfo) SLANG_OVERRIDE
+    {
+        entryPoint->getBase()->acceptVisitor(this, specializationInfo);
     }
 
     void visitModule(Module* module, Module::ModuleSpecializationInfo* specializationInfo) SLANG_OVERRIDE
@@ -8313,19 +8358,15 @@ struct TypeConformanceIRGenContext
         IRGenContext contextStorage(sharedContext, linkage->getASTBuilder());
         context = &contextStorage;
 
-        SharedIRBuilder sharedBuilderStorage;
+        RefPtr<IRModule> module = IRModule::create(session);
+
+        SharedIRBuilder sharedBuilderStorage(module);
         SharedIRBuilder* sharedBuilder = &sharedBuilderStorage;
-        sharedBuilder->module = nullptr;
-        sharedBuilder->session = session;
 
-        IRBuilder builderStorage;
+        IRBuilder builderStorage(sharedBuilder);
         builder = &builderStorage;
-        builder->sharedBuilder = sharedBuilder;
 
-        RefPtr<IRModule> module = builder->createModule();
-        sharedBuilder->module = module;
-
-        builder->setInsertInto(module->getModuleInst());
+        builder->setInsertInto(module);
 
         context->irBuilder = builder;
 
@@ -8665,19 +8706,15 @@ RefPtr<IRModule> TargetProgram::createIRModuleForLayout(DiagnosticSink* sink)
     IRLayoutGenContext contextStorage(sharedContext, astBuilder);
     auto context = &contextStorage;
 
-    SharedIRBuilder sharedBuilderStorage;
+    RefPtr<IRModule> irModule = IRModule::create(session);
+
+    SharedIRBuilder sharedBuilderStorage(irModule);
     auto sharedBuilder = &sharedBuilderStorage;
-    sharedBuilder->module = nullptr;
-    sharedBuilder->session = session;
 
-    IRBuilder builderStorage;
+    IRBuilder builderStorage(sharedBuilder);
     auto builder = &builderStorage;
-    builder->sharedBuilder = sharedBuilder;
 
-    RefPtr<IRModule> irModule = builder->createModule();
-    sharedBuilder->module = irModule;
-
-    builder->setInsertInto(irModule->getModuleInst());
+    builder->setInsertInto(irModule);
 
     context->irBuilder = builder;
 

@@ -1,7 +1,7 @@
 Slang
 =====
-
-[![AppVeyor build status](https://ci.appveyor.com/api/projects/status/3jptgsry13k6wdwp/branch/master?svg=true)](https://ci.appveyor.com/project/shader-slang/slang/branch/master) [![Travis build status](https://travis-ci.org/shader-slang/slang.svg?branch=master)](https://travis-ci.org/shader-slang/slang)
+![Linux Build Status](https://github.com/shader-slang/slang/actions/workflows/c-cpp.yml/badge.svg)
+![Windows Build Status](https://github.com/shader-slang/slang/actions/workflows/windows.yml/badge.svg)
 
 Slang is a shading language that makes it easier to build and maintain large shader codebases in a modular and extensible fashion, while also maintaining the highest possible performance on modern GPUs and graphics APIs.
 Slang is based on years of collaboration between researchers at NVIDIA, Carnegie Mellon University, and Stanford.
@@ -28,8 +28,7 @@ The Slang system is designed to provide developers of real-time graphics applica
 Getting Started
 ---------------
 
-If you want to try out the Slang language without installing anything, you may want to use the [Shader Playground](http://shader-playground.timjones.io/) website.
-We have written up some [tips](docs/shader-playground.md) on how to use Slang from within Shader Playground.
+If you want to try out the Slang language without installing anything, a fast and simple way is to use the [Shader Playground](docs/shader-playground.md).
 
 The fastest way to get started using Slang in your own development is to use a pre-built binary package, available through GitHub [releases](https://github.com/shader-slang/slang/releases).
 There are packages built for 32- and 64-bit Windows, as well as 64-bit Ubuntu.
@@ -75,9 +74,11 @@ Builds of the core Slang tools depend on the following projects, either automati
 * [`spirv-headers`](https://github.com/KhronosGroup/SPIRV-Headers) (Modified MIT)
 * [`spirv-tools`](https://github.com/KhronosGroup/SPIRV-Tools) (Apache 2.0)
 
-The Slang tests (which are not distributed with source/binary releases) include example HLSL shaders extracted from the Microsoft DirectX SDK, which has its own license
+Slang releases may include [slang-llvm](https://github.com/shader-slang/slang-llvm) which includes [LLVM](https://github.com/llvm/llvm-project) under the license:
 
-Some of the tests and example programs that build with Slang use the following projets, which may have their own licenses:
+* [`llvm`](https://llvm.org/docs/DeveloperPolicy.html#new-llvm-project-license-framework) (Apache 2.0 License with LLVM exceptions)
+
+Some of the tests and example programs that build with Slang use the following projects, which may have their own licenses:
 
 * [`glm`](https://github.com/g-truc/glm) (MIT)
 * `stb_image` and `stb_image_write` from the [`stb`](https://github.com/nothings/stb) collection of single-file libraries (Public Domain)

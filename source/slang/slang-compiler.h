@@ -71,14 +71,17 @@ namespace Slang
         DXILAssembly        = SLANG_DXIL_ASM,
         CSource             = SLANG_C_SOURCE,
         CPPSource           = SLANG_CPP_SOURCE,
-        Executable          = SLANG_EXECUTABLE,
-        SharedLibrary       = SLANG_SHARED_LIBRARY,
-        HostCallable        = SLANG_HOST_CALLABLE,
+        HostCPPSource       = SLANG_HOST_CPP_SOURCE,
+        HostExecutable      = SLANG_HOST_EXECUTABLE,
+        ShaderSharedLibrary = SLANG_SHADER_SHARED_LIBRARY,
+        ShaderHostCallable  = SLANG_SHADER_HOST_CALLABLE,
         CUDASource          = SLANG_CUDA_SOURCE,
         PTX                 = SLANG_PTX,
         ObjectCode          = SLANG_OBJECT_CODE,
         CountOf             = SLANG_TARGET_COUNT_OF,
     };
+
+    bool isHeterogeneousTarget(CodeGenTarget target);
 
     void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val);
 
@@ -293,6 +296,9 @@ namespace Slang
             SlangInt                        specializationArgCount,
             slang::IComponentType**         outSpecializedComponentType,
             ISlangBlob**                    outDiagnostics) SLANG_OVERRIDE;
+        SLANG_NO_THROW SlangResult SLANG_MCALL renameEntryPoint(
+            const char* newName,
+            slang::IComponentType** outEntryPoint) SLANG_OVERRIDE;
         SLANG_NO_THROW SlangResult SLANG_MCALL link(
             slang::IComponentType**         outLinkedComponentType,
             ISlangBlob**                    outDiagnostics) SLANG_OVERRIDE;
@@ -318,6 +324,9 @@ namespace Slang
 
             /// Get the mangled name of one of the entry points linked into this component type.
         virtual String getEntryPointMangledName(Index index) = 0;
+
+            /// Get the name override of one of the entry points linked into this component type.
+        virtual String getEntryPointNameOverride(Index index) = 0;
 
             /// Get the number of global shader parameters linked into this component type.
         virtual Index getShaderParamCount() = 0;
@@ -511,6 +520,7 @@ namespace Slang
         Index getEntryPointCount() SLANG_OVERRIDE;
         RefPtr<EntryPoint> getEntryPoint(Index index) SLANG_OVERRIDE;
         String getEntryPointMangledName(Index index) SLANG_OVERRIDE;
+        String getEntryPointNameOverride(Index index) SLANG_OVERRIDE;
 
         Index getShaderParamCount() SLANG_OVERRIDE;
         ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE;
@@ -560,6 +570,7 @@ namespace Slang
         //
         List<EntryPoint*> m_entryPoints;
         List<String> m_entryPointMangledNames;
+        List<String> m_entryPointNameOverrides;
         List<ShaderParamInfo> m_shaderParams;
         List<SpecializationParam> m_specializationParams;
         List<ComponentType*> m_requirements;
@@ -598,6 +609,7 @@ namespace Slang
         Index getEntryPointCount() SLANG_OVERRIDE { return m_base->getEntryPointCount(); }
         RefPtr<EntryPoint> getEntryPoint(Index index) SLANG_OVERRIDE { return m_base->getEntryPoint(index); }
         String getEntryPointMangledName(Index index) SLANG_OVERRIDE;
+        String getEntryPointNameOverride(Index index) SLANG_OVERRIDE;
 
         Index getShaderParamCount() SLANG_OVERRIDE { return m_base->getShaderParamCount(); }
         ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE { return m_base->getShaderParam(index); }
@@ -638,6 +650,7 @@ namespace Slang
         RefPtr<IRModule> m_irModule;
 
         List<String> m_entryPointMangledNames;
+        List<String> m_entryPointNameOverrides;
 
         // Any tagged union types that were referenced by the specialization arguments.
         List<TaggedUnionType*> m_taggedUnionTypes;
@@ -645,6 +658,130 @@ namespace Slang
         List<Module*> m_moduleDependencies;
         List<String> m_filePathDependencies;
         List<RefPtr<ComponentType>> m_requirements;
+    };
+
+    class RenamedEntryPointComponentType : public ComponentType
+    {
+    public:
+        using Super = ComponentType;
+
+        RenamedEntryPointComponentType(ComponentType* base, String newName);
+
+        ComponentType* getBase() { return m_base.Ptr(); }
+
+        // Forward `IComponentType` methods
+
+        SLANG_NO_THROW slang::ISession* SLANG_MCALL getSession() SLANG_OVERRIDE
+        {
+            return Super::getSession();
+        }
+
+        SLANG_NO_THROW slang::ProgramLayout* SLANG_MCALL
+            getLayout(SlangInt targetIndex, slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getLayout(targetIndex, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointCode(
+            SlangInt entryPointIndex,
+            SlangInt targetIndex,
+            slang::IBlob** outCode,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getEntryPointCode(entryPointIndex, targetIndex, outCode, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL specialize(
+            slang::SpecializationArg const* specializationArgs,
+            SlangInt specializationArgCount,
+            slang::IComponentType** outSpecializedComponentType,
+            ISlangBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::specialize(
+                specializationArgs,
+                specializationArgCount,
+                outSpecializedComponentType,
+                outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL renameEntryPoint(
+            const char* newName, slang::IComponentType** outEntryPoint) SLANG_OVERRIDE
+        {
+            return Super::renameEntryPoint(newName, outEntryPoint);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL link(
+            slang::IComponentType** outLinkedComponentType,
+            ISlangBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::link(outLinkedComponentType, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointHostCallable(
+            int entryPointIndex,
+            int targetIndex,
+            ISlangSharedLibrary** outSharedLibrary,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getEntryPointHostCallable(
+                entryPointIndex, targetIndex, outSharedLibrary, outDiagnostics);
+        }
+
+        List<Module*> const& getModuleDependencies() SLANG_OVERRIDE
+        {
+            return m_base->getModuleDependencies();
+        }
+        List<String> const& getFilePathDependencies() SLANG_OVERRIDE
+        {
+            return m_base->getFilePathDependencies();
+        }
+
+        SLANG_NO_THROW Index SLANG_MCALL getSpecializationParamCount() SLANG_OVERRIDE
+        {
+            return m_base->getSpecializationParamCount();
+        }
+
+        SpecializationParam const& getSpecializationParam(Index index) SLANG_OVERRIDE
+        {
+            return m_base->getSpecializationParam(index);
+        }
+
+        Index getRequirementCount() SLANG_OVERRIDE { return m_base->getRequirementCount(); }
+        RefPtr<ComponentType> getRequirement(Index index) SLANG_OVERRIDE
+        {
+            return m_base->getRequirement(index);
+        }
+        Index getEntryPointCount() SLANG_OVERRIDE { return m_base->getEntryPointCount(); }
+        RefPtr<EntryPoint> getEntryPoint(Index index) SLANG_OVERRIDE
+        {
+            return m_base->getEntryPoint(index);
+        }
+        String getEntryPointMangledName(Index index) SLANG_OVERRIDE { return m_base->getEntryPointMangledName(index); }
+        String getEntryPointNameOverride(Index index) SLANG_OVERRIDE
+        {
+            SLANG_UNUSED(index);
+            SLANG_ASSERT(index == 0);
+            return m_entryPointNameOverride;
+        }
+
+        Index getShaderParamCount() SLANG_OVERRIDE { return m_base->getShaderParamCount(); }
+        ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE
+        {
+            return m_base->getShaderParam(index);
+        }
+
+        void acceptVisitor(ComponentTypeVisitor* visitor, SpecializationInfo* specializationInfo)
+            SLANG_OVERRIDE;
+    private:
+        RefPtr<ComponentType> m_base;
+        String m_entryPointNameOverride;
+
+    protected:
+        RefPtr<SpecializationInfo> _validateSpecializationArgsImpl(
+            SpecializationArg const* args, Index argCount, DiagnosticSink* sink) SLANG_OVERRIDE
+        {
+            return m_base->_validateSpecializationArgsImpl(args, argCount, sink);
+        }
     };
 
         /// Describes an entry point for the purposes of layout and code generation.
@@ -701,6 +838,12 @@ namespace Slang
                 specializationArgCount,
                 outSpecializedComponentType,
                 outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL renameEntryPoint(
+            const char* newName, slang::IComponentType** outEntryPoint) SLANG_OVERRIDE
+        {
+            return Super::renameEntryPoint(newName, outEntryPoint);
         }
 
         SLANG_NO_THROW SlangResult SLANG_MCALL link(
@@ -791,6 +934,7 @@ namespace Slang
         Index getEntryPointCount() SLANG_OVERRIDE { return 1; };
         RefPtr<EntryPoint> getEntryPoint(Index index) SLANG_OVERRIDE { SLANG_UNUSED(index); return this; }
         String getEntryPointMangledName(Index index) SLANG_OVERRIDE;
+        String getEntryPointNameOverride(Index index) SLANG_OVERRIDE;
 
         Index getShaderParamCount() SLANG_OVERRIDE { return 0; }
         ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE { SLANG_UNUSED(index); return ShaderParamInfo(); }
@@ -902,6 +1046,12 @@ namespace Slang
                 outDiagnostics);
         }
 
+        SLANG_NO_THROW SlangResult SLANG_MCALL renameEntryPoint(
+            const char* newName, slang::IComponentType** outEntryPoint) SLANG_OVERRIDE
+        {
+            return Super::renameEntryPoint(newName, outEntryPoint);
+        }
+
         SLANG_NO_THROW SlangResult SLANG_MCALL link(
             slang::IComponentType** outLinkedComponentType,
             ISlangBlob** outDiagnostics) SLANG_OVERRIDE
@@ -940,6 +1090,7 @@ namespace Slang
             return nullptr;
         }
         String getEntryPointMangledName(Index /*index*/) SLANG_OVERRIDE { return ""; }
+        String getEntryPointNameOverride(Index /*index*/) SLANG_OVERRIDE { return ""; }
 
         Index getShaderParamCount() SLANG_OVERRIDE { return 0; }
         ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE
@@ -1039,6 +1190,12 @@ namespace Slang
                 outDiagnostics);
         }
 
+        SLANG_NO_THROW SlangResult SLANG_MCALL renameEntryPoint(
+            const char* newName, slang::IComponentType** outEntryPoint) SLANG_OVERRIDE
+        {
+            return Super::renameEntryPoint(newName, outEntryPoint);
+        }
+
         SLANG_NO_THROW SlangResult SLANG_MCALL link(
             slang::IComponentType**         outLinkedComponentType,
             ISlangBlob**                    outDiagnostics) SLANG_OVERRIDE
@@ -1107,6 +1264,7 @@ namespace Slang
         Index getEntryPointCount() SLANG_OVERRIDE { return 0; }
         RefPtr<EntryPoint> getEntryPoint(Index index) SLANG_OVERRIDE { SLANG_UNUSED(index); return nullptr; }
         String getEntryPointMangledName(Index index) SLANG_OVERRIDE { SLANG_UNUSED(index); return String(); }
+        String getEntryPointNameOverride(Index index) SLANG_OVERRIDE { SLANG_UNUSED(index); return String(); }
 
         Index getShaderParamCount() SLANG_OVERRIDE { return m_shaderParams.getCount(); }
         ShaderParamInfo getShaderParam(Index index) SLANG_OVERRIDE { return m_shaderParams[index]; }
@@ -1302,10 +1460,16 @@ namespace Slang
         {
             lineDirectiveMode = mode;
         }
+        
         void setDumpIntermediates(bool value)
         {
             dumpIntermediates = value;
         }
+        void setForceGLSLScalarBufferLayout(bool value)
+        {
+            forceGLSLScalarBufferLayout = value;
+        }
+
         void addCapability(CapabilityAtom capability);
 
         bool shouldEmitSPIRVDirectly()
@@ -1327,6 +1491,7 @@ namespace Slang
         LineDirectiveMode getLineDirectiveMode() { return lineDirectiveMode; }
         SlangTargetFlags getTargetFlags() { return targetFlags; }
         CapabilitySet getTargetCaps();
+        bool getForceGLSLScalarBufferLayout() { return forceGLSLScalarBufferLayout; }
 
         Session* getSession();
         MatrixLayoutMode getDefaultMatrixLayoutMode();
@@ -1348,6 +1513,7 @@ namespace Slang
         CapabilitySet           cookedCapabilities;
         LineDirectiveMode       lineDirectiveMode = LineDirectiveMode::Default;
         bool                    dumpIntermediates = false;
+        bool                    forceGLSLScalarBufferLayout = false;
     };
 
         /// Are we generating code for a D3D API?
@@ -1495,9 +1661,6 @@ namespace Slang
         SourceManager* m_sourceManager = nullptr;
 
         bool m_obfuscateCode = false;
-
-        // Determine whether to output heterogeneity-related code
-        bool m_heterogeneous = false;
 
         /// Holds any args that are destined for downstream compilers/tools etc
         DownstreamArgs m_downstreamArgs;
@@ -1855,6 +2018,9 @@ namespace Slang
 
         Name* m_defaultModuleName = nullptr;
 
+            /// The irDumpOptions
+        IRDumpOptions m_irDumpOptions;
+
             /// An "extra" entry point that was added via a library reference
         struct ExtraEntryPointInfo
         {
@@ -1894,6 +2060,9 @@ namespace Slang
         virtual void visitComposite(CompositeComponentType* composite, CompositeComponentType::CompositeSpecializationInfo* specializationInfo) = 0;
         virtual void visitSpecialized(SpecializedComponentType* specialized) = 0;
         virtual void visitTypeConformance(TypeConformance* conformance) = 0;
+        virtual void visitRenamedEntryPoint(
+            RenamedEntryPointComponentType* renamedEntryPoint,
+            EntryPoint::EntryPointSpecializationInfo* specializationInfo) = 0;
 
     protected:
         // These helpers can be used to recurse into the logical children of a
@@ -2043,6 +2212,9 @@ namespace Slang
         // If true will disable generating dynamic dispatch code.
         bool disableDynamicDispatch = false;
 
+        // The default IR dumping options
+        IRDumpOptions m_irDumpOptions;
+
         String m_dumpIntermediatePrefix;
 
     private:
@@ -2079,6 +2251,7 @@ namespace Slang
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetFlags(int targetIndex, SlangTargetFlags flags) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetFloatingPointMode(int targetIndex, SlangFloatingPointMode mode) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetMatrixLayoutMode(int targetIndex, SlangMatrixLayoutMode mode) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW void SLANG_MCALL setTargetForceGLSLScalarBufferLayout(int targetIndex, bool value) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setMatrixLayoutMode(SlangMatrixLayoutMode mode) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setDebugInfoLevel(SlangDebugInfoLevel level) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setOptimizationLevel(SlangOptimizationLevel level) SLANG_OVERRIDE;
@@ -2197,6 +2370,8 @@ namespace Slang
             String wholeTargetOutputPath;
         };
         Dictionary<TargetRequest*, RefPtr<TargetInfo>> m_targetInfos;
+        
+        String m_dependencyOutputPath;
 
             /// Writes the modules in a container to the stream
         SlangResult writeContainerToStream(Stream* stream);
@@ -2363,6 +2538,45 @@ namespace Slang
         static const BaseTypeInfo s_info[Index(BaseType::CountOf)];
     };
 
+    class CodeGenTransitionMap
+    {
+    public:
+        struct Pair
+        {
+            typedef Pair ThisType;
+            SLANG_FORCE_INLINE bool operator==(const ThisType& rhs) const { return source == rhs.source && target == rhs.target; }
+            SLANG_FORCE_INLINE bool operator!=(const ThisType& rhs) const { return !(*this == rhs); }
+
+            SLANG_FORCE_INLINE HashCode getHashCode() const { return combineHash(HashCode(source), HashCode(target)); }
+
+            CodeGenTarget source;
+            CodeGenTarget target;
+        };
+
+        void removeTransition(CodeGenTarget source, CodeGenTarget target)
+        {
+            m_map.Remove(Pair{ source, target });
+        }
+        void addTransition(CodeGenTarget source, CodeGenTarget target, PassThroughMode compiler)
+        {
+            SLANG_ASSERT(source != target);
+            m_map.Add(Pair{ source, target }, compiler);
+        }
+        bool hasTransition(CodeGenTarget source, CodeGenTarget target) const
+        {
+            return m_map.ContainsKey(Pair{ source, target });
+        }
+        PassThroughMode getTransition(CodeGenTarget source, CodeGenTarget target) const
+        {
+            const Pair pair{ source, target };
+            auto value = m_map.TryGetValue(pair);
+            return value ? *value : PassThroughMode::None;
+        }
+
+    protected:
+        Dictionary<Pair, PassThroughMode> m_map;
+    };
+
     class Session : public RefObject, public slang::IGlobalSession
     {
     public:
@@ -2397,9 +2611,16 @@ namespace Slang
 
         SLANG_NO_THROW SlangCapabilityID SLANG_MCALL findCapability(char const* name) override;
 
-            /// Get the default compiler for a language
-        DownstreamCompiler* getDefaultDownstreamCompiler(SourceLanguage sourceLanguage);
+        SLANG_NO_THROW void SLANG_MCALL setDownstreamCompilerForTransition(SlangCompileTarget source, SlangCompileTarget target, SlangPassThrough compiler) override;
+        SLANG_NO_THROW SlangPassThrough SLANG_MCALL getDownstreamCompilerForTransition(SlangCompileTarget source, SlangCompileTarget target) override;
+        SLANG_NO_THROW double SLANG_MCALL getDownstreamCompilerElapsedTime() override
+        {
+            return m_downstreamCompileTime;
+        }
 
+            /// Get the downstream compiler for a transition
+        DownstreamCompiler* getDownstreamCompiler(CodeGenTarget source, CodeGenTarget target);
+        
         Scope* baseLanguageScope = nullptr;
         Scope* coreLanguageScope = nullptr;
         Scope* hlslLanguageScope = nullptr;
@@ -2467,6 +2688,8 @@ namespace Slang
             String const&           source);
         ~Session();
 
+        void addDownstreamCompileTime(double time) { m_downstreamCompileTime += time; }
+
         ComPtr<ISlangSharedLibraryLoader> m_sharedLibraryLoader;                    ///< The shared library loader (never null)
 
         int m_downstreamCompilerInitialized = 0;                                        
@@ -2476,6 +2699,8 @@ namespace Slang
         DownstreamCompilerLocatorFunc m_downstreamCompilerLocators[int(PassThroughMode::CountOf)];
 
     private:
+
+        void _initCodeGenTransitionMap();
 
         SlangResult _readBuiltinModule(ISlangFileSystem* fileSystem, Scope* scope, String moduleName);
 
@@ -2487,6 +2712,11 @@ namespace Slang
         String m_downstreamCompilerPaths[int(PassThroughMode::CountOf)];         ///< Paths for each pass through
         String m_languagePreludes[int(SourceLanguage::CountOf)];                  ///< Prelude for each source language
         PassThroughMode m_defaultDownstreamCompilers[int(SourceLanguage::CountOf)];
+
+        // Describes a conversion from one code gen target (source) to another (target)
+        CodeGenTransitionMap m_codeGenTransitionMap;
+
+        double m_downstreamCompileTime = 0.0;
     };
 
 

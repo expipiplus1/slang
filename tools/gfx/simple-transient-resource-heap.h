@@ -9,19 +9,8 @@
 namespace gfx
 {
 template<typename TDevice, typename TCommandBuffer>
-class SimpleTransientResourceHeap
-    : public ITransientResourceHeap
-    , public Slang::ComObject
+class SimpleTransientResourceHeap : public TransientResourceHeapBase
 {
-public:
-    SLANG_COM_OBJECT_IUNKNOWN_ALL
-    ITransientResourceHeap* getInterface(const Slang::Guid& guid)
-    {
-        if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ITransientResourceHeap)
-            return static_cast<ITransientResourceHeap*>(this);
-        return nullptr;
-    }
-
 public:
     Slang::RefPtr<TDevice> m_device;
     Slang::ComPtr<IBufferResource> m_constantBuffer;
@@ -35,7 +24,7 @@ public:
         bufferDesc.allowedStates = ResourceStateSet(ResourceState::ConstantBuffer, ResourceState::CopyDestination);
         bufferDesc.defaultState = ResourceState::ConstantBuffer;
         bufferDesc.sizeInBytes = desc.constantBufferSize;
-        bufferDesc.cpuAccessFlags = AccessFlag::Write;
+        bufferDesc.memoryType = MemoryType::Upload;
         SLANG_RETURN_ON_FAIL(
             device->createBufferResource(bufferDesc, nullptr, m_constantBuffer.writeRef()));
         return SLANG_OK;
@@ -44,11 +33,15 @@ public:
         createCommandBuffer(ICommandBuffer** outCommandBuffer) override
     {
         Slang::RefPtr<TCommandBuffer> newCmdBuffer = new TCommandBuffer();
-        newCmdBuffer->init(m_device);
+        newCmdBuffer->init(m_device, this);
         returnComPtr(outCommandBuffer, newCmdBuffer);
         return SLANG_OK;
     }
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL synchronizeAndReset() override { return SLANG_OK; }
+    virtual SLANG_NO_THROW Result SLANG_MCALL synchronizeAndReset() override
+    {
+        ++getVersionCounter();
+        return SLANG_OK;
+    }
 };
 }

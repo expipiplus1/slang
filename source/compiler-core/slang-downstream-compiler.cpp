@@ -185,20 +185,6 @@ SlangResult DownstreamCompiler::disassemble(SlangCompileTarget sourceBlobTarget,
     return (info.sourceLanguageFlags & (SourceLanguageFlags(1) << int(sourceLanguage))) != 0;
 }
 
-/* static */SlangCompileTarget DownstreamCompiler::getCompileTarget(SlangSourceLanguage sourceLanguage)
-{
-    switch (sourceLanguage)
-    {
-        case SLANG_SOURCE_LANGUAGE_HLSL:    return SLANG_HLSL;
-        case SLANG_SOURCE_LANGUAGE_GLSL:    return SLANG_GLSL;
-        case SLANG_SOURCE_LANGUAGE_C:       return SLANG_C_SOURCE;
-        case SLANG_SOURCE_LANGUAGE_CPP:     return SLANG_CPP_SOURCE;
-        case SLANG_SOURCE_LANGUAGE_CUDA:    return SLANG_CUDA_SOURCE;
-        
-        default:                            return SLANG_TARGET_UNKNOWN;
-    }
-}
-
 /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! DownstreamDiagnostics !!!!!!!!!!!!!!!!!!!!!!*/
 
 Index DownstreamDiagnostics::getCountAtLeastSeverity(Diagnostic::Severity severity) const
@@ -235,7 +221,7 @@ void DownstreamDiagnostics::requireErrorDiagnostic()
     DownstreamDiagnostic diagnostic;
     diagnostic.reset();
     diagnostic.severity = DownstreamDiagnostic::Severity::Error;
-    diagnostic.text = "Generic error during compilation";
+    diagnostic.text = rawDiagnostics;
 
     // Add the diagnostic
     diagnostics.add(diagnostic);
@@ -391,20 +377,14 @@ SlangResult CommandLineDownstreamCompileResult::getBinary(ComPtr<ISlangBlob>& ou
         return SLANG_OK;
     }
 
+    List<uint8_t> contents;
     // Read the binary
-    try
-    {
         // Read the contents of the binary
-        List<uint8_t> contents = File::readAllBytes(m_moduleFilePath);
+    SLANG_RETURN_ON_FAIL(File::readAllBytes(m_moduleFilePath, contents));
 
-        m_binaryBlob = new ScopeRefObjectBlob(ListBlob::moveCreate(contents), m_temporaryFiles);
-        outBlob = m_binaryBlob;
-        return SLANG_OK;
-    }
-    catch (const Slang::IOException&)
-    {
-        return SLANG_FAIL;
-    }
+    m_binaryBlob = new ScopeRefObjectBlob(ListBlob::moveCreate(contents), m_temporaryFiles);
+    outBlob = m_binaryBlob;
+    return SLANG_OK;
 }
 
 /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CommandLineDownstreamCompiler !!!!!!!!!!!!!!!!!!!!!!*/
@@ -428,14 +408,11 @@ static bool _isContentsInFile(const DownstreamCompiler::CompileOptions& options)
         // file either from some specialized ISlangFileSystem, so this is probably as good as it gets
         // until we can integrate directly to a C/C++ compiler through say a shared library where we can control
         // file system access.
-        try
+        String readContents;
+
+        if (SLANG_SUCCEEDED(File::readAllText(options.sourceContentsPath, readContents)))
         {
-            String readContents = File::readAllText(options.sourceContentsPath);
-            // We should see if they are the same
             return options.sourceContents == readContents.getUnownedSlice();
-        }
-        catch (const Slang::IOException&)
-        {
         }
     }
     return false;
@@ -484,17 +461,9 @@ SlangResult CommandLineDownstreamCompiler::compile(const CompileOptions& inOptio
             }
 
             // Write it out
-            try
-            {
-                productFileSet->add(compileSourcePath);
-
-                File::writeAllText(compileSourcePath, options.sourceContents);
-            }
-            catch (...)
-            {
-                return SLANG_FAIL;
-            }
-
+            productFileSet->add(compileSourcePath);
+            SLANG_RETURN_ON_FAIL(File::writeAllText(compileSourcePath, options.sourceContents));
+            
             // Add it as a source file
             options.sourceFiles.add(compileSourcePath);
         }
@@ -736,20 +705,6 @@ const DownstreamCompiler::Desc& DownstreamCompilerUtil::getCompiledWithDesc()
         case SLANG_SOURCE_LANGUAGE_CPP:
         case SLANG_SOURCE_LANGUAGE_C:
         {
-
-#if 0
-            // TODO(JS): We can't just enable this because we can currently only use slang-llvm, if we want to 'host-callable'
-            // It *can't* handle pass through (the includes are not available with just the dll),
-            // As it stands it doesn't support ext/obj/shared library output
-
-            // If we have LLVM, lets use that as the default
-            {
-                DownstreamCompiler::Desc desc;
-                desc.type = SLANG_PASS_THROUGH_LLVM;
-                compiler = findCompiler(set, MatchType::Newest, desc);
-            }
-#endif
-
             // Find the compiler closest to the compiler this was compiled with
             if (!compiler)
             {

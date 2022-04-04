@@ -809,7 +809,8 @@ static void maybeCopyLayoutInformationToParameters(
 
 IRFunc* specializeIRForEntryPoint(
     IRSpecContext*      context,
-    String const&       mangledName)
+    String const&       mangledName,
+    String const&       nameOverride)
 {
     // We start by looking up the IR symbol that
     // matches the mangled name given to the
@@ -847,6 +848,20 @@ IRFunc* specializeIRForEntryPoint(
     // like any other global value.
     //
     auto clonedVal = cloneGlobalValue(context, originalVal);
+
+    if (nameOverride.getLength())
+    {
+        if (auto entryPointDecor = clonedVal->findDecoration<IREntryPointDecoration>())
+        {
+            IRInst* operands[] = {
+                entryPointDecor->getProfileInst(),
+                context->builder->getStringValue(nameOverride.getUnownedSlice()),
+                entryPointDecor->getModuleName()};
+            context->builder->addDecoration(
+                clonedVal, IROp::kIROp_EntryPointDecoration, operands, 3);
+            entryPointDecor->removeAndDeallocate();
+        }
+    }
 
     // In the case where the user is requesting a specialization
     // of a generic entry point, we have a bit of a problem.
@@ -1279,24 +1294,24 @@ void insertGlobalValueSymbols(
 void initializeSharedSpecContext(
     IRSharedSpecContext*    sharedContext,
     Session*                session,
-    IRModule*               module,
+    IRModule*               inModule,
     CodeGenTarget           target,
     TargetRequest*          targetReq)
 {
 
     SharedIRBuilder* sharedBuilder = &sharedContext->sharedBuilderStorage;
-    sharedBuilder->module = nullptr;
-    sharedBuilder->session = session;
 
     IRBuilder* builder = &sharedContext->builderStorage;
-    builder->sharedBuilder = sharedBuilder;
 
+    RefPtr<IRModule> module = inModule;
     if( !module )
     {
-        module = builder->createModule();
+        module = IRModule::create(session);
     }
 
-    sharedBuilder->module = module;
+    sharedBuilder->init(module);
+    builder->init(sharedBuilder);
+
     sharedContext->module = module;
     sharedContext->target = target;
     sharedContext->targetReq = targetReq;
@@ -1399,7 +1414,7 @@ LinkedIR linkIR(
         {
             findGlobalHashedStringLiterals(irModule, pool);
         }
-        addGlobalHashedStringLiterals(pool, *builder.sharedBuilder);
+        addGlobalHashedStringLiterals(pool, *builder.getSharedBuilder());
     }
 
     // Set up shared and builder insert point
@@ -1425,7 +1440,8 @@ LinkedIR linkIR(
     for (auto entryPointIndex : entryPointIndices)
     {
         auto entryPointMangledName = program->getEntryPointMangledName(entryPointIndex);
-        irEntryPoints.add(specializeIRForEntryPoint(context, entryPointMangledName));
+        auto nameOverride = program->getEntryPointNameOverride(entryPointIndex);
+        irEntryPoints.add(specializeIRForEntryPoint(context, entryPointMangledName, nameOverride));
     }
 
     // Layout information for global shader parameters is also required,

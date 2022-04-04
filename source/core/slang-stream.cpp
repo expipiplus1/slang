@@ -3,39 +3,60 @@
 #include <share.h>
 #endif
 #include "slang-io.h"
+#include "slang-process.h"
 
 namespace Slang
 {
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FileStream !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-FileStream::FileStream(const String& fileName, FileMode fileMode)
+SlangResult Stream::readExactly(void* buffer, size_t length)
+{
+    size_t readBytes;
+    SLANG_RETURN_ON_FAIL(read(buffer, length, readBytes));
+    return (readBytes == length) ? SLANG_OK : SLANG_FAIL;
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FileStream !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+FileStream::FileStream() :
+    m_handle(nullptr),
+    m_fileAccess(FileAccess::None),
+    m_endReached(false)
+{
+}
+
+SlangResult FileStream::init(const String& fileName, FileMode fileMode)
 {
     const FileAccess access = (fileMode == FileMode::Open) ? FileAccess::Read : FileAccess::Write;
-    _init(fileName, fileMode, access, FileShare::None);
+    return _init(fileName, fileMode, access, FileShare::None);
 }
 
-FileStream::FileStream(const String& fileName, FileMode fileMode, FileAccess access, FileShare share)
+SlangResult FileStream::init(const String& fileName, FileMode fileMode, FileAccess access, FileShare share)
 {
-    _init(fileName, fileMode, access, share);
+    return _init(fileName, fileMode, access, share);
 }
 
-void FileStream::_init(const String& fileName, FileMode fileMode, FileAccess access, FileShare share)
+SlangResult FileStream::_init(const String& fileName, FileMode fileMode, FileAccess access, FileShare share)
 {
+    // Make sure it's closed to start with
+    close();
+
     if (access == FileAccess::None)
     {
-        throw ArgumentException("FileAccess::None not valid to create a FileStream.");
+        SLANG_ASSERT(!"FileAccess::None not valid to create a FileStream.");
+        return SLANG_E_INVALID_ARG;
     }
-
-    // Default to no access, until stream is fully constructed
-    m_fileAccess = FileAccess::None;
 
     const char* mode = "rt";
     switch (fileMode)
     {
     case FileMode::Create:
         if (access == FileAccess::Read)
-            throw ArgumentException("Read-only access is incompatible with Create mode.");
+        {
+            SLANG_ASSERT(!"Read-only access is incompatible with Create mode.");
+            return SLANG_E_INVALID_ARG;
+        }
         else if (access == FileAccess::ReadWrite)
         {
             mode = "w+b";
@@ -62,10 +83,13 @@ void FileStream::_init(const String& fileName, FileMode fileMode, FileAccess acc
     case FileMode::CreateNew:
         if (File::exists(fileName))
         {
-            throw IOException("Failed opening '" + fileName + "', file already exists.");
+            return SLANG_E_CANNOT_OPEN;
         }
         if (access == FileAccess::Read)
-            throw ArgumentException("Read-only access is incompatible with Create mode.");
+        {
+            SLANG_ASSERT(!"Read-only access is incompatible with Create mode.");
+            return SLANG_E_INVALID_ARG;
+        }
         else if (access == FileAccess::ReadWrite)
         {
             mode = "w+b";
@@ -77,7 +101,10 @@ void FileStream::_init(const String& fileName, FileMode fileMode, FileAccess acc
         break;
     case FileMode::Append:
         if (access == FileAccess::Read)
-            throw ArgumentException("Read-only access is incompatible with Append mode.");
+        {
+            SLANG_ASSERT(!"Read-only access is incompatible with Append mode.");
+            return SLANG_E_INVALID_ARG;
+        }
         else if (access == FileAccess::ReadWrite)
         {
             mode = "a+b";
@@ -122,8 +149,8 @@ void FileStream::_init(const String& fileName, FileMode fileMode, FileAccess acc
         shFlag = _SH_DENYNO;
         break;
     default:
-        throw ArgumentException("Invalid file share mode.");
-        break;
+        SLANG_ASSERT(!"Invalid file share mode.");
+        return SLANG_FAIL;
     }
     if (share == FileShare::None)
 #pragma warning(suppress:4996)
@@ -135,11 +162,12 @@ void FileStream::_init(const String& fileName, FileMode fileMode, FileAccess acc
 #endif
     if (!m_handle)
     {
-        throw IOException("Cannot open file '" + fileName + "'");
+        return SLANG_E_CANNOT_OPEN;
     }
 
     // Just set the access specified
     m_fileAccess = access;
+    return SLANG_OK;
 }
 
 FileStream::~FileStream()
@@ -162,7 +190,7 @@ Int64 FileStream::getPosition()
 #endif
 }
 
-void FileStream::seek(SeekOrigin seekOrigin, Int64 offset)
+SlangResult FileStream::seek(SeekOrigin seekOrigin, Int64 offset)
 {
     int fseekOrigin;
     switch (seekOrigin)
@@ -177,8 +205,8 @@ void FileStream::seek(SeekOrigin seekOrigin, Int64 offset)
         fseekOrigin = SEEK_CUR;
         break;
     default:
-        throw NotSupportedException("Unsupported seek origin.");
-        break;
+        SLANG_ASSERT(!"Unsupported seek origin.");
+        return SLANG_FAIL;
     }
 
     // If endReached is intended to be like feof - then doing a seek will reset it
@@ -190,34 +218,47 @@ void FileStream::seek(SeekOrigin seekOrigin, Int64 offset)
     int rs = fseek(m_handle, (long int)offset, fseekOrigin);
 #endif
 
-    if (rs != 0)
-    {
-        throw IOException("FileStream seek failed.");
-    }
+    // If rs != 0 then the the seek failed
+    SLANG_ASSERT(rs == 0);
+
+    return (rs == 0) ? SLANG_OK : SLANG_FAIL;
 }
 
-size_t FileStream::read(void* buffer, size_t length)
+SlangResult FileStream::read(void* buffer, size_t length, size_t& outBytesRead)
 {
-    auto bytes = fread_s(buffer, length, 1, length, m_handle);
-    if (bytes == 0 && length > 0)
+    auto bytesRead = fread_s(buffer, length, 1, length, m_handle);
+
+    outBytesRead = bytesRead;
+    if (bytesRead == 0 && length > 0)
     {
-        if (!feof(m_handle))
-            throw IOException("FileStream read failed.");
-        else if (m_endReached)
-            throw EndOfStreamException("End of file is reached.");
-        m_endReached = true;
+        // If we have reached the end, then reading nothing is ok.
+        if (!m_endReached)
+        {
+            // If we are not at the end of the file we should be able to read some bytes
+            if (!feof(m_handle))
+            {
+                return SLANG_FAIL;
+            }
+            m_endReached = true;
+        }
     }
-    return bytes;
+    return SLANG_OK;
 }
 
-size_t FileStream::write(const void* buffer, size_t length)
+SlangResult FileStream::write(const void* buffer, size_t length)
 {
-    auto bytes = fwrite(buffer, 1, length, m_handle);
-    if (bytes < length)
+    auto bytesWritten = fwrite(buffer, 1, length, m_handle);
+    return (bytesWritten == length) ? SLANG_OK : SLANG_FAIL;
+}
+
+SlangResult FileStream::flush()
+{
+    if (m_handle && canWrite())
     {
-        throw IOException("FileStream write failed.");
+        fflush(m_handle);
+        return SLANG_OK;
     }
-    return bytes;
+    return SLANG_E_NOT_AVAILABLE;
 }
 
 bool FileStream::canRead()
@@ -235,7 +276,7 @@ void FileStream::close()
     if (m_handle)
     {
         fclose(m_handle);
-        m_handle = 0;
+        m_handle = nullptr;
 
         // If closed, can neither read or write
         m_fileAccess = FileAccess::None;
@@ -249,7 +290,7 @@ bool FileStream::isEnd()
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!! MemoryStreamBase !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-void MemoryStreamBase::seek(SeekOrigin origin, Int64 offset)
+SlangResult MemoryStreamBase::seek(SeekOrigin origin, Int64 offset)
 {
     Int64 pos = 0;
     switch (origin)
@@ -264,8 +305,8 @@ void MemoryStreamBase::seek(SeekOrigin origin, Int64 offset)
             pos = Int64(m_position) + offset;
             break;
         default:
-            throw NotSupportedException("Unsupported seek origin.");
-            break;
+            SLANG_ASSERT(!"Unsupported seek origin.");
+            return SLANG_E_NOT_IMPLEMENTED;
     }
 
     m_atEnd = false;
@@ -275,36 +316,43 @@ void MemoryStreamBase::seek(SeekOrigin origin, Int64 offset)
     pos = (pos > Int64(m_contentsSize)) ? Int64(m_contentsSize) : pos;
 
     m_position = ptrdiff_t(pos);
+    return SLANG_OK;
 }
 
-size_t MemoryStreamBase::read(void* buffer, size_t length)
+SlangResult MemoryStreamBase::read(void* buffer, size_t length, size_t& outReadBytes)
 {
+    outReadBytes = 0;
     if (!canRead())
     {
-        throw IOException("Cannot read this stream.");
+        SLANG_ASSERT(!"Cannot read this stream.");
+        return SLANG_FAIL;
     }
 
     const size_t maxRead = size_t(m_contentsSize - m_position);
     if (maxRead == 0 && length > 0)
     {
-        m_atEnd = true;
-        throw EndOfStreamException("End of file is reached.");
+        // At end of stream
+        m_atEnd = true;        
+        return SLANG_OK;
     }
 
     length = length > maxRead ? maxRead : length;
 
     ::memcpy(buffer, m_contents + m_position, length);
     m_position += ptrdiff_t(length);
-    return maxRead;
+    outReadBytes = length;
+
+    return SLANG_OK;
 }
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!! OwnedMemoryStream !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-size_t OwnedMemoryStream::write(const void * buffer, size_t length)
+SlangResult OwnedMemoryStream::write(const void * buffer, size_t length)
 {
     if (!canWrite())
     {
-        throw IOException("Cannot write this stream.");
+        SLANG_ASSERT(!"Cannot write this stream.");
+        return SLANG_FAIL;
     }
 
     if (m_position == m_ownedContents.getCount())
@@ -322,7 +370,343 @@ size_t OwnedMemoryStream::write(const void * buffer, size_t length)
     m_atEnd = false;
 
     m_position += ptrdiff_t(length);
-    return length;
+    return SLANG_OK;
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!! BufferedReadStream !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+void BufferedReadStream::consume(Index byteCount)
+{
+    SLANG_ASSERT(Index(getCount()) >= byteCount && byteCount >= 0);
+    m_startIndex += byteCount;
+    if (getCount() == 0)
+    {
+        _resetBuffer();
+    }
+}
+
+Int64 BufferedReadStream::getPosition()
+{
+    return m_stream ? (m_stream->getPosition() - getCount()) : 0;
+}
+
+SlangResult BufferedReadStream::seek(SeekOrigin origin, Int64 offset)
+{
+    if (!m_stream)
+    {
+        return SLANG_FAIL;
+    }
+    // As it currently stands the data behind m_startIndex is the previous data.
+    // So we could seek backwards up to -m_startIndex.
+    // We don't worry about this here, for simplicity sake.
+
+    if (origin == SeekOrigin::End || origin == SeekOrigin::Start || offset < 0 || offset >= Int64(getCount()))
+    {
+        // Empty the buffer
+        _resetBuffer();
+        // Seek on underlying stream
+        return m_stream->seek(origin, offset);
+    }
+
+    // We can just seek on the buffered data
+    consume(Index(offset));
+    return SLANG_OK;
+}
+
+SlangResult BufferedReadStream::read(void* inBuffer, size_t length, size_t& outReadBytes)
+{    
+    // If the buffer has no data and the read size is larger than the default read size - may as well just read directly into the output buffer
+    if (getCount() == 0 && length > m_defaultReadSize)
+    {
+        return m_stream->read(inBuffer, length, outReadBytes);
+    }
+
+    Byte* buffer = (Byte*)inBuffer;
+
+    size_t totalReadBytes = 0;
+    outReadBytes = 0;
+
+    // Do a read to fill the buffer.
+    SLANG_RETURN_ON_FAIL(update());
+
+    while (length > 0)
+    {
+        const size_t bufferCount = size_t(getCount());
+
+        if (bufferCount)
+        {
+            const size_t readCount = (bufferCount < length) ? bufferCount : length;
+
+            ::memcpy(buffer, getBuffer(), readCount);
+
+            consume(Index(readCount));
+            buffer += readCount;
+            length -= readCount;
+
+            totalReadBytes += readCount;
+        }
+        else
+        {
+            if (m_stream == nullptr)
+            {
+                break;
+            }
+
+            // Read from underlying buffer
+            size_t readBytes;
+            SlangResult res = m_stream->read(buffer, length, readBytes);
+
+            outReadBytes = totalReadBytes + readBytes;
+            return res;
+        }
+    }
+
+    outReadBytes = totalReadBytes;
+    return SLANG_OK;
+}
+
+SlangResult BufferedReadStream::write(const void* buffer, size_t length)
+{
+    SLANG_UNUSED(buffer);
+    SLANG_UNUSED(length);
+
+    return SLANG_E_NOT_AVAILABLE;
+}
+
+bool BufferedReadStream::canRead()
+{
+    return getCount() > 0 || (m_stream && m_stream->canRead());
+}
+
+bool BufferedReadStream::canWrite()
+{
+    return false;
+}
+
+void BufferedReadStream::close()
+{
+    if (m_stream)
+    {
+        m_stream->close();
+        m_stream.setNull();
+    }
+}
+
+bool BufferedReadStream::isEnd()
+{
+    return getCount() == 0 && (m_stream == nullptr || m_stream->isEnd());
+}
+
+SlangResult BufferedReadStream::flush()
+{
+    return SLANG_E_NOT_AVAILABLE;
+}
+
+SlangResult BufferedReadStream::update()
+{
+    if (m_stream == nullptr)
+    {
+        // Should this return an error?
+        return SLANG_OK;
+    }
+
+    // Repeat until we have enough space
+    for (;;)
+    {
+        // How much buffer space do we have. We need at least m_defaultReadSize
+        const size_t remainingCount = size_t(m_buffer.getCapacity() - m_buffer.getCount());
+
+        if (remainingCount >= m_defaultReadSize)
+        {
+            break;
+        }
+
+        // If there is anything in the buffer shift it all down
+        if (m_startIndex > 0)
+        {
+            Byte* buffer = m_buffer.getBuffer();
+            const Index count = getCount();
+            if (count > 0)
+            {
+                ::memmove(buffer, buffer + m_startIndex, count);
+            }
+
+            m_buffer.setCount(count);
+            m_startIndex = 0;
+        }
+        else
+        {
+            // Make sure we have the space 
+            const Index prevCount = m_buffer.getCount();
+            m_buffer.setCount(prevCount + m_defaultReadSize);
+            m_buffer.setCount(prevCount);
+        }
+    }
+    
+    {
+        const Index prevCount = m_buffer.getCount();
+        m_buffer.setCount(prevCount + m_defaultReadSize);
+
+        size_t readBytes = 0;
+
+        const SlangResult res = m_stream->read(m_buffer.getBuffer() + prevCount, m_defaultReadSize, readBytes);
+
+        m_buffer.setCount(prevCount + Index(readBytes));
+
+        return res;
+    }
+}
+
+SlangResult BufferedReadStream::readUntilContains(size_t size)
+{
+    while (true)
+    {
+        if (size_t(getCount()) >= size)
+        {
+            return SLANG_OK;
+        }
+
+        const size_t preCount = size_t(getCount());
+
+        // Update buffer
+        SLANG_RETURN_ON_FAIL(update());
+
+        // If nothing was read yield
+        if (preCount == getCount())
+        {
+            Process::sleepCurrentThread(0);
+        }
+    }
+}
+
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!! StreamUtil !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+/* static */SlangResult StreamUtil::readAll(Stream* stream, size_t readSize, List<Byte>& ioBytes)
+{
+    while (!stream->isEnd())
+    {
+        SLANG_RETURN_ON_FAIL(read(stream, readSize, ioBytes));
+    }
+    
+    return SLANG_OK;
+}
+
+/* static */SlangResult StreamUtil::read(Stream* stream, size_t readSize, List<Byte>& ioBytes)
+{
+    readSize = (readSize <= 0) ? 1024 : readSize;
+
+    while (true)
+    {
+        const Index prevCount = ioBytes.getCount();
+        ioBytes.setCount(prevCount + readSize);
+
+        size_t readBytesCount;
+        SLANG_RETURN_ON_FAIL(stream->read(ioBytes.getBuffer() + prevCount, readSize, readBytesCount));
+        ioBytes.setCount(prevCount + Index(readBytesCount));
+
+        if (readBytesCount == 0)
+        {
+            return SLANG_OK;
+        }
+    }
+}
+
+/* static */SlangResult StreamUtil::discard(Stream* stream)
+{
+    Byte buf[1024];
+    const Index bufSize = SLANG_COUNT_OF(buf);
+
+    while (true)
+    {
+        size_t readBytesCount;
+        SLANG_RETURN_ON_FAIL(stream->read(buf, bufSize, readBytesCount));
+        
+        if (readBytesCount == 0)
+        {
+            return SLANG_OK;
+        }
+    }
+}
+
+/* static */SlangResult StreamUtil::discardAll(Stream* stream)
+{
+    while (!stream->isEnd())
+    {
+        SLANG_RETURN_ON_FAIL(discard(stream));
+    }
+    return SLANG_OK;
+}
+
+
+/* static */SlangResult StreamUtil::readOrDiscard(Stream* stream, size_t readSize, List<Byte>* ioBytes)
+{
+    if (ioBytes)
+    {
+        return read(stream, readSize, *ioBytes);
+    }
+    else
+    {
+        return discard(stream);
+    }
+}
+
+/* static */SlangResult StreamUtil::readOrDiscardAll(Stream* stream, size_t readSize, List<Byte>* ioBytes)
+{
+    if (ioBytes)
+    {
+        return readAll(stream, readSize, *ioBytes);
+    }
+    else
+    {
+        return discardAll(stream);
+    }
+}
+
+static FILE* _getFileFromStdStreamType(StdStreamType stdStream)
+{
+    switch (stdStream)
+    {
+        case StdStreamType::ErrorOut: return stderr;
+        case StdStreamType::Out:   return stdout;
+        case StdStreamType::In:    return stdin;
+        default: return nullptr;
+    }
+}
+
+static int _getBufferOptions(StreamBufferStyle style)
+{
+    switch (style)
+    {
+        case StreamBufferStyle::None:       return _IONBF;
+        case StreamBufferStyle::Line:       return _IOLBF;
+        default:
+        case StreamBufferStyle::Full:       return _IOFBF;
+    }
+}
+
+/* static */SlangResult StreamUtil::setStreamBufferStyle(StdStreamType stdStream, StreamBufferStyle style)
+{
+    FILE* file = _getFileFromStdStreamType(stdStream);
+
+    if (file)
+    {
+        auto options = _getBufferOptions(style);
+
+        // https://www.cplusplus.com/reference/cstdio/setvbuf/
+
+        // NOTE! We don't set a buffer here (we pass in nullptr).
+        // Passing nullptr is fine for 'no buffering' and sets a 'dynamic buffer' for others.
+        // But it's not clear the behavior is around the buffer size. It seems the size is a
+        // 'suggestion' so it will set the default but the documentation is unclear.
+        if (setvbuf(file, nullptr, options, 0) == 0)
+        {
+            return SLANG_OK;
+        }
+        return SLANG_FAIL;
+    }
+
+    return SLANG_E_NOT_AVAILABLE;
 }
 
 } // namespace Slang

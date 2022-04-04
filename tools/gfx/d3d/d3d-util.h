@@ -50,6 +50,8 @@ class D3DUtil
 
     static D3D12_PRIMITIVE_TOPOLOGY_TYPE getPrimitiveType(PrimitiveType type);
 
+    static D3D12_PRIMITIVE_TOPOLOGY_TYPE getPrimitiveType(PrimitiveTopology topology);
+
     static D3D12_COMPARISON_FUNC getComparisonFunc(ComparisonFunc func);
 
     static D3D12_DEPTH_STENCILOP_DESC translateStencilOpDesc(DepthStencilOpDesc desc);
@@ -62,8 +64,6 @@ class D3DUtil
 
         /// Given a slang pixel format returns the equivalent DXGI_ pixel format. If the format is not known, will return DXGI_FORMAT_UNKNOWN
     static DXGI_FORMAT getMapFormat(Format format);
-
-    static D3D12_RESOURCE_STATES translateResourceState(ResourceState state);
 
         /// Given the usage, flags, and format will return the most suitable format. Will return DXGI_UNKNOWN if combination is not possible
     static DXGI_FORMAT calcFormat(UsageType usage, DXGI_FORMAT format);
@@ -94,6 +94,32 @@ class D3DUtil
 
     static bool isUAVBinding(slang::BindingType bindingType);
 
+    static int getShaderModelFromProfileName(const char* profile);
+
+    static uint32_t getPlaneSlice(DXGI_FORMAT format, TextureAspect aspect);
+
+    static uint32_t getPlaneSliceCount(DXGI_FORMAT format);
+
+    static D3D12_INPUT_CLASSIFICATION getInputSlotClass(InputSlotClass slotClass);
+
+    static D3D12_FILL_MODE getFillMode(FillMode mode);
+
+    static D3D12_CULL_MODE getCullMode(CullMode mode);
+
+    static D3D12_BLEND_OP getBlendOp(BlendOp op);
+
+    static D3D12_BLEND getBlendFactor(BlendFactor factor);
+
+    static uint32_t getSubresourceIndex(
+        uint32_t mipIndex,
+        uint32_t arrayIndex,
+        uint32_t planeIndex,
+        uint32_t mipLevelCount,
+        uint32_t arraySize);
+
+    static uint32_t getSubresourceMipLevel(uint32_t subresourceIndex, uint32_t mipLevelCount);
+
+    static D3D12_RESOURCE_STATES getResourceState(ResourceState state);
 };
 
 #if SLANG_GFX_HAS_DXR_SUPPORT

@@ -64,18 +64,15 @@ SlangResult trySaveStdLibToCache(
         Slang::ComPtr<ISlangBlob> stdLibBlobPtr;
         SLANG_RETURN_ON_FAIL(
             globalSession->saveStdLib(SLANG_ARCHIVE_TYPE_RIFF_LZ4, stdLibBlobPtr.writeRef()));
-        try
-        {
-            Slang::FileStream fileStream(cacheFilename, Slang::FileMode::Create);
-            fileStream.write(&dllTimestamp, sizeof(dllTimestamp));
-            fileStream.write(stdLibBlobPtr->getBufferPointer(), stdLibBlobPtr->getBufferSize());
-            return SLANG_OK;
-        }
-        catch (...)
-        {
-        }
+
+        Slang::FileStream fileStream;
+        SLANG_RETURN_ON_FAIL(fileStream.init(cacheFilename, Slang::FileMode::Create));
+
+        SLANG_RETURN_ON_FAIL(fileStream.write(&dllTimestamp, sizeof(dllTimestamp)));
+        SLANG_RETURN_ON_FAIL(fileStream.write(stdLibBlobPtr->getBufferPointer(), stdLibBlobPtr->getBufferSize()))
     }
-    return SLANG_FAIL;
+
+    return SLANG_OK;
 }
 
 SLANG_API SlangResult slang_createGlobalSession(
@@ -270,6 +267,14 @@ SLANG_API void spSetLineDirectiveMode(
 {
     SLANG_ASSERT(request);
     request->setLineDirectiveMode(mode);
+}
+
+
+SLANG_API void spSetTargetForceGLSLScalarBufferLayout(
+    slang::ICompileRequest* request, int targetIndex, bool forceScalarLayout)
+{
+    SLANG_ASSERT(request);
+    request->setTargetForceGLSLScalarBufferLayout(targetIndex, forceScalarLayout);
 }
 
 SLANG_API void spSetTargetLineDirectiveMode(
@@ -780,10 +785,13 @@ SLANG_API SlangResult spExtractRepro(SlangSession* session, const void* reproDat
     using namespace Slang;
     SLANG_UNUSED(session);
 
+    DiagnosticSink sink;
+    sink.init(nullptr, nullptr);
+
     List<uint8_t> buffer;
     {
         MemoryStreamBase memoryStream(FileAccess::Read, reproData, reproDataSize);
-        SLANG_RETURN_ON_FAIL(ReproUtil::loadState(&memoryStream, buffer));
+        SLANG_RETURN_ON_FAIL(ReproUtil::loadState(&memoryStream, &sink, buffer));
     }
 
     MemoryOffsetBase base;
@@ -804,10 +812,13 @@ SLANG_API SlangResult spLoadReproAsFileSystem(
 
     SLANG_UNUSED(session);
 
+    DiagnosticSink sink;
+    sink.init(nullptr, nullptr);
+
     MemoryStreamBase stream(FileAccess::Read, reproData, reproDataSize);
 
     List<uint8_t> buffer;
-    SLANG_RETURN_ON_FAIL(ReproUtil::loadState(&stream, buffer));
+    SLANG_RETURN_ON_FAIL(ReproUtil::loadState(&stream, &sink, buffer));
 
     auto requestState = ReproUtil::getRequest(buffer);
     MemoryOffsetBase base;
