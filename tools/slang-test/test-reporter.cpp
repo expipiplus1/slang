@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <mutex>
+
 using namespace Slang;
 
 /* static */TestReporter* TestReporter::s_reporter = nullptr;
@@ -82,9 +84,10 @@ TestReporter::TestReporter() :
     m_isVerbose = false;
 }
 
-Result TestReporter::init(TestOutputMode outputMode)
+Result TestReporter::init(TestOutputMode outputMode, bool isSubReporter)
 {
     m_outputMode = outputMode;
+    m_isSubReporter = isSubReporter;
     return SLANG_OK;
 }
 
@@ -189,6 +192,15 @@ TestResult TestReporter::addTest(const String& testName, bool isPass)
     const TestResult res = isPass ? TestResult::Pass : TestResult::Fail;
     addTest(testName, res);
     return res;
+}
+
+void TestReporter::consolidateWith(TestReporter* other)
+{
+    m_testInfos.addRange(other->m_testInfos);
+    m_failedTestCount += other->m_failedTestCount;
+    m_ignoredTestCount += other->m_ignoredTestCount;
+    m_passedTestCount += other->m_passedTestCount;
+    m_totalTestCount += other->m_totalTestCount;
 }
 
 void TestReporter::dumpOutputDifference(const String& expectedOutput, const String& actualOutput)
@@ -338,6 +350,7 @@ void TestReporter::_addResult(const TestInfo& info)
             _appendTime(info.executionTime, buffer);
         }
         printf("%s test: '%S' %s\n", resultString, info.name.toWString().begin(), buffer.getBuffer());
+        fflush(stdout);
     };
 
     switch (m_outputMode)
@@ -438,7 +451,7 @@ void TestReporter::_addResult(const TestInfo& info)
             // https://www.appveyor.com/docs/build-worker-api/#add-tests
 
             CommandLine cmdLine;
-            cmdLine.setExecutableFilename("appveyor");
+            cmdLine.setExecutableLocation(ExecutableLocation("appveyor"));
             cmdLine.addArg("AddTest");
             cmdLine.addArg(info.name);
             cmdLine.addArg("-FileName");
@@ -492,13 +505,15 @@ void TestReporter::addTest(const String& testName, TestResult testResult)
 
 void TestReporter::message(TestMessageType type, const String& message)
 {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
     if (type == TestMessageType::Info)
     {
         if (m_isVerbose && canWriteStdError())
         {
             fputs(message.getBuffer(), stderr);
         }
-
+        fflush(stderr);
         // Just dump out if can dump out
         return;
     }
@@ -515,6 +530,7 @@ void TestReporter::message(TestMessageType type, const String& message)
         {
             fputs(message.getBuffer(), stderr);
         }
+        fflush(stderr);
     }
 
     if (m_currentMessage.getLength() > 0)
@@ -664,9 +680,12 @@ void TestReporter::startSuite(const String& name)
     {
         case TestOutputMode::TeamCity:
         {
-            StringBuilder escapedSuiteName;
-            _appendEncodedTeamCityString(name.getUnownedSlice(), escapedSuiteName);
-            printf("##teamcity[testSuiteStarted name='%s']\n", escapedSuiteName.begin());
+            if (!m_isSubReporter)
+            {
+                StringBuilder escapedSuiteName;
+                _appendEncodedTeamCityString(name.getUnownedSlice(), escapedSuiteName);
+                printf("##teamcity[testSuiteStarted name='%s']\n", escapedSuiteName.begin());
+            }
             break;
         }
         default: break;
@@ -681,10 +700,13 @@ void TestReporter::endSuite()
     {
         case TestOutputMode::TeamCity:
         {
-            const String& name = m_suiteStack.getLast();
-            StringBuilder escapedSuiteName;
-            _appendEncodedTeamCityString(name.getUnownedSlice(), escapedSuiteName);
-            printf("##teamcity[testSuiteFinished name='%s']\n", escapedSuiteName.begin());
+            if (!m_isSubReporter)
+            {
+                const String& name = m_suiteStack.getLast();
+                StringBuilder escapedSuiteName;
+                _appendEncodedTeamCityString(name.getUnownedSlice(), escapedSuiteName);
+                printf("##teamcity[testSuiteFinished name='%s']\n", escapedSuiteName.begin());
+            }
             break;
         }
         default: break;

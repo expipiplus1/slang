@@ -431,6 +431,7 @@ public:
 
         struct BindingRangeInfo
         {
+            VarDeclBase*        leafVariable;
             TypeLayout*         leafTypeLayout;
             SlangBindingType    bindingType;
             LayoutSize          count;
@@ -761,6 +762,9 @@ public:
     // The name of the entry point. Always available even if entryPoint is nullptr (for example when it came from a library)
     Name* name = nullptr;
 
+    // The overrided name of the entry point.
+    String nameOverride;
+
     // Layout for any results of the entry point
     RefPtr<VarLayout> resultLayout;
 
@@ -991,14 +995,14 @@ struct LayoutRulesImpl
 struct LayoutRulesFamilyImpl
 {
     virtual LayoutRulesImpl* getAnyValueRules()             = 0;
-    virtual LayoutRulesImpl* getConstantBufferRules()       = 0;
+    virtual LayoutRulesImpl* getConstantBufferRules(TargetRequest* request) = 0;
     virtual LayoutRulesImpl* getPushConstantBufferRules()   = 0;
     virtual LayoutRulesImpl* getTextureBufferRules()        = 0;
     virtual LayoutRulesImpl* getVaryingInputRules()         = 0;
     virtual LayoutRulesImpl* getVaryingOutputRules()        = 0;
     virtual LayoutRulesImpl* getSpecializationConstantRules()= 0;
-    virtual LayoutRulesImpl* getShaderStorageBufferRules()  = 0;
-    virtual LayoutRulesImpl* getParameterBlockRules()       = 0;
+    virtual LayoutRulesImpl* getShaderStorageBufferRules(TargetRequest* request)  = 0;
+    virtual LayoutRulesImpl* getParameterBlockRules(TargetRequest* request) = 0;
 
     virtual LayoutRulesImpl* getRayPayloadParameterRules()  = 0;
     virtual LayoutRulesImpl* getCallablePayloadParameterRules()  = 0;
@@ -1006,7 +1010,7 @@ struct LayoutRulesFamilyImpl
 
     virtual LayoutRulesImpl* getShaderRecordConstantBufferRules() = 0;
 
-    virtual LayoutRulesImpl* getStructuredBufferRules() = 0;
+    virtual LayoutRulesImpl* getStructuredBufferRules(TargetRequest* request) = 0;
 };
 
 struct TypeLayoutContext

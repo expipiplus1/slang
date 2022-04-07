@@ -1,0 +1,34 @@
+name: Linux Build CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        configuration: ['debug', 'release']
+        compiler: ['gcc', 'clang']
+        platform: ['x64'] 
+    steps:
+    - uses: actions/checkout@v2.3.4
+      with:
+        submodules: 'true'
+        fetch-depth: '0'
+    - name: build
+      run: 
+        CC=${{matrix.compiler}}
+        CONFIGURATION=${{matrix.configuration}}
+        ARCH=${{matrix.platform}}
+        source ./github_build.sh
+    - name: test
+      run: 
+        CONFIGURATION=${{matrix.configuration}}
+        CC=${{matrix.compiler}}
+        ARCH=${{matrix.platform}}
+        source ./github_test.sh

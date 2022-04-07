@@ -635,8 +635,7 @@ struct SpecializationContext
         // generate along the way.
         //
         SharedIRBuilder* sharedBuilder = &sharedBuilderStorage;
-        sharedBuilder->module = module;
-        sharedBuilder->session = module->session;
+        sharedBuilder->init(module);
 
         // The unspecialized IR we receive as input will have
         // `IRBindGlobalGenericParam` instructions that associate
@@ -785,8 +784,7 @@ struct SpecializationContext
     {
         auto oldSpecialize = cast<IRSpecialize>(oldSpecializedCallee);
         SLANG_ASSERT(oldSpecialize->getArgCount() == 1);
-        IRBuilder builder;
-        builder.sharedBuilder = &sharedBuilderStorage;
+        IRBuilder builder(sharedBuilderStorage);
         builder.setInsertBefore(oldSpecializedCallee);
         auto calleeType = builder.getFuncType(1, &newContainerType, newElementType);
         auto newSpecialize = builder.emitSpecializeInst(
@@ -816,8 +814,7 @@ struct SpecializationContext
                     auto resultType = inst->getFullType();
                     auto elementType = sbType->getElementType();
 
-                    IRBuilder builder;
-                    builder.sharedBuilder = &sharedBuilderStorage;
+                    IRBuilder builder(sharedBuilderStorage);
                     builder.setInsertBefore(inst);
 
                     List<IRInst*> args;
@@ -1057,9 +1054,8 @@ struct SpecializationContext
         // Now that we've built up our argument list, it is simple enough
         // to construct a new `call` instruction.
         //
-        IRBuilder builderStorage;
+        IRBuilder builderStorage(sharedBuilderStorage);
         auto builder = &builderStorage;
-        builder->sharedBuilder = &sharedBuilderStorage;
 
         builder->setInsertBefore(inst);
         auto newCall = builder->emitCallInst(
@@ -1102,6 +1098,47 @@ struct SpecializationContext
         return false;
     }
 
+    // Test if a type is compile time constant.
+    static bool isCompileTimeConstantType(IRInst* inst)
+    {
+        // TODO: We probably need/want a more robust test here.
+        // For now we are just look into the dependency graph of the inst and
+        // see if there are any opcodes that are causing problems.
+        List<IRInst*> localWorkList;
+        HashSet<IRInst*> processedInsts;
+        localWorkList.add(inst);
+        processedInsts.Add(inst);
+
+        while (localWorkList.getCount() != 0)
+        {
+            IRInst* curInst = localWorkList.getLast();
+
+            localWorkList.removeLast();
+            processedInsts.Remove(curInst);
+
+            switch (curInst->getOp())
+            {
+            case kIROp_Load:
+            case kIROp_Call:
+            case kIROp_ExtractExistentialType:
+            case kIROp_CreateExistentialObject:
+                return false;
+            default:
+                break;
+            }
+
+            for (UInt i = 0; i < curInst->getOperandCount(); ++i)
+            {
+                auto operand = curInst->getOperand(i);
+                if (processedInsts.Add(operand))
+                {
+                    localWorkList.add(operand);
+                }
+            }
+        }
+        return true;
+    }
+
     // Similarly, we want to be able to test whether an instruction
     // used as an argument for an existential-type parameter is
     // suitable for use in specialization.
@@ -1127,18 +1164,7 @@ struct SpecializationContext
             auto concreteVal = makeExistential->getWrappedValue();
             auto concreteType = concreteVal->getDataType();
 
-            // TODO: We probably need/want a more robust test here.
-            // For now we are just listing the single opcode that is
-            // causing problems.
-            //
-            // TODO: eventually this check would become unnecessary because
-            // we can simply check if the `concreteType` is a compile-time
-            // constant value.
-            //
-            if(concreteType->getOp() == kIROp_ExtractExistentialType)
-                return false;
-
-            return true;
+            return isCompileTimeConstantType(concreteType);
         }
 
         // A `wrapExistential(v, T0,w0, T1, w1, ...)` instruction
@@ -1184,9 +1210,8 @@ struct SpecializationContext
         // We also need some IR building state, for any
         // new instructions we will emit.
         //
-        IRBuilder builderStorage;
+        IRBuilder builderStorage(sharedBuilderStorage);
         auto builder = &builderStorage;
-        builder->sharedBuilder = &sharedBuilderStorage;
 
         // We will start out by determining what the parameters
         // of the specialized function should be, based on
@@ -1325,7 +1350,7 @@ struct SpecializationContext
         //
         cloneInstDecorationsAndChildren(
             &cloneEnv,
-            builder->sharedBuilder,
+            builder->getSharedBuilder(),
             oldFunc,
             newFunc);
 
@@ -1498,8 +1523,7 @@ struct SpecializationContext
             //
             auto resultType = inst->getFullType();
 
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedBuilderStorage;
+            IRBuilder builder(sharedBuilderStorage);
             builder.setInsertBefore(inst);
 
             // We'd *like* to replace this instruction with
@@ -1596,8 +1620,7 @@ struct SpecializationContext
             //
             auto resultType = inst->getFullType();
 
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedBuilderStorage;
+            IRBuilder builder(sharedBuilderStorage);
             builder.setInsertBefore(inst);
 
             // We'd *like* to replace this instruction with
@@ -1682,8 +1705,7 @@ struct SpecializationContext
             //
             auto resultType = inst->getFullType();
 
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedBuilderStorage;
+            IRBuilder builder(sharedBuilderStorage);
             builder.setInsertBefore(inst);
 
             // We'd *like* to replace this instruction with
@@ -1768,8 +1790,7 @@ struct SpecializationContext
             auto val = wrapInst->getWrappedValue();
             auto resultType = inst->getFullType();
 
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedBuilderStorage;
+            IRBuilder builder(sharedBuilderStorage);
             builder.setInsertBefore(inst);
 
             auto elementType = cast<IRArrayTypeBase>(val->getDataType())->getElementType();
@@ -1810,8 +1831,7 @@ struct SpecializationContext
 
             auto resultType = inst->getFullType();
 
-            IRBuilder builder;
-            builder.sharedBuilder = &sharedBuilderStorage;
+            IRBuilder builder(sharedBuilderStorage);
             builder.setInsertBefore(inst);
 
             List<IRInst*> slotOperands;
@@ -1878,8 +1898,7 @@ struct SpecializationContext
         auto baseType = type->getBaseType();
         UInt slotOperandCount = type->getExistentialArgCount();
 
-        IRBuilder builder;
-        builder.sharedBuilder = &sharedBuilderStorage;
+        IRBuilder builder(sharedBuilderStorage);
         builder.setInsertBefore(type);
 
         if( auto baseInterfaceType = as<IRInterfaceType>(baseType) )
@@ -2123,13 +2142,9 @@ IRInst* specializeGenericImpl(
     // into the global scope, at the same location
     // as the original generic.
     //
-    SharedIRBuilder sharedBuilderStorage;
-    sharedBuilderStorage.module = module;
-    sharedBuilderStorage.session = module->getSession();
-
-    IRBuilder builderStorage;
+    SharedIRBuilder sharedBuilderStorage(module);
+    IRBuilder builderStorage(sharedBuilderStorage);
     IRBuilder* builder = &builderStorage;
-    builder->sharedBuilder = &sharedBuilderStorage;
     builder->setInsertBefore(genericVal);
 
     // Now we will run through the body of the generic and

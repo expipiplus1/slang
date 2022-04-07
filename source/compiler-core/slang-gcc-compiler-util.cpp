@@ -7,9 +7,36 @@
 
 #include "../core/slang-io.h"
 #include "../core/slang-shared-library.h"
+#include "../core/slang-char-util.h"
 
 namespace Slang
 {
+
+static Index _findVersionEnd(const UnownedStringSlice& in)
+{
+    Index numDots = 0;
+    const Index len = in.getLength();
+
+    for (Index i = 0; i < len; ++i)
+    {
+        const char c = in[i];
+        if (CharUtil::isDigit(c))
+        {
+            continue;
+        }
+        if (c == '.')
+        {
+            if (numDots >= 2)
+            {
+                return i;
+            }
+            numDots++;
+            continue;
+        }
+        return i;
+    }
+    return len;
+}
 
 /* static */SlangResult GCCDownstreamCompilerUtil::parseVersion(const UnownedStringSlice& text, const UnownedStringSlice& prefix, DownstreamCompiler::Desc& outDesc)
 {
@@ -18,52 +45,58 @@ namespace Slang
 
     for (auto line : lines)
     {
-        if (line.startsWith(prefix))
+        Index prefixIndex = line.indexOf(prefix);
+        if (prefixIndex < 0)
         {
-            const UnownedStringSlice remainingSlice = UnownedStringSlice(line.begin() + prefix.getLength(), line.end()).trim();
-            const Index versionEndIndex = remainingSlice.indexOf(' ');
-            if (versionEndIndex < 0)
-            {
-                return SLANG_FAIL;
-            }
-
-            const UnownedStringSlice versionSlice(remainingSlice.begin(), remainingSlice.begin() + versionEndIndex);
-
-            // Version is in format 0.0.0 
-            List<UnownedStringSlice> split;
-            StringUtil::split(versionSlice, '.', split);
-            List<Int> digits;
-
-            for (auto v : split)
-            {
-                Int version;
-                SLANG_RETURN_ON_FAIL(StringUtil::parseInt(v, version));
-                digits.add(version);
-            }
-
-            if (digits.getCount() < 2)
-            {
-                return SLANG_FAIL;
-            }
-
-            outDesc.majorVersion = digits[0];
-            outDesc.minorVersion = digits[1];
-            return SLANG_OK;
+            continue;
         }
+
+        const UnownedStringSlice remainingSlice = UnownedStringSlice(line.begin() + prefixIndex + prefix.getLength(), line.end()).trim();
+
+        const Index versionEndIndex = _findVersionEnd(remainingSlice);
+        if (versionEndIndex < 0)
+        {
+            return SLANG_FAIL;
+        }
+
+        const UnownedStringSlice versionSlice(remainingSlice.begin(), remainingSlice.begin() + versionEndIndex);
+
+        // Version is in format 0.0.0 
+        List<UnownedStringSlice> split;
+        StringUtil::split(versionSlice, '.', split);
+        List<Int> digits;
+
+        for (auto v : split)
+        {
+            Int version;
+            SLANG_RETURN_ON_FAIL(StringUtil::parseInt(v, version));
+            digits.add(version);
+        }
+
+        if (digits.getCount() < 2)
+        {
+            return SLANG_FAIL;
+        }
+
+        outDesc.majorVersion = digits[0];
+        outDesc.minorVersion = digits[1];
+        return SLANG_OK;
     }
 
     return SLANG_FAIL;
 }
 
-SlangResult GCCDownstreamCompilerUtil::calcVersion(const String& exeName, DownstreamCompiler::Desc& outDesc)
+SlangResult GCCDownstreamCompilerUtil::calcVersion(const ExecutableLocation& exe, DownstreamCompiler::Desc& outDesc)
 {
     CommandLine cmdLine;
-    cmdLine.setExecutableFilename(exeName);
+    cmdLine.setExecutableLocation(exe);
     cmdLine.addArg("-v");
 
     ExecuteResult exeRes;
     SLANG_RETURN_ON_FAIL(ProcessUtil::execute(cmdLine, exeRes));
 
+    // Note we now have builds that add other words in front of the version
+    // such as "Ubuntu clang version"
     const UnownedStringSlice prefixes[] =
     {
         UnownedStringSlice::fromLiteral("clang version"),
@@ -89,6 +122,7 @@ SlangResult GCCDownstreamCompilerUtil::calcVersion(const String& exeName, Downst
             return SLANG_OK;
         }
     }
+
     return SLANG_FAIL;
 }
 
@@ -171,7 +205,9 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
         #include "../slang.h"
         ^~~~~~~~~~~~
         compilation terminated.*/
-    
+
+    /* g++: error: unrecognized command line option ‘-std=c++14’ */
+
     outDiagnostic.stage = Diagnostic::Stage::Compile;
 
     List<UnownedStringSlice> split;
@@ -223,7 +259,9 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
 
         // Check for special handling for clang (Can be Clang or clang apparently)
         if (split0.startsWith(UnownedStringSlice::fromLiteral("clang")) ||
-            split0.startsWith(UnownedStringSlice::fromLiteral("Clang")) )
+            split0.startsWith(UnownedStringSlice::fromLiteral("Clang")) ||
+            split0 == UnownedStringSlice::fromLiteral("g++") ||
+            split0 == UnownedStringSlice::fromLiteral("gcc"))
         {
             // Extract the type
             SLANG_RETURN_ON_FAIL(_parseSeverity(split[1].trim(), outDiagnostic.severity));
@@ -377,15 +415,15 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
 
     switch (options.targetType)
     {
-        case SLANG_SHARED_LIBRARY:
+        case SLANG_SHADER_SHARED_LIBRARY:
         {
             outPath << SharedLibrary::calcPlatformPath(options.modulePath.getUnownedSlice());
             return SLANG_OK;
         }
-        case SLANG_EXECUTABLE:
+        case SLANG_HOST_EXECUTABLE:
         {
             outPath << options.modulePath;
-            outPath << ProcessUtil::getExecutableSuffix();
+            outPath << Process::getExecutableSuffix();
             return SLANG_OK;
         }
         case SLANG_OBJECT_CODE:
@@ -509,7 +547,7 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
 
     switch (options.targetType)
     {
-        case SLANG_SHARED_LIBRARY:
+        case SLANG_SHADER_SHARED_LIBRARY:
         {
             // Shared library
             cmdLine.addArg("-shared");
@@ -521,7 +559,7 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
             }
             break;
         }
-        case SLANG_EXECUTABLE:
+        case SLANG_HOST_EXECUTABLE:
         {
             break;
         }
@@ -563,7 +601,7 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
         //cmdLine.addArg(linkOptions);
     }
 
-    if (options.targetType == SLANG_SHARED_LIBRARY)
+    if (options.targetType == SLANG_SHADER_SHARED_LIBRARY)
     {
         if (!PlatformUtil::isFamily(PlatformFamily::Apple, platformKind))
         {
@@ -594,26 +632,20 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
     {
         // Make STD libs available
         cmdLine.addArg("-lstdc++");
-	    // Make maths lib available
+        // Make maths lib available
         cmdLine.addArg("-lm");
     }
 
     return SLANG_OK;
 }
 
-/* static */SlangResult GCCDownstreamCompilerUtil::createCompiler(const String& path, const String& inExeName, RefPtr<DownstreamCompiler>& outCompiler)
+/* static */SlangResult GCCDownstreamCompilerUtil::createCompiler(const ExecutableLocation& exe, RefPtr<DownstreamCompiler>& outCompiler)
 {
-    String exeName(inExeName);
-    if (path.getLength() > 0)
-    {
-        exeName = Path::combine(path, inExeName);
-    }
-
     DownstreamCompiler::Desc desc;
-    SLANG_RETURN_ON_FAIL(GCCDownstreamCompilerUtil::calcVersion(exeName, desc));
+    SLANG_RETURN_ON_FAIL(GCCDownstreamCompilerUtil::calcVersion(exe, desc));
 
     RefPtr<CommandLineDownstreamCompiler> compiler(new GCCDownstreamCompiler(desc));
-    compiler->m_cmdLine.setExecutableFilename(exeName);
+    compiler->m_cmdLine.setExecutableLocation(exe);
 
     outCompiler = compiler;
     return SLANG_OK;
@@ -622,9 +654,26 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
 /* static */SlangResult GCCDownstreamCompilerUtil::locateGCCCompilers(const String& path, ISlangSharedLibraryLoader* loader, DownstreamCompilerSet* set)
 {
     SLANG_UNUSED(loader);
+
     RefPtr<DownstreamCompiler> compiler;
-    if (SLANG_SUCCEEDED(createCompiler(path, "g++", compiler)))
+    if (SLANG_SUCCEEDED(createCompiler(ExecutableLocation(path, "g++"), compiler)))
     {
+        // A downstream compiler for Slang must currently support C++14 - such that
+        // the prelude and generated code works.
+        // 
+        // The first version of gcc that supports `-std=c++14` is 5.0
+        // https://gcc.gnu.org/projects/cxx-status.html
+        //
+        // If could be argued to allow C/C++ compilations via older versions through an older version
+        // but that requires some more complex behavior, so we don't allow for now.
+        
+        auto desc = compiler->getDesc();
+        if (desc.majorVersion < 5)
+        {
+            // If the version isn't 5 or higher, we don't add this version of the compiler.
+            return SLANG_OK;
+        }
+
         set->addCompiler(compiler);
     }
     return SLANG_OK;
@@ -635,7 +684,7 @@ static SlangResult _parseGCCFamilyLine(const UnownedStringSlice& line, LineParse
     SLANG_UNUSED(loader);
 
     RefPtr<DownstreamCompiler> compiler;
-    if (SLANG_SUCCEEDED(createCompiler(path, "clang", compiler)))
+    if (SLANG_SUCCEEDED(createCompiler(ExecutableLocation(path, "clang"), compiler)))
     {
         set->addCompiler(compiler);
     }

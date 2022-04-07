@@ -52,6 +52,7 @@ INST(Nop, nop, 0, 0)
     INST(TaggedUnionType, TaggedUnion, 0, 0)
 
     INST(ConjunctionType, Conjunction, 0, 0)
+    INST(AttributedType, Attributed, 0, 0)
 
     /* BindExistentialsTypeBase */
 
@@ -294,6 +295,11 @@ INST(getAddr, getAddr, 1, 0)
 
 // "Subscript" an image at a pixel coordinate to get pointer
 INST(ImageSubscript, imageSubscript, 2, 0)
+
+// Load from an Image.
+INST(ImageLoad, imageLoad, 2, 0)
+// Store into an Image.
+INST(ImageStore, imageStore, 3, 0)
 
 // Load (almost) arbitrary-type data from a byte-address buffer
 //
@@ -595,6 +601,9 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
         INST(ExportDecoration, export, 1, 0)
     INST_RANGE(LinkageDecoration, ImportDecoration, ExportDecoration)
 
+        /// An extern_cpp decoration marks the inst to emit its name without mangling for C++ interop.
+    INST(ExternCppDecoration, externCpp, 1, 0)
+
     /* Decorations for RTTI objects */
     INST(RTTITypeSizeDecoration, RTTI_typeSize, 1, 0)
     INST(AnyValueSizeDecoration, AnyValueSize, 1, 0)
@@ -695,6 +704,8 @@ INST_RANGE(Layout, VarLayout, EntryPointLayout)
     INST(StageAttr, stage, 1, 0)
     INST(StructFieldLayoutAttr, fieldLayout, 2, 0)
     INST(CaseTypeLayoutAttr, caseLayout, 1, 0)
+    INST(UNormAttr, unorm, 0, 0)
+    INST(SNormAttr, snorm, 0, 0)
     /* SemanticAttr */
         INST(UserSemanticAttr, userSemantic, 2, 0)
         INST(SystemValueSemanticAttr, systemValueSemantic, 2, 0)

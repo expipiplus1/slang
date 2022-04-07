@@ -14,12 +14,12 @@ namespace Slang
     public:
         static bool exists(const String& fileName);
 
-        static String readAllText(const String& fileName);
+        static SlangResult readAllText(const String& fileName, String& outString);
 
-        static List<unsigned char> readAllBytes(const String& fileName);
+        static SlangResult readAllBytes(const String& fileName, List<unsigned char>& out);
         static SlangResult readAllBytes(const String& fileName, ScopedAllocation& out);
 
-        static void writeAllText(const String& fileName, const String& text);
+        static SlangResult writeAllText(const String& fileName, const String& text);
 
         static SlangResult writeAllBytes(const String& fileName, const void* data, size_t size);
         
@@ -73,6 +73,11 @@ namespace Slang
             /// Finds the index of the last dot in a path, else returns -1
         static Index findExtIndex(String const& path) { return findExtIndex(path.getUnownedSlice()); }
         static Index findExtIndex(UnownedStringSlice const& path);
+
+            /// True if isn't just a name (ie has any path separator)
+            /// Note this is no the same as having a 'parent' as '/thing' 'has a path', but it doesn't have a parent.
+        static bool hasPath(const UnownedStringSlice& path) { return findLastSeparatorIndex(path) >= 0; }
+        static bool hasPath(const String& path) { return findLastSeparatorIndex(path) >= 0; }
 
         static String replaceExt(const String& path, const char* newExt);
         static String getFileName(const String& path);

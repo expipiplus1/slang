@@ -4,11 +4,20 @@
 #include "../nvapi/nvapi-util.h"
 
 #include "../immediate-renderer-base.h"
+#include "../mutable-shader-object.h"
 
 #include "core/slang-basic.h"
 #include "core/slang-blob.h"
 #include "core/slang-secure-crt.h"
 #include "external/stb/stb_image_write.h"
+
+#if SLANG_WIN64 || SLANG_WIN64
+#define ENABLE_GL_IMPL 1
+#else
+#define ENABLE_GL_IMPL 0
+#endif
+
+#if ENABLE_GL_IMPL
 
 // TODO(tfoley): eventually we should be able to run these
 // tests on non-Windows targets to confirm that cross-compilation
@@ -121,22 +130,27 @@ public:
     virtual SLANG_NO_THROW Result SLANG_MCALL createTextureView(
         ITextureResource* texture, IResourceView::Desc const& desc, IResourceView** outView) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createBufferView(
-        IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView) override;
+        IBufferResource* buffer,
+        IBufferResource* counterBuffer,
+        IResourceView::Desc const& desc,
+        IResourceView** outView) override;
 
     virtual SLANG_NO_THROW Result SLANG_MCALL createInputLayout(
-        const InputElementDesc* inputElements,
-        UInt inputElementCount,
+        IInputLayout::Desc const& desc,
         IInputLayout** outLayout) override;
 
     virtual Result createShaderObjectLayout(
         slang::TypeLayoutReflection* typeLayout,
         ShaderObjectLayoutBase** outLayout) override;
     virtual Result createShaderObject(ShaderObjectLayoutBase* layout, IShaderObject** outObject) override;
+    virtual Result createMutableShaderObject(ShaderObjectLayoutBase* layout, IShaderObject** outObject) override;
     virtual Result createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject) override;
     virtual void bindRootShaderObject(IShaderObject* shaderObject) override;
 
-    virtual SLANG_NO_THROW Result SLANG_MCALL
-        createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram) override;
+    virtual SLANG_NO_THROW Result SLANG_MCALL createProgram(
+        const IShaderProgram::Desc& desc,
+        IShaderProgram** outProgram,
+        ISlangBlob** outDiagnosticBlob) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createGraphicsPipelineState(
         const GraphicsPipelineStateDesc& desc, IPipelineState** outState) override;
     virtual SLANG_NO_THROW Result SLANG_MCALL createComputePipelineState(
@@ -156,17 +170,29 @@ public:
     virtual void setPrimitiveTopology(PrimitiveTopology topology) override;
 
     virtual void setVertexBuffers(
-        UInt startSlot,
-        UInt slotCount,
+        uint32_t startSlot,
+        uint32_t slotCount,
         IBufferResource* const* buffers,
-        const UInt* strides,
-        const UInt* offsets) override;
-    virtual void setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset) override;
+        const uint32_t* offsets) override;
+    virtual void setIndexBuffer(
+        IBufferResource* buffer, Format indexFormat, uint32_t offset) override;
     virtual void setViewports(UInt count, Viewport const* viewports) override;
     virtual void setScissorRects(UInt count, ScissorRect const* rects) override;
     virtual void setPipelineState(IPipelineState* state) override;
-    virtual void draw(UInt vertexCount, UInt startVertex) override;
-    virtual void drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex) override;
+    virtual void draw(uint32_t vertexCount, uint32_t startVertex) override;
+    virtual void drawIndexed(
+        uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex) override;
+    virtual void drawInstanced(
+        uint32_t vertexCount,
+        uint32_t instanceCount,
+        uint32_t startVertex,
+        uint32_t startInstanceLocation) override;
+    virtual void drawIndexedInstanced(
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t startIndexLocation,
+        int32_t baseVertexLocation,
+        uint32_t startInstanceLocation) override;
     virtual void dispatchCompute(int x, int y, int z) override;
     virtual void submitGpuWork() override {}
     virtual void waitForGpu() override {}
@@ -194,6 +220,7 @@ public:
     protected:
     enum
     {
+        kMaxVertexAttributes = 16,
         kMaxVertexStreams = 16,
         kMaxDescriptorSetCount = 8,
     };
@@ -214,8 +241,10 @@ public:
     class InputLayoutImpl : public InputLayoutBase
 	{
     public:
-        VertexAttributeDesc m_attributes[kMaxVertexStreams];
+        VertexAttributeDesc m_attributes[kMaxVertexAttributes];
+        VertexStreamDesc m_streams[kMaxVertexStreams];
         UInt m_attributeCount = 0;
+        UInt m_streamCount = 0;
     };
 
 	class BufferResourceImpl: public BufferResource
@@ -247,6 +276,20 @@ public:
         {
             return 0;
         }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL
+            map(MemoryRange* rangeToRead, void** outPointer) override
+        {
+            SLANG_UNUSED(rangeToRead);
+            SLANG_UNUSED(outPointer);
+            return SLANG_FAIL;
+        }
+
+        virtual SLANG_NO_THROW Result SLANG_MCALL unmap(MemoryRange* writtenRange) override
+        {
+            SLANG_UNUSED(writtenRange);
+            return SLANG_FAIL;
+        }
 	};
 
     class TextureResourceImpl: public TextureResource
@@ -275,16 +318,8 @@ public:
         GLuint m_handle;
     };
 
-    class SamplerStateImpl : public ISamplerState, public ComObject
+    class SamplerStateImpl : public SamplerStateBase
     {
-    public:
-        SLANG_COM_OBJECT_IUNKNOWN_ALL
-        ISamplerState* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_ISamplerState)
-                return static_cast<ISamplerState*>(this);
-            return nullptr;
-        }
     public:
         GLuint m_samplerID;
     };
@@ -332,19 +367,8 @@ public:
         IFramebufferLayout::AttachmentLayout m_depthStencil;
     };
 
-    class FramebufferImpl
-        : public IFramebuffer
-        , public ComObject
+    class FramebufferImpl : public FramebufferBase
     {
-    public:
-        SLANG_COM_OBJECT_IUNKNOWN_ALL
-        IFramebuffer* getInterface(const Guid& guid)
-        {
-            if (guid == GfxGUID::IID_ISlangUnknown || guid == GfxGUID::IID_IFramebuffer)
-                return static_cast<IFramebuffer*>(this);
-            return nullptr;
-        }
-
     public:
         GLuint m_framebuffer;
         ShortList<GLenum> m_drawBuffers;
@@ -556,6 +580,15 @@ public:
                 createBackBufferAndFBO();
             }
             return SLANG_OK;
+        }
+
+        virtual SLANG_NO_THROW bool SLANG_MCALL isOccluded() override
+        {
+            return false;
+        }
+        virtual SLANG_NO_THROW Result SLANG_MCALL setFullScreenMode(bool mode) override
+        {
+            return SLANG_FAIL;
         }
 
     public:
@@ -964,6 +997,16 @@ public:
             return static_cast<ShaderObjectLayoutImpl*>(m_layout.Ptr());
         }
 
+        virtual SLANG_NO_THROW const void* SLANG_MCALL getRawData() override
+        {
+            return m_data.getBuffer();
+        }
+
+        virtual SLANG_NO_THROW size_t SLANG_MCALL getSize() override
+        {
+            return (size_t)m_data.getCount();
+        }
+
         SLANG_NO_THROW Result SLANG_MCALL
             setData(ShaderOffset const& inOffset, void const* data, size_t inSize) SLANG_OVERRIDE
         {
@@ -1257,7 +1300,7 @@ public:
             bufferDesc.defaultState = ResourceState::ConstantBuffer;
             bufferDesc.allowedStates =
                 ResourceStateSet(ResourceState::ConstantBuffer, ResourceState::CopyDestination);
-            bufferDesc.cpuAccessFlags |= AccessFlag::Write;
+            bufferDesc.memoryType = MemoryType::Upload;
             SLANG_RETURN_ON_FAIL(
                 device->createBufferResource(bufferDesc, nullptr, bufferResourcePtr.writeRef()));
             m_ordinaryDataBuffer = static_cast<BufferResourceImpl*>(bufferResourcePtr.get());
@@ -1386,16 +1429,15 @@ public:
         RefPtr<ShaderObjectLayoutImpl> m_specializedLayout;
     };
 
+    class MutableShaderObjectImpl : public MutableShaderObject<MutableShaderObjectImpl, ShaderObjectLayoutImpl>
+    {};
+
     class RootShaderObjectImpl : public ShaderObjectImpl
     {
         typedef ShaderObjectImpl Super;
-
     public:
-        // Override default reference counting behavior to disable lifetime management via ComPtr.
-        // Root objects are managed by command buffer and does not need to be freed by the user.
-        SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
-        SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
-
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL addRef() override { return 1; }
+        virtual SLANG_NO_THROW uint32_t SLANG_MCALL release() override { return 1; }
     public:
         static Result create(IDevice* device, RootShaderObjectLayoutImpl* layout, RootShaderObjectImpl** outShaderObject)
         {
@@ -1542,8 +1584,8 @@ public:
     enum class GlPixelFormat
     {
         Unknown,
-        RGBA_Unorm_UInt8,
-        D_Float32,
+        R8G8B8A8_UNORM,
+        D32_FLOAT,
         D_Unorm24_S8,
         CountOf,
     };
@@ -1588,7 +1630,6 @@ public:
 
     GLenum m_boundPrimitiveTopology = GL_TRIANGLES;
     GLuint  m_boundVertexStreamBuffers[kMaxVertexStreams];
-    UInt    m_boundVertexStreamStrides[kMaxVertexStreams];
     UInt    m_boundVertexStreamOffsets[kMaxVertexStreams];
     GLuint m_boundIndexBuffer = 0;
     UInt m_boundIndexBufferOffset = 0;
@@ -1610,9 +1651,8 @@ public:
 {
     switch (format)
     {
-        case Format::RGBA_Unorm_UInt8:      return GlPixelFormat::RGBA_Unorm_UInt8;
-        case Format::D_Float32:             return GlPixelFormat::D_Float32;
-        case Format::D_Unorm24_S8:          return GlPixelFormat::D_Unorm24_S8;
+        case Format::R8G8B8A8_UNORM:        return GlPixelFormat::R8G8B8A8_UNORM;
+        case Format::D32_FLOAT:             return GlPixelFormat::D32_FLOAT;
 
         default:                            return GlPixelFormat::Unknown;
     }
@@ -1622,8 +1662,8 @@ public:
 {
     // internalType, format, formatType
     { 0,                0,          0},                         // GlPixelFormat::Unknown
-    { GL_RGBA8,         GL_RGBA,    GL_UNSIGNED_BYTE },         // GlPixelFormat::RGBA_Unorm_UInt8
-    { GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE}, // GlPixelFormat::D_Float32
+    { GL_RGBA8,         GL_RGBA,    GL_UNSIGNED_BYTE },         // GlPixelFormat::R8G8B8A8_UNORM
+    { GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE}, // GlPixelFormat::D32_FLOAT
     { GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_BYTE}, // GlPixelFormat::D_Unorm24_S8
 
 };
@@ -1631,14 +1671,6 @@ public:
 /* static */void GLDevice::compileTimeAsserts()
 {
     SLANG_COMPILE_TIME_ASSERT(SLANG_COUNT_OF(s_pixelFormatInfos) == int(GlPixelFormat::CountOf));
-}
-
-SlangResult SLANG_MCALL createGLDevice(const IDevice::Desc* desc, IDevice** outRenderer)
-{
-    RefPtr<GLDevice> result = new GLDevice();
-    SLANG_RETURN_ON_FAIL(result->initialize(*desc));
-    returnComPtr(outRenderer, result);
-    return SLANG_OK;
 }
 
 void GLDevice::debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message)
@@ -1669,10 +1701,10 @@ void GLDevice::debugCallback(GLenum source, GLenum type, GLuint id, GLenum sever
 #define CASE(NAME, COUNT, TYPE, NORMALIZED) \
         case Format::NAME: do { VertexAttributeFormat result = {COUNT, TYPE, NORMALIZED}; return result; } while (0)
 
-        CASE(RGBA_Float32, 4, GL_FLOAT, GL_FALSE);
-        CASE(RGB_Float32, 3, GL_FLOAT, GL_FALSE);
-        CASE(RG_Float32, 2, GL_FLOAT, GL_FALSE);
-        CASE(R_Float32, 1, GL_FLOAT, GL_FALSE);
+        CASE(R32G32B32A32_FLOAT, 4, GL_FLOAT, GL_FALSE);
+        CASE(R32G32B32_FLOAT, 3, GL_FLOAT, GL_FALSE);
+        CASE(R32G32_FLOAT, 2, GL_FLOAT, GL_FALSE);
+        CASE(R32_FLOAT, 1, GL_FLOAT, GL_FALSE);
 #undef CASE
     }
 }
@@ -1709,6 +1741,8 @@ void GLDevice::flushStateForDraw()
 
         auto streamIndex = attr.streamIndex;
 
+        auto stride = inputLayout->m_streams[streamIndex].stride;
+
         glBindBuffer(GL_ARRAY_BUFFER, m_boundVertexStreamBuffers[streamIndex]);
 
         glVertexAttribPointer(
@@ -1716,7 +1750,7 @@ void GLDevice::flushStateForDraw()
             attr.format.componentCount,
             attr.format.componentType,
             attr.format.normalized,
-            (GLsizei)m_boundVertexStreamStrides[streamIndex],
+            (GLsizei)stride,
             (GLvoid*)(attr.offset + m_boundVertexStreamOffsets[streamIndex]));
 
         glEnableVertexAttribArray((GLuint)ii);
@@ -2524,7 +2558,10 @@ SLANG_NO_THROW Result SLANG_MCALL GLDevice::createTextureView(
 }
 
 SLANG_NO_THROW Result SLANG_MCALL GLDevice::createBufferView(
-    IBufferResource* buffer, IResourceView::Desc const& desc, IResourceView** outView)
+    IBufferResource* buffer,
+    IBufferResource* counterBuffer,
+    IResourceView::Desc const& desc,
+    IResourceView** outView)
 {
     auto resourceImpl = (BufferResourceImpl*) buffer;
 
@@ -2541,19 +2578,28 @@ SLANG_NO_THROW Result SLANG_MCALL GLDevice::createBufferView(
 }
 
 SLANG_NO_THROW Result SLANG_MCALL GLDevice::createInputLayout(
-    const InputElementDesc* inputElements, UInt inputElementCount, IInputLayout** outLayout)
+    IInputLayout::Desc const& desc, IInputLayout** outLayout)
 {
     RefPtr<InputLayoutImpl> inputLayout = new InputLayoutImpl;
 
+    auto inputElements = desc.inputElements;
+    Int inputElementCount = desc.inputElementCount;
     inputLayout->m_attributeCount = inputElementCount;
-    for (UInt ii = 0; ii < inputElementCount; ++ii)
+    for (Int ii = 0; ii < inputElementCount; ++ii)
     {
         auto& inputAttr = inputElements[ii];
         auto& glAttr = inputLayout->m_attributes[ii];
 
-        glAttr.streamIndex = 0;
+        glAttr.streamIndex = (GLuint)inputAttr.bufferSlotIndex;
         glAttr.format = getVertexAttributeFormat(inputAttr.format);
         glAttr.offset = (GLsizei)inputAttr.offset;
+    }
+
+    Int inputStreamCount = desc.vertexStreamCount;
+    inputLayout->m_streamCount = inputStreamCount;
+    for (Int i = 0; i < inputStreamCount; ++i)
+    {
+        inputLayout->m_streams[i].stride = desc.vertexStreams[i].stride;
     }
 
     returnComPtr(outLayout, inputLayout);
@@ -2606,11 +2652,10 @@ void GLDevice::setPrimitiveTopology(PrimitiveTopology topology)
 }
 
 void GLDevice::setVertexBuffers(
-    UInt startSlot,
-    UInt slotCount,
+    uint32_t startSlot,
+    uint32_t slotCount,
     IBufferResource* const* buffers,
-    const UInt* strides,
-    const UInt* offsets)
+    const uint32_t* offsets)
 {
     for (UInt ii = 0; ii < slotCount; ++ii)
     {
@@ -2620,12 +2665,11 @@ void GLDevice::setVertexBuffers(
         GLuint bufferID = buffer ? buffer->m_handle : 0;
 
         m_boundVertexStreamBuffers[slot] = bufferID;
-        m_boundVertexStreamStrides[slot] = strides[ii];
         m_boundVertexStreamOffsets[slot] = offsets[ii];
     }
 }
 
-void GLDevice::setIndexBuffer(IBufferResource* buffer, Format indexFormat, UInt offset)
+void GLDevice::setIndexBuffer(IBufferResource* buffer, Format indexFormat, uint32_t offset)
 {
     auto bufferImpl = static_cast<BufferResourceImpl*>(buffer);
     m_boundIndexBuffer = bufferImpl->m_handle;
@@ -2684,14 +2728,14 @@ void GLDevice::setPipelineState(IPipelineState* state)
     glUseProgram(programID);
 }
 
-void GLDevice::draw(UInt vertexCount, UInt startVertex = 0)
+void GLDevice::draw(uint32_t vertexCount, uint32_t startVertex = 0)
 {
     flushStateForDraw();
 
     glDrawArrays(m_boundPrimitiveTopology, (GLint)startVertex, (GLsizei)vertexCount);
 }
 
-void GLDevice::drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex)
+void GLDevice::drawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex)
 {
     flushStateForDraw();
 
@@ -2703,30 +2747,50 @@ void GLDevice::drawIndexed(UInt indexCount, UInt startIndex, UInt baseVertex)
         (GLint)baseVertex);
 }
 
+void GLDevice::drawInstanced(
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t startVertex,
+    uint32_t startInstanceLocation)
+{
+    SLANG_UNIMPLEMENTED_X("drawInstanced");
+}
+
+void GLDevice::drawIndexedInstanced(
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t startIndexLocation,
+    int32_t baseVertexLocation,
+    uint32_t startInstanceLocation)
+{
+    SLANG_UNIMPLEMENTED_X("drawIndexedInstanced");
+}
+
 void GLDevice::dispatchCompute(int x, int y, int z)
 {
     glDispatchCompute(x, y, z);
 }
 
-Result GLDevice::createProgram(const IShaderProgram::Desc& desc, IShaderProgram** outProgram)
+Result GLDevice::createProgram(
+    const IShaderProgram::Desc& desc, IShaderProgram** outProgram, ISlangBlob** outDiagnosticBlob)
 {
-    if (desc.slangProgram->getSpecializationParamCount() != 0)
+    if (desc.slangGlobalScope->getSpecializationParamCount() != 0)
     {
         // For a specializable program, we don't invoke any actual slang compilation yet.
         RefPtr<ShaderProgramImpl> shaderProgram = new ShaderProgramImpl(m_weakRenderer, 0);
-        shaderProgram->slangProgram = desc.slangProgram;
+        shaderProgram->init(desc);
         returnComPtr(outProgram, shaderProgram);
         return SLANG_OK;
     }
 
     auto programID = glCreateProgram();
-    auto programLayout = desc.slangProgram->getLayout();
+    auto programLayout = desc.slangGlobalScope->getLayout();
     ShortList<GLuint> shaderIDs;
     for (SlangUInt i = 0; i < programLayout->getEntryPointCount(); i++)
     {
         ComPtr<ISlangBlob> kernelCode;
         ComPtr<ISlangBlob> diagnostics;
-        auto compileResult = desc.slangProgram->getEntryPointCode(
+        auto compileResult = desc.slangGlobalScope->getEntryPointCode(
             i, 0, kernelCode.writeRef(), diagnostics.writeRef());
         if (diagnostics)
         {
@@ -2734,6 +2798,8 @@ Result GLDevice::createProgram(const IShaderProgram::Desc& desc, IShaderProgram*
                 compileResult == SLANG_OK ? DebugMessageType::Warning : DebugMessageType::Error,
                 DebugMessageSource::Slang,
                 (char*)diagnostics->getBufferPointer());
+            if (outDiagnosticBlob)
+                returnComPtr(outDiagnosticBlob, diagnostics);
         }
         SLANG_RETURN_ON_FAIL(compileResult);
         GLenum glShaderType = 0;
@@ -2793,7 +2859,7 @@ Result GLDevice::createProgram(const IShaderProgram::Desc& desc, IShaderProgram*
     }
 
     RefPtr<ShaderProgramImpl> program = new ShaderProgramImpl(m_weakRenderer, programID);
-    program->slangProgram = desc.slangProgram;
+    program->slangGlobalScope = desc.slangGlobalScope;
     returnComPtr(outProgram, program);
     return SLANG_OK;
 }
@@ -2845,13 +2911,24 @@ Result GLDevice::createShaderObject(ShaderObjectLayoutBase* layout, IShaderObjec
     return SLANG_OK;
 }
 
+Result GLDevice::createMutableShaderObject(ShaderObjectLayoutBase* layout, IShaderObject** outObject)
+{
+    auto layoutImpl = static_cast<ShaderObjectLayoutImpl*>(layout);
+
+    RefPtr<MutableShaderObjectImpl> result = new MutableShaderObjectImpl();
+    SLANG_RETURN_ON_FAIL(result->init(this, layoutImpl));
+    returnComPtr(outObject, result);
+
+    return SLANG_OK;
+}
+
 Result GLDevice::createRootShaderObject(IShaderProgram* program, ShaderObjectBase** outObject)
 {
     auto programImpl = static_cast<ShaderProgramImpl*>(program);
     RefPtr<RootShaderObjectImpl> shaderObject;
     RefPtr<RootShaderObjectLayoutImpl> rootLayout;
     SLANG_RETURN_ON_FAIL(RootShaderObjectLayoutImpl::create(
-        this, programImpl->slangProgram, programImpl->slangProgram->getLayout(), rootLayout.writeRef()));
+        this, programImpl->slangGlobalScope, programImpl->slangGlobalScope->getLayout(), rootLayout.writeRef()));
     SLANG_RETURN_ON_FAIL(RootShaderObjectImpl::create(
         this, rootLayout.Ptr(), shaderObject.writeRef()));
     returnRefPtrMove(outObject, shaderObject);
@@ -2894,4 +2971,24 @@ void GLDevice::bindRootShaderObject(IShaderObject* shaderObject)
     }
 }
 
-} // renderer_test
+SlangResult SLANG_MCALL createGLDevice(const IDevice::Desc* desc, IDevice** outRenderer)
+{
+    RefPtr<GLDevice> result = new GLDevice();
+    SLANG_RETURN_ON_FAIL(result->initialize(*desc));
+    returnComPtr(outRenderer, result);
+    return SLANG_OK;
+}
+
+} // gfx
+
+#else
+
+namespace gfx
+{
+    SlangResult SLANG_MCALL createGLDevice(const IDevice::Desc* desc, IDevice** outRenderer)
+    {
+        *outRenderer = nullptr;
+        return SLANG_FAIL;
+    }
+}
+#endif

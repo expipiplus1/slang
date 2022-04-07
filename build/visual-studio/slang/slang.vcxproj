@@ -166,7 +166,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>_DEBUG;SLANG_DYNAMIC_EXPORT;SLANG_WITHOUT_EMBEDDED_STD_LIB;SLANG_ENABLE_IR_BREAK_ALLOC=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..\external\spirv-headers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -176,6 +176,10 @@
       <ImportLibrary>..\..\..\bin\windows-x86\debug\slang.lib</ImportLibrary>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
+    <PostBuildEvent>
+      <Command>IF EXIST ..\..\..\external\slang-llvm\bin\windows-x86\release\slang-llvm.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-llvm\bin\windows-x86\release\slang-llvm.dll ..\..\..\bin\windows-x86\debug &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-llvm\bin\windows-x86\release\slang-llvm.dll ..\..\..\bin\windows-x86\debug &gt; nul)
+IF EXIST ..\..\..\external\slang-binaries\bin\windows-x86\slang-glslang.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-binaries\bin\windows-x86\slang-glslang.dll ..\..\..\bin\windows-x86\debug &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-binaries\bin\windows-x86\slang-glslang.dll ..\..\..\bin\windows-x86\debug &gt; nul)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -184,7 +188,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>_DEBUG;SLANG_DYNAMIC_EXPORT;SLANG_WITHOUT_EMBEDDED_STD_LIB;SLANG_ENABLE_IR_BREAK_ALLOC=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..\external\spirv-headers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -194,6 +198,10 @@
       <ImportLibrary>..\..\..\bin\windows-x64\debug\slang.lib</ImportLibrary>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
+    <PostBuildEvent>
+      <Command>IF EXIST ..\..\..\external\slang-llvm\bin\windows-x64\release\slang-llvm.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-llvm\bin\windows-x64\release\slang-llvm.dll ..\..\..\bin\windows-x64\debug &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-llvm\bin\windows-x64\release\slang-llvm.dll ..\..\..\bin\windows-x64\debug &gt; nul)
+IF EXIST ..\..\..\external\slang-binaries\bin\windows-x64\slang-glslang.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-binaries\bin\windows-x64\slang-glslang.dll ..\..\..\bin\windows-x64\debug &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-binaries\bin\windows-x64\slang-glslang.dll ..\..\..\bin\windows-x64\debug &gt; nul)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug aarch64|ARM'">
     <ClCompile>
@@ -212,6 +220,10 @@
       <ImportLibrary>..\..\..\bin\windows-aarch64\debug\slang.lib</ImportLibrary>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
+    <PostBuildEvent>
+      <Command>IF EXIST ..\..\..\external\slang-llvm\bin\windows-aarch64\release\slang-llvm.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-llvm\bin\windows-aarch64\release\slang-llvm.dll ..\..\..\bin\windows-aarch64\debug &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-llvm\bin\windows-aarch64\release\slang-llvm.dll ..\..\..\bin\windows-aarch64\debug &gt; nul)
+IF EXIST ..\..\..\external\slang-binaries\bin\windows-aarch64\slang-glslang.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-binaries\bin\windows-aarch64\slang-glslang.dll ..\..\..\bin\windows-aarch64\debug &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-binaries\bin\windows-aarch64\slang-glslang.dll ..\..\..\bin\windows-aarch64\debug &gt; nul)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -234,6 +246,10 @@
       <ImportLibrary>..\..\..\bin\windows-x86\release\slang.lib</ImportLibrary>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
+    <PostBuildEvent>
+      <Command>IF EXIST ..\..\..\external\slang-llvm\bin\windows-x86\release\slang-llvm.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-llvm\bin\windows-x86\release\slang-llvm.dll ..\..\..\bin\windows-x86\release &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-llvm\bin\windows-x86\release\slang-llvm.dll ..\..\..\bin\windows-x86\release &gt; nul)
+IF EXIST ..\..\..\external\slang-binaries\bin\windows-x86\slang-glslang.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-binaries\bin\windows-x86\slang-glslang.dll ..\..\..\bin\windows-x86\release &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-binaries\bin\windows-x86\slang-glslang.dll ..\..\..\bin\windows-x86\release &gt; nul)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -256,6 +272,10 @@
       <ImportLibrary>..\..\..\bin\windows-x64\release\slang.lib</ImportLibrary>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
+    <PostBuildEvent>
+      <Command>IF EXIST ..\..\..\external\slang-llvm\bin\windows-x64\release\slang-llvm.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-llvm\bin\windows-x64\release\slang-llvm.dll ..\..\..\bin\windows-x64\release &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-llvm\bin\windows-x64\release\slang-llvm.dll ..\..\..\bin\windows-x64\release &gt; nul)
+IF EXIST ..\..\..\external\slang-binaries\bin\windows-x64\slang-glslang.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-binaries\bin\windows-x64\slang-glslang.dll ..\..\..\bin\windows-x64\release &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-binaries\bin\windows-x64\slang-glslang.dll ..\..\..\bin\windows-x64\release &gt; nul)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release aarch64|ARM'">
     <ClCompile>
@@ -278,6 +298,10 @@
       <ImportLibrary>..\..\..\bin\windows-aarch64\release\slang.lib</ImportLibrary>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
+    <PostBuildEvent>
+      <Command>IF EXIST ..\..\..\external\slang-llvm\bin\windows-aarch64\release\slang-llvm.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-llvm\bin\windows-aarch64\release\slang-llvm.dll ..\..\..\bin\windows-aarch64\release &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-llvm\bin\windows-aarch64\release\slang-llvm.dll ..\..\..\bin\windows-aarch64\release &gt; nul)
+IF EXIST ..\..\..\external\slang-binaries\bin\windows-aarch64\slang-glslang.dll\ (xcopy /Q /E /Y /I ..\..\..\external\slang-binaries\bin\windows-aarch64\slang-glslang.dll ..\..\..\bin\windows-aarch64\release &gt; nul) ELSE (xcopy /Q /Y /I ..\..\..\external\slang-binaries\bin\windows-aarch64\slang-glslang.dll ..\..\..\bin\windows-aarch64\release &gt; nul)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\slang.h" />
@@ -301,7 +325,7 @@
     <ClInclude Include="..\..\..\source\slang\slang-compiler.h" />
     <ClInclude Include="..\..\..\source\slang\slang-diagnostic-defs.h" />
     <ClInclude Include="..\..\..\source\slang\slang-diagnostics.h" />
-    <ClInclude Include="..\..\..\source\slang\slang-doc-extractor.h" />
+    <ClInclude Include="..\..\..\source\slang\slang-doc-ast.h" />
     <ClInclude Include="..\..\..\source\slang\slang-doc-markdown-writer.h" />
     <ClInclude Include="..\..\..\source\slang\slang-emit-base.h" />
     <ClInclude Include="..\..\..\source\slang\slang-emit-c-like.h" />
@@ -325,6 +349,7 @@
     <ClInclude Include="..\..\..\source\slang\slang-ir-constexpr.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-dce.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-dominators.h" />
+    <ClInclude Include="..\..\..\source\slang\slang-ir-entry-point-pass.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-entry-point-raw-ptr-params.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-entry-point-uniforms.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-explicit-global-context.h" />
@@ -352,6 +377,7 @@
     <ClInclude Include="..\..\..\source\slang\slang-ir-restructure-scoping.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-restructure.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-sccp.h" />
+    <ClInclude Include="..\..\..\source\slang\slang-ir-simplify-cfg.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-specialize-arrays.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-specialize-buffer-load-arg.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-specialize-dispatch.h" />
@@ -361,6 +387,7 @@
     <ClInclude Include="..\..\..\source\slang\slang-ir-specialize.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-spirv-legalize.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-spirv-snippet.h" />
+    <ClInclude Include="..\..\..\source\slang\slang-ir-ssa-simplification.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-ssa.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-string-hash.h" />
     <ClInclude Include="..\..\..\source\slang\slang-ir-strip-witness-tables.h" />
@@ -405,6 +432,7 @@
     <ClInclude Include="..\..\..\source\slang\slang-visitor.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\..\prelude\slang-cpp-host-prelude.h.cpp" />
     <ClCompile Include="..\..\..\prelude\slang-cpp-prelude.h.cpp" />
     <ClCompile Include="..\..\..\prelude\slang-cuda-prelude.h.cpp" />
     <ClCompile Include="..\..\..\prelude\slang-hlsl-prelude.h.cpp" />
@@ -431,7 +459,7 @@
     <ClCompile Include="..\..\..\source\slang\slang-check.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-compiler.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-diagnostics.cpp" />
-    <ClCompile Include="..\..\..\source\slang\slang-doc-extractor.cpp" />
+    <ClCompile Include="..\..\..\source\slang\slang-doc-ast.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-doc-markdown-writer.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-emit-base.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-emit-c-like.cpp" />
@@ -456,6 +484,7 @@
     <ClCompile Include="..\..\..\source\slang\slang-ir-dce.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-deduplicate.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-dominators.cpp" />
+    <ClCompile Include="..\..\..\source\slang\slang-ir-entry-point-pass.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-entry-point-raw-ptr-params.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-entry-point-uniforms.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-explicit-global-context.cpp" />
@@ -482,6 +511,7 @@
     <ClCompile Include="..\..\..\source\slang\slang-ir-restructure-scoping.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-restructure.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-sccp.cpp" />
+    <ClCompile Include="..\..\..\source\slang\slang-ir-simplify-cfg.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-specialize-arrays.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-specialize-buffer-load-arg.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-specialize-dispatch.cpp" />
@@ -491,6 +521,7 @@
     <ClCompile Include="..\..\..\source\slang\slang-ir-specialize.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-spirv-legalize.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-spirv-snippet.cpp" />
+    <ClCompile Include="..\..\..\source\slang\slang-ir-ssa-simplification.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-ssa.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-string-hash.cpp" />
     <ClCompile Include="..\..\..\source\slang\slang-ir-strip-witness-tables.cpp" />

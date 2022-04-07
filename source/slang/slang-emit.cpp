@@ -16,6 +16,7 @@
 #include "slang-ir-explicit-global-init.h"
 #include "slang-ir-glsl-legalize.h"
 #include "slang-ir-insts.h"
+#include "slang-ir-inline.h"
 #include "slang-ir-legalize-varying-params.h"
 #include "slang-ir-link.h"
 #include "slang-ir-lower-generics.h"
@@ -25,11 +26,13 @@
 #include "slang-ir-optix-entry-point-uniforms.h"
 #include "slang-ir-restructure.h"
 #include "slang-ir-restructure-scoping.h"
+#include "slang-ir-sccp.h"
 #include "slang-ir-specialize.h"
 #include "slang-ir-specialize-arrays.h"
 #include "slang-ir-specialize-buffer-load-arg.h"
 #include "slang-ir-specialize-resources.h"
 #include "slang-ir-ssa.h"
+#include "slang-ir-ssa-simplification.h"
 #include "slang-ir-strip-witness-tables.h"
 #include "slang-ir-synthesize-active-mask.h"
 #include "slang-ir-union.h"
@@ -55,6 +58,8 @@
 #include "slang-emit-cuda.h"
 
 #include <assert.h>
+
+Slang::String get_slang_cpp_host_prelude();
 
 namespace Slang {
 
@@ -144,10 +149,7 @@ static void dumpIRIfEnabled(
         //FILE* f = nullptr;
         //fopen_s(&f, (String("dump-") + label + ".txt").getBuffer(), "wt");
         //FileWriter writer(f, 0);
-        IRDumpOptions options;
-        options.sourceManager = compileRequest->getSourceManager();
-
-        dumpIR(irModule, options, label, &writer);
+        dumpIR(irModule, compileRequest->m_irDumpOptions, label, compileRequest->getSourceManager(), &writer);
         //fclose(f);
     }
 }
@@ -257,6 +259,8 @@ Result linkAndOptimizeIR(
         CollectEntryPointUniformParamsOptions passOptions;
         switch( target )
         {
+        case CodeGenTarget::HostCPPSource:
+            break;
         case CodeGenTarget::CUDASource:
             collectOptiXEntryPointUniformParams(irModule);
             #if 0
@@ -286,7 +290,7 @@ Result linkAndOptimizeIR(
     #endif
         validateIRModuleIfEnabled(compileRequest, irModule);
         break;
-
+    case CodeGenTarget::HostCPPSource:
     case CodeGenTarget::CPPSource:
     case CodeGenTarget::CUDASource:
         break;
@@ -326,9 +330,12 @@ Result linkAndOptimizeIR(
         specializeModule(irModule);
     dumpIRIfEnabled(compileRequest, irModule, "AFTER-SPECIALIZE");
 
+    applySparseConditionalConstantPropagation(irModule);
     eliminateDeadCode(irModule);
 
     lowerReinterpret(targetRequest, irModule, sink);
+
+    validateIRModuleIfEnabled(compileRequest, irModule);
 
     // For targets that supports dynamic dispatch, we need to lower the
     // generics / interface types to ordinary functions and types using
@@ -352,15 +359,16 @@ Result linkAndOptimizeIR(
 #endif
     validateIRModuleIfEnabled(compileRequest, irModule);
 
+    // Inline calls to any functions marked with [__unsafeInlineEarly] again,
+    // since we may be missing out cases prevented by the generic constructs
+    // that we just lowered out.
+    performMandatoryEarlyInlining(irModule);
 
     // Specialization can introduce dead code that could trip
     // up downstream passes like type legalization, so we
     // will run a DCE pass to clean up after the specialization.
     //
-    // TODO: Are there other cleanup optimizations we should
-    // apply at this point?
-    //
-    eliminateDeadCode(irModule);
+    simplifyIR(irModule);
 #if 0
     dumpIRIfEnabled(compileRequest, irModule, "AFTER DCE");
 #endif
@@ -433,7 +441,7 @@ Result linkAndOptimizeIR(
     // to see if we can clean up any temporaries created by legalization.
     // (e.g., things that used to be aggregated might now be split up,
     // so that we can work with the individual fields).
-    constructSSA(irModule);
+    simplifyIR(irModule);
 
 #if 0
     dumpIRIfEnabled(compileRequest, irModule, "AFTER SSA");
@@ -448,36 +456,12 @@ Result linkAndOptimizeIR(
     // Many of our targets place restrictions on how certain
     // resource types can be used, so that having them as
     // function parameters, reults, etc. is invalid.
-    // To clean this up, we apply two kinds of specialization:
-    //
-    // * Specalize call sites based on the actual resources
-    //   that a called function will return/output.
-    //
-    // * Specialize called functions based on teh actual resources
-    //   passed ass input at specific call sites.
-    //
-    // Because the legalization may depend on what target
-    // we are compiling for (certain things might be okay
-    // for D3D targets that are not okay for Vulkan), we
-    // pass down the target request along with the IR.
-    //
-    specializeResourceOutputs(compileRequest, targetRequest, irModule);
-    //
-    // After specialization of function outputs, we may find that there
-    // are cases where opaque-typed local variables can now be eliminated
-    // and turned into SSA temporaries. Such optimization may enable
-    // the following passes to "see" and specialize more cases.
-    //
-    // TODO: We should consider whether there are cases that will require
-    // iterating the passes as given here in order to achieve a fully
-    // specialized result. If that is the case, we might consider implementing
-    // a single combined pass that makes all of the relevant changes and
-    // iterates to convergence.
-    //
-    constructSSA(irModule);
-    //
+    // We clean up the usages of resource values here.
+    specializeResourceUsage(compileRequest, targetRequest, irModule);
     specializeFuncsForBufferLoadArgs(compileRequest, targetRequest, irModule);
-    specializeResourceParameters(compileRequest, targetRequest, irModule);
+
+    //
+    simplifyIR(irModule);
 
     // For GLSL targets, we also want to specialize calls to functions that
     // takes array parameters if possible, to avoid performance issues on
@@ -485,6 +469,7 @@ Result linkAndOptimizeIR(
     if (isKhronosTarget(targetRequest))
     {
         specializeArrayParameters(compileRequest, targetRequest, irModule);
+        simplifyIR(irModule);
     }
 
 #if 0
@@ -673,6 +658,17 @@ Result linkAndOptimizeIR(
         break;
     }
 
+    // Legalize `ImageSubscript` for GLSL.
+    switch (target)
+    {
+    case CodeGenTarget::GLSL:
+        {
+            legalizeImageSubscriptForGLSL(irModule);
+        }
+        break;
+    default:
+        break;
+    }
 
     switch( target )
     {
@@ -710,11 +706,16 @@ Result linkAndOptimizeIR(
     // functions, so there might still be invalid code in
     // our IR module.
     //
-    // To clean up the code, we will apply a fairly general
-    // dead-code-elimination (DCE) pass that only retains
-    // whatever code is "live."
+    // We run IR simplification passes again to clean things up.
     //
-    eliminateDeadCode(irModule);
+    simplifyIR(irModule);
+
+    if (isKhronosTarget(targetRequest))
+    {
+        // As a fallback, if the above specialization steps failed to remove resource type parameters, we will
+        // inline the functions in question to make sure we can produce valid GLSL.
+        performGLSLResourceReturnFunctionInlining(irModule);
+    }
 #if 0
     dumpIRIfEnabled(compileRequest, irModule, "AFTER DCE");
 #endif
@@ -723,8 +724,7 @@ Result linkAndOptimizeIR(
     // Lower all bit_cast operations on complex types into leaf-level
     // bit_cast on basic types.
     lowerBitCast(targetRequest, irModule);
-    eliminateDeadCode(irModule);
-
+    simplifyIR(irModule);
 
     // We include one final step to (optionally) dump the IR and validate
     // it after all of the optimization passes are complete. This should
@@ -772,6 +772,7 @@ SlangResult emitEntryPointsSourceFromIR(
     CLikeSourceEmitter::Desc desc;
 
     desc.compileRequest = compileRequest;
+    desc.targetRequest = targetRequest;
     desc.target = target;
     // TODO(DG): Can't assume a single entry point stage for multiple entry points
     if (entryPointIndices.getCount() == 1)
@@ -876,6 +877,11 @@ SlangResult emitEntryPointsSourceFromIR(
 
     sourceEmitter->emitPreludeDirectives();
 
+    if (isHeterogeneousTarget(target))
+    {
+        sourceWriter.emit(get_slang_cpp_host_prelude());
+    }
+    else
     {
         // If there is a prelude emit it
         const auto& prelude = compileRequest->getSession()->getPreludeForLanguage(sourceLanguage);

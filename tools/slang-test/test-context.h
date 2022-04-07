@@ -11,10 +11,13 @@
 #include "../../source/core/slang-render-api-util.h"
 
 #include "../../source/compiler-core/slang-downstream-compiler.h"
+#include "../../source/compiler-core/slang-json-rpc-connection.h"
 
 #include "../../slang-com-ptr.h"
 
 #include "options.h"
+
+#include <mutex>
 
 typedef uint32_t PassThroughFlags;
 struct PassThroughFlag
@@ -92,10 +95,14 @@ class TestContext
         /// Set the function for the shared library
     void setInnerMainFunc(const Slang::String& name, InnerMainFunc func);
 
+    void setTestRequirements(TestRequirements* req);
+
+    TestRequirements* getTestRequirements() const;
+
         /// If true tests aren't being run just the information on testing is being accumulated
-    bool isCollectingRequirements() const { return testRequirements != nullptr; }
+    bool isCollectingRequirements() const { return getTestRequirements() != nullptr; }
         /// If set, then tests are executed
-    bool isExecuting() const { return testRequirements == nullptr; }
+    bool isExecuting() const { return getTestRequirements() == nullptr; }
 
         /// True if a render API filter is enabled
     bool isRenderApiFilterEnabled() const { return options.enabledApis != Slang::RenderApiFlag::AllOf && options.enabledApis != 0; }
@@ -106,9 +113,18 @@ class TestContext
         /// True if can run unit tests
     bool canRunUnitTests() const { return options.apiOnly == false; }
 
+        /// Given a spawn type, return the final spawn type.
+        /// In particular we want 'Default' spawn type to vary by the environment (for example running on test server on CI)
+    SpawnType getFinalSpawnType(SpawnType spawnType);
+
+    SpawnType getFinalSpawnType();
+
         /// Get compiler set
     Slang::DownstreamCompilerSet* getCompilerSet();
     Slang::DownstreamCompiler* getDefaultCompiler(SlangSourceLanguage sourceLanguage);
+
+    Slang::JSONRPCConnection* getOrCreateJSONRPCConnection();
+    void destroyRPCConnection();
 
         /// Ctor
     TestContext();
@@ -116,11 +132,9 @@ class TestContext
     ~TestContext();
 
     Options options;
-    TestReporter* reporter = nullptr;
     TestCategorySet categorySet;
 
         /// If set then tests are not run, but their requirements are set 
-    TestRequirements* testRequirements = nullptr;
 
     PassThroughFlags availableBackendFlags = 0;
     Slang::RenderApiFlags availableRenderApiFlags = 0;
@@ -129,14 +143,41 @@ class TestContext
     Slang::RefPtr<Slang::DownstreamCompilerSet> compilerSet;
 
     Slang::String exeDirectoryPath;
-    
+
+        /// Timeout time for communication over connection.
+        /// NOTE! If the timeout is hit, the connection will be destroyed, and then recreated.
+        /// For tests that compile the stdlib, if that takes this time, the stdlib will be
+        /// repeatedly compiled and each time fail.
+        /// NOTE! This timeout may be altered in the ctor for a specific target, the initializatoin
+        /// value is just the default.
+        ///
+        /// TODO(JS): We could split the stdlib compilation from other actions, and have timeout specific for
+        /// that. To do this we could have a 'compileStdLib' RPC method.
+        ///
+        /// Current default is 2 mins.
+    Slang::Int connectionTimeOutInMs = 2 * 60 * 1000;
+
+    void setThreadIndex(int index);
+    void setMaxTestRunnerThreadCount(int count);
+
+    void setTestReporter(TestReporter* reporter);
+    TestReporter* getTestReporter();
+
+    std::mutex mutex;
+
 protected:
+    SlangResult _createJSONRPCConnection(Slang::RefPtr<Slang::JSONRPCConnection>& out);
+
     struct SharedLibraryTool
     {
         Slang::ComPtr<ISlangSharedLibrary> m_sharedLibrary;
         InnerMainFunc m_func;
     };
 
+    Slang::List<Slang::RefPtr<Slang::JSONRPCConnection>> m_jsonRpcConnections;
+    Slang::List<TestReporter*> m_reporters;
+    Slang::List<TestRequirements*> m_testRequirements = nullptr;
+    
     SlangSession* m_session;
 
     Slang::Dictionary<Slang::String, SharedLibraryTool> m_sharedLibTools;

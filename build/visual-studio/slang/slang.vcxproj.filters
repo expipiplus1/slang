@@ -72,7 +72,7 @@
     <ClInclude Include="..\..\..\source\slang\slang-diagnostics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\source\slang\slang-doc-extractor.h">
+    <ClInclude Include="..\..\..\source\slang\slang-doc-ast.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-doc-markdown-writer.h">
@@ -142,6 +142,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-dominators.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\source\slang\slang-ir-entry-point-pass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-entry-point-raw-ptr-params.h">
@@ -225,6 +228,9 @@
     <ClInclude Include="..\..\..\source\slang\slang-ir-sccp.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\source\slang\slang-ir-simplify-cfg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-specialize-arrays.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -250,6 +256,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-spirv-snippet.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\source\slang\slang-ir-ssa-simplification.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\source\slang\slang-ir-ssa.h">
@@ -380,6 +389,9 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\..\prelude\slang-cpp-host-prelude.h.cpp">
+      <Filter>Header Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\prelude\slang-cpp-prelude.h.cpp">
       <Filter>Header Files</Filter>
     </ClCompile>
@@ -458,7 +470,7 @@
     <ClCompile Include="..\..\..\source\slang\slang-diagnostics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\source\slang\slang-doc-extractor.cpp">
+    <ClCompile Include="..\..\..\source\slang\slang-doc-ast.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-doc-markdown-writer.cpp">
@@ -531,6 +543,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-dominators.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\source\slang\slang-ir-entry-point-pass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-entry-point-raw-ptr-params.cpp">
@@ -611,6 +626,9 @@
     <ClCompile Include="..\..\..\source\slang\slang-ir-sccp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\source\slang\slang-ir-simplify-cfg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-specialize-arrays.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -636,6 +654,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-spirv-snippet.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\source\slang\slang-ir-ssa-simplification.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\..\..\source\slang\slang-ir-ssa.cpp">

@@ -276,6 +276,16 @@ convention for interface methods.
 /// SLANG_INLINE exists to have a way to inline consistent with SLANG_ALWAYS_INLINE
 #define SLANG_INLINE inline
 
+// If explicilty disabled and not set, set to not available
+#if !defined(SLANG_HAS_EXCEPTIONS) && defined(SLANG_DISABLE_EXCEPTIONS)
+#   define SLANG_HAS_EXCEPTIONS 0
+#endif
+
+// If not set, the default is exceptions are available
+#ifndef SLANG_HAS_EXCEPTIONS
+#   define SLANG_HAS_EXCEPTIONS 1
+#endif
+
 // Other defines
 #define SLANG_STRINGIZE_HELPER(X) #X
 #define SLANG_STRINGIZE(X) SLANG_STRINGIZE_HELPER(X)
@@ -311,6 +321,7 @@ convention for interface methods.
 #       define SLANG_HAS_ENUM_CLASS 1
 #       define SLANG_OVERRIDE override
 #    endif
+
 // Gcc
 #elif SLANG_GCC_FAMILY
 // Check for C++11
@@ -325,6 +336,12 @@ convention for interface methods.
 #				define SLANG_OVERRIDE override
 #			endif
 #		endif
+
+// TODO(JS): Not used in previous code. Left here as may be useful on some other version. 
+// #define SLANG_RETURN_NEVER __attribute__((__noreturn__))
+
+#       define SLANG_RETURN_NEVER [[noreturn]]
+
 #	endif // SLANG_GCC_FAMILY
 
 // Visual Studio
@@ -342,6 +359,8 @@ convention for interface methods.
 #		    define SLANG_HAS_ENUM_CLASS 1
 #       endif
 
+#   define SLANG_RETURN_NEVER __declspec(noreturn)
+
 #   endif // SLANG_VC
 
 // Set non set
@@ -356,6 +375,10 @@ convention for interface methods.
 #   endif
 
 #endif // __cplusplus
+
+#ifndef SLANG_RETURN_NEVER
+#   define SLANG_RETURN_NEVER /* empty */
+#endif // SLANG_RETURN_NEVER
 
 /* Macros for detecting processor */
 #if defined(_M_ARM) || defined(__ARM_EABI__)
@@ -467,13 +490,20 @@ extern "C"
 
     // Use SLANG_PTR_ macros to determine SlangInt/SlangUInt types.
     // This is used over say using size_t/ptrdiff_t/intptr_t/uintptr_t, because on some targets, these types are distinct from
-    // their uint_t/int_t equivalents and so produce ambiguity with function overloading.   
+    // their uint_t/int_t equivalents and so produce ambiguity with function overloading.
+    //
+    // SlangSizeT is helpful as on some compilers size_t is distinct from a regular integer type and so overloading doesn't work.
+    // Casting to SlangSizeT works around this.
 #if SLANG_PTR_IS_64
     typedef int64_t    SlangInt;
     typedef uint64_t   SlangUInt;
+
+    typedef uint64_t   SlangSizeT;
 #else
     typedef int32_t    SlangInt;
     typedef uint32_t   SlangUInt;
+
+    typedef uint32_t   SlangSizeT;
 #endif
 
     typedef bool SlangBool;
@@ -521,13 +551,14 @@ extern "C"
         SLANG_DXIL,
         SLANG_DXIL_ASM,
         SLANG_C_SOURCE,             ///< The C language
-        SLANG_CPP_SOURCE,           ///< The C++ language
-        SLANG_EXECUTABLE,           ///< Executable (for hosting CPU/OS)
-        SLANG_SHARED_LIBRARY,       ///< A shared library/Dll (for hosting CPU/OS)
-        SLANG_HOST_CALLABLE,        ///< A CPU target that makes the compiled code available to be run immediately
+        SLANG_CPP_SOURCE,           ///< C++ code for shader kernels.
+        SLANG_HOST_EXECUTABLE,           ///<  Standalone binary executable (for hosting CPU/OS)
+        SLANG_SHADER_SHARED_LIBRARY,     ///< A shared library/Dll for shader kernels (for hosting CPU/OS)
+        SLANG_SHADER_HOST_CALLABLE,      ///< A CPU target that makes the compiled shader code available to be run immediately
         SLANG_CUDA_SOURCE,          ///< Cuda source
         SLANG_PTX,                  ///< PTX
         SLANG_OBJECT_CODE,          ///< Object code that can be used for later linking
+        SLANG_HOST_CPP_SOURCE,      ///< C++ code for host library or executable.
         SLANG_TARGET_COUNT_OF,
     };
 
@@ -834,6 +865,8 @@ extern "C"
 #define SLANG_E_INTERNAL_FAIL               SLANG_MAKE_CORE_ERROR(6)
     //! Could not complete because some underlying feature (hardware or software) was not available 
 #define SLANG_E_NOT_AVAILABLE               SLANG_MAKE_CORE_ERROR(7)
+        //! Could not complete because the operation times out. 
+#define SLANG_E_TIME_OUT                    SLANG_MAKE_CORE_ERROR(8)
 
     /** A "Universally Unique Identifier" (UUID)
 
@@ -1332,6 +1365,12 @@ extern "C"
         SlangCompileRequest*    request,
         int targetIndex,
         SlangLineDirectiveMode  mode);
+
+    /*! @see slang::ICompileRequest::setTargetLineDirectiveMode */
+    SLANG_API void spSetTargetForceGLSLScalarBufferLayout(
+        SlangCompileRequest*    request,
+        int targetIndex,
+        bool forceScalarLayout);
 
     /*! @see slang::ICompileRequest::setCodeGenTarget */
     SLANG_API void spSetCodeGenTarget(
@@ -2011,6 +2050,7 @@ extern "C"
     SLANG_API SlangBindingType spReflectionTypeLayout_getBindingRangeType(SlangReflectionTypeLayout* typeLayout, SlangInt index);
     SLANG_API SlangInt spReflectionTypeLayout_getBindingRangeBindingCount(SlangReflectionTypeLayout* typeLayout, SlangInt index);
     SLANG_API SlangReflectionTypeLayout* spReflectionTypeLayout_getBindingRangeLeafTypeLayout(SlangReflectionTypeLayout* typeLayout, SlangInt index);
+    SLANG_API SlangReflectionVariable* spReflectionTypeLayout_getBindingRangeLeafVariable(SlangReflectionTypeLayout* typeLayout, SlangInt index);
     SLANG_API SlangInt spReflectionTypeLayout_getFieldBindingRangeOffset(SlangReflectionTypeLayout* typeLayout, SlangInt fieldIndex);
 
     SLANG_API SlangInt spReflectionTypeLayout_getBindingRangeDescriptorSetIndex(SlangReflectionTypeLayout* typeLayout, SlangInt index);
@@ -2087,6 +2127,9 @@ extern "C"
     // Entry Point Reflection
 
     SLANG_API char const* spReflectionEntryPoint_getName(
+        SlangReflectionEntryPoint* entryPoint);
+
+    SLANG_API char const* spReflectionEntryPoint_getNameOverride(
         SlangReflectionEntryPoint* entryPoint);
 
     SLANG_API unsigned spReflectionEntryPoint_getParameterCount(
@@ -2624,6 +2667,12 @@ namespace slang
                 index);
         }
 
+        VariableReflection* getBindingRangeLeafVariable(SlangInt index)
+        {
+            return (VariableReflection*)spReflectionTypeLayout_getBindingRangeLeafVariable(
+                (SlangReflectionTypeLayout*)this, index);
+        }
+
         SlangInt getBindingRangeDescriptorSetIndex(SlangInt index)
         {
             return spReflectionTypeLayout_getBindingRangeDescriptorSetIndex(
@@ -2853,6 +2902,11 @@ namespace slang
         char const* getName()
         {
             return spReflectionEntryPoint_getName((SlangReflectionEntryPoint*) this);
+        }
+
+        char const* getNameOverride()
+        {
+            return spReflectionEntryPoint_getNameOverride((SlangReflectionEntryPoint*)this);
         }
 
         unsigned getParameterCount()
@@ -3244,6 +3298,25 @@ namespace slang
             */
         virtual SLANG_NO_THROW SlangCapabilityID SLANG_MCALL findCapability(
             char const*     name) = 0;
+
+            /** Set the downstream/pass through compiler to be used for a transition from the source type to the target type
+            @param source The source 'code gen target'
+            @param target The target 'code gen target'
+            @param compiler The compiler/pass through to use for the transition from source to target
+            */
+        virtual SLANG_NO_THROW void SLANG_MCALL setDownstreamCompilerForTransition(SlangCompileTarget source, SlangCompileTarget target, SlangPassThrough compiler) = 0;
+
+            /** Get the downstream/pass through compiler for a transition specified by source and target
+            @param source The source 'code gen target'
+            @param target The target 'code gen target'
+            @return The compiler that is used for the transition. Returns SLANG_PASS_THROUGH_NONE it is not defined
+            */
+        virtual SLANG_NO_THROW SlangPassThrough SLANG_MCALL getDownstreamCompilerForTransition(SlangCompileTarget source, SlangCompileTarget target) = 0;
+
+            /** Get the time in seconds spent in the downstream compiler.
+            @return The time spent in the downstream compiler in the current global session.
+            */
+        virtual SLANG_NO_THROW double SLANG_MCALL getDownstreamCompilerElapsedTime() = 0;
     };
 
     #define SLANG_UUID_IGlobalSession IGlobalSession::getTypeGuid()
@@ -3801,6 +3874,12 @@ namespace slang
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetLineDirectiveMode(
             SlangInt targetIndex,
             SlangLineDirectiveMode mode) = 0;
+
+            /** Set whether to use scalar buffer layouts for GLSL/Vulkan targets.
+                If true, the generated GLSL/Vulkan code will use `scalar` layout for storage buffers.
+                If false, the resulting code will std430 for storage buffers.
+            */
+        virtual SLANG_NO_THROW void SLANG_MCALL setTargetForceGLSLScalarBufferLayout(int targetIndex, bool forceScalarLayout) = 0;
     };
 
     #define SLANG_UUID_ICompileRequest ICompileRequest::getTypeGuid()
@@ -3835,6 +3914,10 @@ namespace slang
             /** The line directive mode for output source code.
             */
         SlangLineDirectiveMode lineDirectiveMode = SLANG_LINE_DIRECTIVE_MODE_DEFAULT;
+
+            /** Whether to force `scalar` layout for glsl shader storage buffers.
+            */
+        bool forceGLSLScalarBufferLayout = false;
     };
 
     typedef uint32_t SessionFlags;
@@ -4209,26 +4292,34 @@ namespace slang
             (and hence the global layout) that results will be deterministic,
             but is not currently documented.
             */
-            virtual SLANG_NO_THROW SlangResult SLANG_MCALL link(
-                IComponentType**            outLinkedComponentType,
-                ISlangBlob**                outDiagnostics = nullptr) = 0;
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL link(
+            IComponentType**            outLinkedComponentType,
+            ISlangBlob**                outDiagnostics = nullptr) = 0;
 
-                /** Get entry point 'callable' functions accessible through the ISlangSharedLibrary interface.
+            /** Get entry point 'callable' functions accessible through the ISlangSharedLibrary interface.
 
-                The functions remain in scope as long as the ISlangSharedLibrary interface is in scope.
+            The functions remain in scope as long as the ISlangSharedLibrary interface is in scope.
 
-                NOTE! Requires a compilation target of SLANG_HOST_CALLABLE.
+            NOTE! Requires a compilation target of SLANG_HOST_CALLABLE.
     
-                @param entryPointIndex  The index of the entry point to get code for.
-                @param targetIndex      The index of the target to get code for (default: zero).
-                @param outSharedLibrary A pointer to a ISharedLibrary interface which functions can be queried on.
-                @returns                A `SlangResult` to indicate success or failure.
-                */
-            virtual SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointHostCallable(
-                int                     entryPointIndex,
-                int                     targetIndex,
-                ISlangSharedLibrary**   outSharedLibrary,
-                slang::IBlob**          outDiagnostics = 0) = 0;
+            @param entryPointIndex  The index of the entry point to get code for.
+            @param targetIndex      The index of the target to get code for (default: zero).
+            @param outSharedLibrary A pointer to a ISharedLibrary interface which functions can be queried on.
+            @returns                A `SlangResult` to indicate success or failure.
+            */
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointHostCallable(
+            int                     entryPointIndex,
+            int                     targetIndex,
+            ISlangSharedLibrary**   outSharedLibrary,
+            slang::IBlob**          outDiagnostics = 0) = 0;
+
+            /** Get a new ComponentType object that represents a renamed entry point.
+
+            The current object must be a single EntryPoint, or a CompositeComponentType or
+            SpecializedComponentType that contains one EntryPoint component.
+            */
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL renameEntryPoint(
+            const char* newName, IComponentType** outEntryPoint) = 0;
     };
     #define SLANG_UUID_IComponentType IComponentType::getTypeGuid()
 
@@ -4381,9 +4472,8 @@ declarations over time.
 extern "C" {
 #endif
 
-
-#define SLANG_ERROR_INSUFFICIENT_BUFFER -1
-#define SLANG_ERROR_INVALID_PARAMETER -2
+#define SLANG_ERROR_INSUFFICIENT_BUFFER SLANG_E_BUFFER_TOO_SMALL
+#define SLANG_ERROR_INVALID_PARAMETER SLANG_E_INVALID_ARG
 
 SLANG_API char const* spGetTranslationUnitSource(
     SlangCompileRequest*    request,

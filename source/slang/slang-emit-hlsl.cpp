@@ -471,6 +471,7 @@ bool HLSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
                 case BaseType::UInt16:
                 case BaseType::UInt:
                 case BaseType::UInt64:
+                case BaseType::Bool:
                     // Because the intermediate type will always
                     // be an integer type, we can convert to
                     // another integer type of the same size
@@ -512,6 +513,7 @@ bool HLSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
 
                 case BaseType::UInt:
                 case BaseType::Int:
+                case BaseType::Bool:
                     break;
                 case BaseType::UInt16:
                 case BaseType::Int16:
@@ -679,7 +681,30 @@ void HLSLSourceEmitter::emitLayoutDirectivesImpl(TargetRequest* targetReq)
 
 void HLSLSourceEmitter::emitVectorTypeNameImpl(IRType* elementType, IRIntegerValue elementCount)
 {
-    // TODO(tfoley) : should really emit these with sugar
+    // In some cases we *need* to use the built-in syntax sugar for vector types,
+    // so we will try to emit those whenever possible.
+    //
+    if( elementCount >= 1 && elementCount <= 4 )
+    {
+        switch( elementType->getOp() )
+        {
+        case kIROp_FloatType:
+        case kIROp_IntType:
+        case kIROp_UIntType:
+        // TODO: There are more types that need to be covered here
+            emitType(elementType);
+            m_writer->emit(elementCount);
+            return;
+
+        default:
+            break;
+        }
+    }
+
+    // As a fallback, we will use the `vector<...>` type constructor,
+    // although we should not expect to run into types that don't
+    // have a sugared form.
+    //
     m_writer->emit("vector<");
     emitType(elementType);
     m_writer->emit(",");
@@ -971,6 +996,18 @@ void HLSLSourceEmitter::emitPostKeywordTypeAttributesImpl(IRInst* inst)
     }
 }
 
+void HLSLSourceEmitter::_emitPrefixTypeAttr(IRAttr* attr)
+{
+    switch( attr->getOp() )
+    {
+    default:
+        Super::_emitPrefixTypeAttr(attr);
+        break;
+
+    case kIROp_UNormAttr: m_writer->emit("unorm "); break;
+    case kIROp_SNormAttr: m_writer->emit("snorm "); break;
+    }
+}
 
 void HLSLSourceEmitter::emitSimpleFuncParamImpl(IRParam* param)
 {

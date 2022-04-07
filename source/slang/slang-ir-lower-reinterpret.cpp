@@ -17,12 +17,6 @@ struct ReinterpretLoweringContext
 
     void addToWorkList(IRInst* inst)
     {
-        for (auto ii = inst->getParent(); ii; ii = ii->getParent())
-        {
-            if (as<IRGeneric>(ii))
-                return;
-        }
-
         if (workList.Contains(inst))
             return;
 
@@ -44,8 +38,7 @@ struct ReinterpretLoweringContext
     void processModule()
     {
         SharedIRBuilder* sharedBuilder = &sharedBuilderStorage;
-        sharedBuilder->module = module;
-        sharedBuilder->session = module->session;
+        sharedBuilder->init(module);
 
         // Deduplicate equivalent types.
         sharedBuilder->deduplicateAndRebuildGlobalNumberingMap();
@@ -84,8 +77,7 @@ struct ReinterpretLoweringContext
         }
         SlangInt anyValueSize = Math::Max(fromTypeSize, toTypeSize);
 
-        IRBuilder builder;
-        builder.sharedBuilder = &sharedBuilderStorage;
+        IRBuilder builder(sharedBuilderStorage);
         builder.setInsertBefore(inst);
         auto anyValueType = builder.getAnyValueType(builder.getIntValue(builder.getUIntType(), anyValueSize));
         auto packInst = builder.emitPackAnyValue(

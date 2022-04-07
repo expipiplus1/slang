@@ -265,27 +265,28 @@ SlangReflectionType* spReflectionUserAttribute_GetArgumentType(SlangReflectionUs
 SLANG_API SlangResult spReflectionUserAttribute_GetArgumentValueInt(SlangReflectionUserAttribute* attrib, unsigned int index, int * rs)
 {
     auto userAttr = convert(attrib);
-    if (!userAttr) return SLANG_ERROR_INVALID_PARAMETER;
-    if (index >= (unsigned int)userAttr->args.getCount()) return SLANG_ERROR_INVALID_PARAMETER;
+    if (!userAttr) return SLANG_E_INVALID_ARG;
+    if (index >= (unsigned int)userAttr->args.getCount()) return SLANG_E_INVALID_ARG;
+
     NodeBase* val = nullptr;
     if (userAttr->intArgVals.TryGetValue(index, val))
     {
         *rs = (int)as<ConstantIntVal>(val)->value;
         return 0;
     }
-    return SLANG_ERROR_INVALID_PARAMETER;
+    return SLANG_E_INVALID_ARG;
 }
 SLANG_API SlangResult spReflectionUserAttribute_GetArgumentValueFloat(SlangReflectionUserAttribute* attrib, unsigned int index, float * rs)
 {
     auto userAttr = convert(attrib);
-    if (!userAttr) return SLANG_ERROR_INVALID_PARAMETER;
-    if (index >= (unsigned int)userAttr->args.getCount()) return SLANG_ERROR_INVALID_PARAMETER;
+    if (!userAttr) return SLANG_E_INVALID_ARG;
+    if (index >= (unsigned int)userAttr->args.getCount()) return SLANG_E_INVALID_ARG;
     if (auto cexpr = as<FloatingPointLiteralExpr>(userAttr->args[index]))
     {
         *rs = (float)cexpr->value;
         return 0;
     }
-    return SLANG_ERROR_INVALID_PARAMETER;
+    return SLANG_E_INVALID_ARG;
 }
 SLANG_API const char* spReflectionUserAttribute_GetArgumentValueString(SlangReflectionUserAttribute* attrib, unsigned int index, size_t* bufLen)
 {
@@ -728,6 +729,8 @@ SLANG_API SlangReflectionType * spReflection_FindTypeByName(SlangReflection * re
     try
     {
         Type* result = program->getTypeFromString(name, &sink);
+        if (as<ErrorType>(result))
+            return nullptr;
         return (SlangReflectionType*)result;
     }
     catch( ... )
@@ -1557,6 +1560,7 @@ namespace Slang
 
                 TypeLayout::ExtendedInfo::BindingRangeInfo bindingRange;
                 bindingRange.leafTypeLayout = typeLayout;
+                bindingRange.leafVariable = path.primary ? path.primary->var->getVariable() : nullptr;
                 bindingRange.bindingType = bindingType;
                 bindingRange.count = multiplier;
                 bindingRange.descriptorSetIndex = -1;
@@ -1743,6 +1747,7 @@ namespace Slang
                 //
                 TypeLayout::ExtendedInfo::BindingRangeInfo bindingRange;
                 bindingRange.leafTypeLayout = typeLayout;
+                bindingRange.leafVariable = path.primary ? path.primary->var->getVariable() : nullptr;
                 bindingRange.bindingType = SLANG_BINDING_TYPE_EXISTENTIAL_VALUE;
                 bindingRange.count = multiplier;
                 bindingRange.descriptorSetIndex = 0;
@@ -1815,6 +1820,7 @@ namespace Slang
                 //
                 TypeLayout::ExtendedInfo::BindingRangeInfo bindingRange;
                 bindingRange.leafTypeLayout = typeLayout;
+                bindingRange.leafVariable = path.primary ? path.primary->var->getVariable() : nullptr;
                 bindingRange.bindingType = bindingType;
                 bindingRange.count = multiplier;
                 bindingRange.descriptorSetIndex = 0;
@@ -2013,6 +2019,24 @@ SLANG_API SlangReflectionTypeLayout* spReflectionTypeLayout_getBindingRangeLeafT
 
     return convert(bindingRange.leafTypeLayout);
 }
+
+SLANG_API SlangReflectionVariable* spReflectionTypeLayout_getBindingRangeLeafVariable(
+    SlangReflectionTypeLayout* inTypeLayout, SlangInt index)
+{
+    auto typeLayout = convert(inTypeLayout);
+    if (!typeLayout)
+        return 0;
+
+    auto extTypeLayout = Slang::getExtendedTypeLayout(typeLayout);
+    if (index < 0)
+        return 0;
+    if (index >= extTypeLayout->m_bindingRanges.getCount())
+        return 0;
+    auto& bindingRange = extTypeLayout->m_bindingRanges[index];
+
+    return convert(bindingRange.leafVariable);
+}
+
 
 SLANG_API SlangInt spReflectionTypeLayout_getBindingRangeDescriptorSetIndex(SlangReflectionTypeLayout* inTypeLayout, SlangInt index)
 {
@@ -2565,6 +2589,19 @@ SLANG_API char const* spReflectionEntryPoint_getName(
 {
     auto entryPointLayout = convert(inEntryPoint);
     return entryPointLayout ? getCstr(entryPointLayout->name) : nullptr;
+}
+
+SLANG_API char const* spReflectionEntryPoint_getNameOverride(SlangReflectionEntryPoint* inEntryPoint)
+{
+    auto entryPointLayout = convert(inEntryPoint);
+    if (entryPointLayout)
+    {
+        if (entryPointLayout->nameOverride.getLength())
+            return entryPointLayout->nameOverride.getBuffer();
+        else
+            return getCstr(entryPointLayout->name);
+    }
+    return nullptr;
 }
 
 SLANG_API unsigned spReflectionEntryPoint_getParameterCount(

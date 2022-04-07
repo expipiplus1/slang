@@ -128,7 +128,7 @@ String DocMarkdownWriter::_getName(InheritanceDecl* decl)
     return buf.ProduceString();
 }
 
-DocMarkdownWriter::NameAndText DocMarkdownWriter::_getNameAndText(DocMarkup::Entry* entry, Decl* decl)
+DocMarkdownWriter::NameAndText DocMarkdownWriter::_getNameAndText(ASTMarkup::Entry* entry, Decl* decl)
 {
     NameAndText nameAndText;
 
@@ -146,7 +146,7 @@ DocMarkdownWriter::NameAndText DocMarkdownWriter::_getNameAndText(DocMarkup::Ent
 
 DocMarkdownWriter::NameAndText DocMarkdownWriter::_getNameAndText(Decl* decl)
 {
-    DocMarkup::Entry* entry = m_markup->getEntry(decl);
+    ASTMarkup::Entry* entry = m_markup->getEntry(decl);
     return _getNameAndText(entry, decl);
 }
 
@@ -242,7 +242,7 @@ void DocMarkdownWriter::_appendCommaList(const List<String>& strings, char wrapC
     }
 }
 
-void DocMarkdownWriter::writeVar(const DocMarkup::Entry& entry, VarDecl* varDecl)
+void DocMarkdownWriter::writeVar(const ASTMarkup::Entry& entry, VarDecl* varDecl)
 {
     writePreamble(entry);
     auto& out = m_builder;
@@ -422,6 +422,11 @@ static DocMarkdownWriter::Requirement _getRequirementFromTargetToken(const Token
     }
 
     auto targetName = tok.getContent();
+    if (targetName == "spirv_direct")
+    {
+        return Requirement{CodeGenTarget::SPIRV, UnownedStringSlice("")};
+    }
+
     const CapabilityAtom targetCap = findCapabilityAtom(targetName);
 
     if (targetCap == CapabilityAtom::Invalid)
@@ -543,6 +548,7 @@ void DocMarkdownWriter::_writeTargetRequirements(const Requirement* reqs, Index 
 
     // Okay we need the name of the CodeGen target
     UnownedStringSlice name = TypeTextUtil::getCompileTargetName(SlangCompileTarget(reqs->target));
+
     out << toSlice("**") << String(name).toUpper() << toSlice("**");
 
     if (!(reqsCount == 1 && reqs[0].value.getLength() == 0))
@@ -674,7 +680,7 @@ static bool _isFirstOverridden(Decl* decl)
     return false;
 }
 
-void DocMarkdownWriter::writeCallableOverridable(const DocMarkup::Entry& entry, CallableDecl* callableDecl)
+void DocMarkdownWriter::writeCallableOverridable(const ASTMarkup::Entry& entry, CallableDecl* callableDecl)
 {
     auto& out = m_builder;
 
@@ -837,7 +843,7 @@ void DocMarkdownWriter::writeCallableOverridable(const DocMarkup::Entry& entry, 
     }
 }
 
-void DocMarkdownWriter::writeEnum(const DocMarkup::Entry& entry, EnumDecl* enumDecl)
+void DocMarkdownWriter::writeEnum(const ASTMarkup::Entry& entry, EnumDecl* enumDecl)
 {
     writePreamble(entry);
 
@@ -957,7 +963,7 @@ void DocMarkdownWriter::_appendAggTypeName(AggTypeDeclBase* aggTypeDecl)
     }
 }
 
-void DocMarkdownWriter::writeAggType(const DocMarkup::Entry& entry, AggTypeDeclBase* aggTypeDecl)
+void DocMarkdownWriter::writeAggType(const ASTMarkup::Entry& entry, AggTypeDeclBase* aggTypeDecl)
 {
     writePreamble(entry);
 
@@ -999,7 +1005,7 @@ void DocMarkdownWriter::writeAggType(const DocMarkup::Entry& entry, AggTypeDeclB
                 out << "* _" << assocTypeDecl->getName()->text << "_ ";
 
                 // Look up markup
-                DocMarkup::Entry* assocTypeDeclEntry = m_markup->getEntry(assocTypeDecl);
+                ASTMarkup::Entry* assocTypeDeclEntry = m_markup->getEntry(assocTypeDecl);
                 if (assocTypeDeclEntry)
                 {
                     _appendAsSingleLine(assocTypeDeclEntry->m_markup.getUnownedSlice(), out);
@@ -1080,7 +1086,7 @@ void DocMarkdownWriter::writeAggType(const DocMarkup::Entry& entry, AggTypeDeclB
     }
 }
 
-void DocMarkdownWriter::writePreamble(const DocMarkup::Entry& entry)
+void DocMarkdownWriter::writePreamble(const ASTMarkup::Entry& entry)
 {
     SLANG_UNUSED(entry);
     auto& out = m_builder;
@@ -1091,7 +1097,7 @@ void DocMarkdownWriter::writePreamble(const DocMarkup::Entry& entry)
     out << toSlice("\n");
 }
 
-void DocMarkdownWriter::writeDescription(const DocMarkup::Entry& entry)
+void DocMarkdownWriter::writeDescription(const ASTMarkup::Entry& entry)
 {
     auto& out = m_builder;
 
@@ -1111,7 +1117,7 @@ void DocMarkdownWriter::writeDescription(const DocMarkup::Entry& entry)
     }
 }
 
-void DocMarkdownWriter::writeDecl(const DocMarkup::Entry& entry, Decl* decl)
+void DocMarkdownWriter::writeDecl(const ASTMarkup::Entry& entry, Decl* decl)
 {
     // Skip these they will be output as part of their respective 'containers'
     if (as<ParamDecl>(decl) || as<EnumCaseDecl>(decl) || as<AssocTypeDecl>(decl) || as<InheritanceDecl>(decl))
@@ -1155,7 +1161,7 @@ bool DocMarkdownWriter::isVisible(const Name* name)
     return name == nullptr || !name->text.startsWith(toSlice("__"));
 }
 
-bool DocMarkdownWriter::isVisible(const DocMarkup::Entry& entry)
+bool DocMarkdownWriter::isVisible(const ASTMarkup::Entry& entry)
 {
     // For now if it's not public it's not visible
     if (entry.m_visibility != MarkupVisibility::Public)

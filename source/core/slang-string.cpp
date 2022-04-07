@@ -11,13 +11,64 @@ namespace Slang
     // for anything that uses core
     static const auto s_charUtilLink = CharUtil::_ensureLink();
 
-    // TODO: this belongs in a different file:
 
-    SLANG_RETURN_NEVER void signalUnexpectedError(char const* message)
+    // StringRepresentation
+
+    void StringRepresentation::setContents(const UnownedStringSlice& slice)
     {
-        // Can be useful to uncomment during debug when problem is on CI
-        // printf("Unexpected: %s\n", message);
-        throw InternalError(message);
+        const auto sliceLength = slice.getLength();
+        SLANG_ASSERT(sliceLength <= capacity);
+
+        char* chars = getData();
+
+        // Use move (rather than memcpy), because the slice *could* be contained in the StringRepresentation
+        ::memmove(chars, slice.begin(), sliceLength * sizeof(char));
+        // Zero terminate. 
+        chars[sliceLength] = 0;
+        // Set the length
+        length = sliceLength;
+    }
+
+
+    /* static */StringRepresentation* StringRepresentation::create(const UnownedStringSlice& slice)
+    {
+        const auto sliceLength = slice.getLength();
+
+        if (sliceLength)
+        {
+            StringRepresentation* rep = StringRepresentation::createWithLength(sliceLength);
+         
+            char* chars = rep->getData();
+            ::memcpy(chars, slice.begin(), sizeof(char) * sliceLength);
+            chars[sliceLength] = 0;
+
+            return rep;
+        }
+        else
+        {
+            return nullptr;
+        }
+    }
+
+    /* static */StringRepresentation* StringRepresentation::createWithReference(const UnownedStringSlice& slice)
+    {
+        const auto sliceLength = slice.getLength();
+
+        if (sliceLength)
+        {
+            StringRepresentation* rep = StringRepresentation::createWithLength(sliceLength);
+            rep->addReference();
+
+            char* chars = rep->getData();
+            ::memcpy(chars, slice.begin(), sizeof(char) * sliceLength);
+            chars[sliceLength] = 0;
+
+            return rep;
+        }
+        else
+        {
+            return nullptr;
+        }
     }
 
     // OSString
@@ -120,6 +171,14 @@ namespace Slang
         return UnownedStringSlice(start, end);
     }
 
+    UnownedStringSlice UnownedStringSlice::trimStart() const
+    {
+        const char* start = m_begin;
+
+        while (start < m_end && CharUtil::isHorizontalWhitespace(*start)) start++;
+        return UnownedStringSlice(start, m_end);
+    }
+
     UnownedStringSlice UnownedStringSlice::trim(char c) const
     {
         const char* start = m_begin;
@@ -217,37 +276,42 @@ namespace Slang
 
     String String::fromWString(const wchar_t * wstr)
     {
+        List<char> buf;
 #ifdef _WIN32
-        return Slang::Encoding::UTF16->ToString((const char*)wstr, (int)(wcslen(wstr) * sizeof(wchar_t)));
+        Slang::CharEncoding::UTF16->decode((const Byte*)wstr, (int)(wcslen(wstr) * sizeof(wchar_t)), buf);
 #else
-        return Slang::Encoding::UTF32->ToString((const char*)wstr, (int)(wcslen(wstr) * sizeof(wchar_t)));
+        Slang::CharEncoding::UTF32->decode((const Byte*)wstr, (int)(wcslen(wstr) * sizeof(wchar_t)), buf);
 #endif
+        return String(buf.begin(), buf.end());
     }
 
     String String::fromWString(const wchar_t * wstr, const wchar_t * wend)
     {
+        List<char> buf;
 #ifdef _WIN32
-        return Slang::Encoding::UTF16->ToString((const char*)wstr, (int)((wend - wstr) * sizeof(wchar_t)));
+        Slang::CharEncoding::UTF16->decode((const Byte*)wstr, (int)((wend - wstr) * sizeof(wchar_t)), buf);
 #else
-        return Slang::Encoding::UTF32->ToString((const char*)wstr, (int)((wend - wstr) * sizeof(wchar_t)));
+        Slang::CharEncoding::UTF32->decode((const Byte*)wstr, (int)((wend - wstr) * sizeof(wchar_t)), buf);
 #endif
+        return String(buf.begin(), buf.end());
     }
 
     String String::fromWChar(const wchar_t ch)
     {
+        List<char> buf;
 #ifdef _WIN32
-        return Slang::Encoding::UTF16->ToString((const char*)&ch, (int)(sizeof(wchar_t)));
+        Slang::CharEncoding::UTF16->decode((const Byte*)&ch, (int)(sizeof(wchar_t)), buf);
 #else
-        return Slang::Encoding::UTF32->ToString((const char*)&ch, (int)(sizeof(wchar_t)));
+        Slang::CharEncoding::UTF32->decode((const Byte*)&ch, (int)(sizeof(wchar_t)), buf);
 #endif
+        return String(buf.begin(), buf.end());
     }
 
-    String String::fromUnicodePoint(unsigned int codePoint)
+    /* static */String String::fromUnicodePoint(Char32 codePoint)
     {
         char buf[6];
-        int len = Slang::EncodeUnicodePointToUTF8(buf, (int)codePoint);
-        buf[len] = 0;
-        return String(buf);
+        int len = Slang::encodeUnicodePointToUTF8(codePoint, buf);
+        return String(buf, buf + len);
     }
 
     OSString String::toWString(Index* outLength) const
@@ -258,15 +322,15 @@ namespace Slang
         }
         else
         {
-            List<char> buf;
+            List<Byte> buf;
             switch(sizeof(wchar_t))
             {
             case 2:
-                Slang::Encoding::UTF16->GetBytes(buf, *this);                
+                Slang::CharEncoding::UTF16->encode(getUnownedSlice(), buf); 
                 break;
 
             case 4:
-                Slang::Encoding::UTF32->GetBytes(buf, *this);                
+                Slang::CharEncoding::UTF32->encode(getUnownedSlice(), buf);
                 break;
 
             default:

@@ -23,12 +23,12 @@ namespace Slang
 
     switch (options.targetType)
     {
-        case SLANG_SHARED_LIBRARY:
+        case SLANG_SHADER_SHARED_LIBRARY:
         {
             outPath << options.modulePath << ".dll";
             return SLANG_OK;
         }
-        case SLANG_EXECUTABLE:
+        case SLANG_HOST_EXECUTABLE:
         {
             outPath << options.modulePath << ".exe";
             return SLANG_OK;
@@ -60,7 +60,7 @@ namespace Slang
     {
         outPaths.add(options.modulePath + ".ilk");
 
-        if (options.targetType == SLANG_SHARED_LIBRARY)
+        if (options.targetType == SLANG_SHADER_SHARED_LIBRARY)
         {
             outPaths.add(options.modulePath + ".exp");
             outPaths.add(options.modulePath + ".lib");
@@ -87,8 +87,7 @@ namespace Slang
     // https://docs.microsoft.com/en-us/cpp/build/reference/compiler-options-listed-alphabetically?view=vs-2019
 
     cmdLine.addArg("/nologo");
-    // Generate complete debugging information
-    cmdLine.addArg("/Zi");
+
     // Display full path of source files in diagnostics
     cmdLine.addArg("/FC");
 
@@ -139,6 +138,8 @@ namespace Slang
     // /Fd - followed by name of the pdb file
     if (options.debugInfoType != DebugInfoType::None)
     {
+        // Generate complete debugging information
+        cmdLine.addArg("/Zi");
         cmdLine.addPrefixPathArg("/Fd", options.modulePath, ".pdb");
     }
 
@@ -190,7 +191,7 @@ namespace Slang
 
     switch (options.targetType)
     {
-        case SLANG_SHARED_LIBRARY:
+        case SLANG_SHADER_SHARED_LIBRARY:
         {
             // Create dynamic link library
             if (options.debugInfoType == DebugInfoType::None)
@@ -205,7 +206,7 @@ namespace Slang
             cmdLine.addPrefixPathArg("/Fe", options.modulePath, ".dll");
             break;
         }
-        case SLANG_EXECUTABLE:
+        case SLANG_HOST_EXECUTABLE:
         {
             cmdLine.addPrefixPathArg("/Fe", options.modulePath, ".exe");
             break;
@@ -253,6 +254,12 @@ namespace Slang
     {
         // Note that any escaping of the path is handled in the ProcessUtil::
         cmdLine.addPrefixPathArg("/LIBPATH:", libPath);
+    }
+
+    // Link libraries.
+    for (const auto& lib : options.libraries)
+    {
+        cmdLine.addPrefixPathArg("", lib, ".lib");
     }
 
     return SLANG_OK;

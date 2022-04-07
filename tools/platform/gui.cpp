@@ -98,15 +98,16 @@ GUI::GUI(
 #if 0
     gfx::IShaderProgram::Desc programDesc = {};
     programDesc.pipelineType = gfx::PipelineType::Graphics;
-    programDesc.slangProgram = slangProgram;
+    programDesc.slangGlobalScope = slangGlobalScope;
     program = device->createProgram(programDesc);
 #endif
     InputElementDesc inputElements[] = {
-        {"U", 0, Format::RG_Float32,        offsetof(ImDrawVert, pos) },
-        {"U", 1, Format::RG_Float32,        offsetof(ImDrawVert, uv) },
-        {"U", 2, Format::RGBA_Unorm_UInt8,  offsetof(ImDrawVert, col) },
+        {"U", 0, Format::R32G32_FLOAT,        offsetof(ImDrawVert, pos) },
+        {"U", 1, Format::R32G32_FLOAT,        offsetof(ImDrawVert, uv) },
+        {"U", 2, Format::R8G8B8A8_UNORM,  offsetof(ImDrawVert, col) },
     };
     auto inputLayout = device->createInputLayout(
+        sizeof(ImDrawVert),
         &inputElements[0],
         SLANG_COUNT_OF(inputElements));
 
@@ -122,7 +123,7 @@ GUI::GUI(
     pipelineDesc.framebufferLayout = framebufferLayout;
     pipelineDesc.program = program;
     pipelineDesc.inputLayout = inputLayout;
-    pipelineDesc.blend.targets = &targetBlendDesc;
+    pipelineDesc.blend.targets[0] = targetBlendDesc;
     pipelineDesc.blend.targetCount = 1;
     pipelineDesc.rasterizer.cullMode = CullMode::None;
 
@@ -141,7 +142,7 @@ GUI::GUI(
     {
         gfx::ITextureResource::Desc desc = {};
         desc.type = IResource::Type::Texture2D;
-        desc.format = Format::RGBA_Unorm_UInt8;
+        desc.format = Format::R8G8B8A8_UNORM;
         desc.arraySize = 0;
         desc.size.width = width;
         desc.size.height = height;
@@ -216,7 +217,7 @@ void GUI::endFrame(ITransientResourceHeap* transientHeap, IFramebuffer* framebuf
     vertexBufferDesc.allowedStates =
         ResourceStateSet(ResourceState::VertexBuffer, ResourceState::CopyDestination);
     vertexBufferDesc.sizeInBytes = vertexCount * sizeof(ImDrawVert);
-    vertexBufferDesc.cpuAccessFlags = AccessFlag::Write;
+    vertexBufferDesc.memoryType = MemoryType::Upload;
     auto vertexBuffer = device->createBufferResource(vertexBufferDesc);
 
     gfx::IBufferResource::Desc indexBufferDesc;
@@ -225,7 +226,7 @@ void GUI::endFrame(ITransientResourceHeap* transientHeap, IFramebuffer* framebuf
     indexBufferDesc.allowedStates =
         ResourceStateSet(ResourceState::IndexBuffer, ResourceState::CopyDestination);
     indexBufferDesc.defaultState = ResourceState::IndexBuffer;
-    indexBufferDesc.cpuAccessFlags = AccessFlag::Write;
+    indexBufferDesc.memoryType = MemoryType::Upload;
     auto indexBuffer = device->createBufferResource(indexBufferDesc);
     auto cmdBuf = transientHeap->createCommandBuffer();
     auto encoder = cmdBuf->encodeResourceCommands();
@@ -253,7 +254,7 @@ void GUI::endFrame(ITransientResourceHeap* transientHeap, IFramebuffer* framebuf
         ResourceStateSet(ResourceState::ConstantBuffer, ResourceState::CopyDestination);
     constantBufferDesc.defaultState = ResourceState::ConstantBuffer;
     constantBufferDesc.sizeInBytes = sizeof(glm::mat4x4);
-    constantBufferDesc.cpuAccessFlags = AccessFlag::Write;
+    constantBufferDesc.memoryType = MemoryType::Upload;
     auto constantBuffer = device->createBufferResource(constantBufferDesc);
 
     {
@@ -287,13 +288,13 @@ void GUI::endFrame(ITransientResourceHeap* transientHeap, IFramebuffer* framebuf
 
     renderEncoder->bindPipeline(pipelineState);
 
-    renderEncoder->setVertexBuffer(0, vertexBuffer, sizeof(ImDrawVert));
+    renderEncoder->setVertexBuffer(0, vertexBuffer);
     renderEncoder->setIndexBuffer(
-        indexBuffer, sizeof(ImDrawIdx) == 2 ? Format::R_UInt16 : Format::R_UInt32);
+        indexBuffer, sizeof(ImDrawIdx) == 2 ? Format::R16_UINT : Format::R32_UINT);
     renderEncoder->setPrimitiveTopology(PrimitiveTopology::TriangleList);
 
-    UInt vertexOffset = 0;
-    UInt indexOffset = 0;
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
     ImVec2 pos = draw_data->DisplayPos;
     for(int ii = 0; ii < commandListCount; ++ii)
     {
@@ -310,16 +311,16 @@ void GUI::endFrame(ITransientResourceHeap* transientHeap, IFramebuffer* framebuf
             {
                 ScissorRect rect =
                 {
-                    (Int)(command->ClipRect.x - pos.x),
-                    (Int)(command->ClipRect.y - pos.y),
-                    (Int)(command->ClipRect.z - pos.x),
-                    (Int)(command->ClipRect.w - pos.y)
+                    (int32_t)(command->ClipRect.x - pos.x),
+                    (int32_t)(command->ClipRect.y - pos.y),
+                    (int32_t)(command->ClipRect.z - pos.x),
+                    (int32_t)(command->ClipRect.w - pos.y)
                 };
                 renderEncoder->setScissorRects(1, &rect);
 
                 // TODO: set parameter into root shader object.
                 
-                renderEncoder->drawIndexed(command->ElemCount, indexOffset, vertexOffset);
+                renderEncoder->drawIndexed(command->ElemCount, (uint32_t)indexOffset, (uint32_t)vertexOffset);
             }
             indexOffset += command->ElemCount;
         }

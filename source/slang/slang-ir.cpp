@@ -200,7 +200,7 @@ namespace Slang
         return nullptr;
     }
 
-    IROperandListBase IRInst::getAllAttrs()
+    IROperandList<IRAttr> IRInst::getAllAttrs()
     {
         // We assume as an invariant that all attributes appear at the end of the operand
         // list, after all the non-attribute operands.
@@ -215,7 +215,7 @@ namespace Slang
         while(cursor != end && !as<IRAttr>(cursor->get()))
             cursor++;
 
-        return IROperandListBase(cursor, end);
+        return IROperandList<IRAttr>(cursor, end);
     }
 
     // IRConstant
@@ -702,12 +702,8 @@ namespace Slang
         auto irModule = func->getModule();
         SLANG_ASSERT(irModule);
 
-        SharedIRBuilder sharedBuilder;
-        sharedBuilder.module = irModule;
-
-        IRBuilder builder;
-        builder.sharedBuilder = &sharedBuilder;
-
+        SharedIRBuilder sharedBuilder(irModule);
+        IRBuilder builder(sharedBuilder);
         builder.setInsertBefore(func);
 
         List<IRType*> paramTypes;
@@ -1121,16 +1117,33 @@ namespace Slang
 
     //
 
-    IRBlock* IRBuilder::getBlock()
+    IRInst* IRInsertLoc::getParent() const
     {
-        return as<IRBlock>(insertIntoParent);
+        auto inst = getInst();
+        switch(getMode())
+        {
+        default:
+        case Mode::None:
+            return nullptr;
+        case Mode::Before:
+        case Mode::After:
+            return inst->getParent();
+        case Mode::AtStart:
+        case Mode::AtEnd:
+            return inst;
+        }
+    }
+
+    IRBlock* IRInsertLoc::getBlock() const
+    {
+        return as<IRBlock>(getParent());
     }
 
     // Get the current function (or other value with code)
     // that we are inserting into (if any).
-    IRGlobalValueWithCode* IRBuilder::getFunc()
+    IRGlobalValueWithCode* IRInsertLoc::getFunc() const
     {
-        auto pp = insertIntoParent;
+        auto pp = getParent();
         if (auto block = as<IRBlock>(pp))
         {
             pp = pp->getParent();
@@ -1138,37 +1151,11 @@ namespace Slang
         return as<IRGlobalValueWithCode>(pp);
     }
 
-
-    void IRBuilder::setInsertInto(IRInst* insertInto)
-    {
-        insertIntoParent = insertInto;
-        insertBeforeInst = nullptr;
-    }
-
-    void IRBuilder::setInsertBefore(IRInst* insertBefore)
-    {
-        SLANG_ASSERT(insertBefore);
-        insertIntoParent = insertBefore->parent;
-        insertBeforeInst = insertBefore;
-    }
-
-
     // Add an instruction into the current scope
     void IRBuilder::addInst(
         IRInst*     inst)
     {
-        if(insertBeforeInst)
-        {
-            inst->insertBefore(insertBeforeInst);
-        }
-        else if (insertIntoParent)
-        {
-            inst->insertAtEnd(insertIntoParent);
-        }
-        else
-        {
-            // Don't append the instruction anywhere
-        }
+        inst->insertAt(m_insertLoc);
     }
 
     // Given two parent instructions, pick the better one to use as as
@@ -1313,33 +1300,34 @@ namespace Slang
         return parent;
     }
 
-    IRInst* createEmptyInst(
-        IRModule*   module,
-        IROp        op,
-        int         totalArgCount)
+    IRInst* IRModule::_allocateInst(
+        IROp    op,
+        Int     operandCount,
+        size_t  minSizeInBytes)
     {
-        size_t size = sizeof(IRInst) + (totalArgCount) * sizeof(IRUse);
+        // There are two basic cases for instructions that affect how we compute size:
+        //
+        // * The default case is that an instruction's state is fully defined by the fields
+        //   in the `IRInst` base type, along with the trailing operand list (a tail-allocated
+        //   array of `IRUse`s. Almost all instructions need space allocated this way.
+        //
+        // * A small number of cases (currently `IRConstant`s and the `IRModule` type) have
+        //   *zero* operands but include additional state beyond the fields in `IRInst`.
+        //   For these cases we want to ensure that at least `sizeof(T)` bytes are allocated,
+        //   based on the specific leaf type `T`.
+        //
+        // We handle the combination of the two cases by just taking the maximum of the two
+        // different sizes.
+        //
+        size_t defaultSize = sizeof(IRInst) + (operandCount) * sizeof(IRUse);
+        size_t totalSize = minSizeInBytes > defaultSize ? minSizeInBytes : defaultSize;
 
-        SLANG_ASSERT(module);
-        IRInst* inst = (IRInst*)module->memoryArena.allocateAndZero(size);
+        IRInst* inst = (IRInst*) m_memoryArena.allocateAndZero(totalSize);
 
-        inst->operandCount = uint32_t(totalArgCount);
-        inst->m_op = op;
+        // TODO: Is it actually important to run a constructor here?
+        new(inst) IRInst();
 
-        return inst;
-    }
-
-    IRInst* createEmptyInstWithSize(
-        IRModule*   module,
-        IROp        op,
-        size_t      totalSizeInBytes)
-    {
-        SLANG_ASSERT(totalSizeInBytes >= sizeof(IRInst));
-
-        SLANG_ASSERT(module);
-        IRInst* inst = (IRInst*)module->memoryArena.allocateAndZero(totalSizeInBytes);
-
-        inst->operandCount = 0;
+        inst->operandCount = uint32_t(operandCount);
         inst->m_op = op;
 
         return inst;
@@ -1561,14 +1549,10 @@ namespace Slang
         }
     }
 
-    static void maybeSetSourceLoc(
-        IRBuilder*  builder,
-        IRInst*     value)
+    void IRBuilder::_maybeSetSourceLoc(
+        IRInst*     inst)
     {
-        if(!builder)
-            return;
-
-        auto sourceLocInfo = builder->sourceLocInfo;
+        auto sourceLocInfo = getSourceLocInfo();
         if(!sourceLocInfo)
             return;
 
@@ -1584,7 +1568,7 @@ namespace Slang
             sourceLocInfo = sourceLocInfo->next;
         }
 
-        value->sourceLoc = sourceLocInfo->sourceLoc;
+        inst->sourceLoc = sourceLocInfo->sourceLoc;
     }
 
 #if SLANG_ENABLE_IR_BREAK_ALLOC
@@ -1606,56 +1590,39 @@ namespace Slang
     }
 #endif
 
-    // Create an IR instruction/value and initialize it.
-    //
-    // In this case `argCount` and `args` represent the
-    // arguments *after* the type (which is a mandatory
-    // argument for all instructions).
-    template<typename T>
-    static T* createInstImpl(
-        IRModule*       module,
-        IRBuilder*      builder,
-        IROp            op,
-        IRType*         type,
-        UInt            fixedArgCount,
-        IRInst* const* fixedArgs,
-        UInt                    varArgListCount,
-        UInt const*             listArgCounts,
+    IRInst* IRBuilder::_createInst(
+        size_t                  minSizeInBytes,
+        IRType*                 type,
+        IROp                    op,
+        Int                     fixedArgCount,
+        IRInst* const*          fixedArgs,
+        Int                     varArgListCount,
+        Int const*              listArgCounts,
         IRInst* const* const*   listArgs)
     {
-        UInt varArgCount = 0;
-        for (UInt ii = 0; ii < varArgListCount; ++ii)
+        Int varArgCount = 0;
+        for (Int ii = 0; ii < varArgListCount; ++ii)
         {
             varArgCount += listArgCounts[ii];
         }
 
-        UInt size = sizeof(IRInst) + (fixedArgCount + varArgCount) * sizeof(IRUse);
-        if (sizeof(T) > size)
-        {
-            size = sizeof(T);
-        }
+        Int totalOperandCount = fixedArgCount + varArgCount;
 
+        auto module = getModule();
         SLANG_ASSERT(module);
-        T* inst = (T*)module->memoryArena.allocateAndZero(size);
-
-        // TODO: Do we need to run ctor after zeroing?
-        new(inst)T();
+        IRInst* inst = module->_allocateInst(op, totalOperandCount, minSizeInBytes);
 
 #if SLANG_ENABLE_IR_BREAK_ALLOC
         inst->_debugUID = _debugGetAndIncreaseInstCounter();
 #endif
 
-        inst->operandCount = (uint32_t)(fixedArgCount + varArgCount);
-
-        inst->m_op = op;
-
         inst->typeUse.init(inst, type);
 
-        maybeSetSourceLoc(builder, inst);
+        _maybeSetSourceLoc(inst);
 
         auto operand = inst->getOperands();
 
-        for( UInt aa = 0; aa < fixedArgCount; ++aa )
+        for( Int aa = 0; aa < fixedArgCount; ++aa )
         {
             if (fixedArgs)
             {
@@ -1668,10 +1635,10 @@ namespace Slang
             operand++;
         }
 
-        for (UInt ii = 0; ii < varArgListCount; ++ii)
+        for (Int ii = 0; ii < varArgListCount; ++ii)
         {
-            UInt listArgCount = listArgCounts[ii];
-            for (UInt jj = 0; jj < listArgCount; ++jj)
+            Int listArgCount = listArgCounts[ii];
+            for (Int jj = 0; jj < listArgCount; ++jj)
             {
                 if (listArgs[ii])
                 {
@@ -1687,30 +1654,31 @@ namespace Slang
         return inst;
     }
 
-    static IRInst* createInstWithSizeImpl(
-        IRBuilder*      builder,
-        IROp            op,
-        IRType*         type,
-        size_t          sizeInBytes)
+    // Create an IR instruction/value and initialize it.
+    //
+    // In this case `argCount` and `args` represent the
+    // arguments *after* the type (which is a mandatory
+    // argument for all instructions).
+    template<typename T>
+    static T* createInstImpl(
+        IRBuilder*              builder,
+        IROp                    op,
+        IRType*                 type,
+        Int                     fixedArgCount,
+        IRInst* const*          fixedArgs,
+        Int                     varArgListCount,
+        Int const*              listArgCounts,
+        IRInst* const* const*   listArgs)
     {
-        auto module = builder->getModule();
-        IRInst* inst = (IRInst*)module->memoryArena.allocate(sizeInBytes);
-        // Zero only the 'type'
-        memset(inst, 0, sizeof(IRInst));
-        // TODO: Do we need to run ctor after zeroing?
-        new (inst) IRInst;
-
-#if SLANG_ENABLE_IR_BREAK_ALLOC
-        inst->_debugUID = _debugGetAndIncreaseInstCounter();
-#endif
-
-        inst->m_op = op;
-        if (type)
-        {
-            inst->typeUse.init(inst, type);
-        }
-        maybeSetSourceLoc(builder, inst);
-        return inst; 
+        return (T*) builder->_createInst(
+            sizeof(T),
+            type,
+            op,
+            fixedArgCount,
+            fixedArgs,
+            varArgListCount,
+            listArgCounts,
+            listArgs);
     }
 
     template<typename T>
@@ -1718,13 +1686,12 @@ namespace Slang
         IRBuilder*      builder,
         IROp            op,
         IRType*         type,
-        UInt            fixedArgCount,
-        IRInst* const* fixedArgs,
-        UInt           varArgCount = 0,
-        IRInst* const* varArgs = nullptr)
+        Int             fixedArgCount,
+        IRInst* const*  fixedArgs,
+        Int             varArgCount = 0,
+        IRInst* const*  varArgs = nullptr)
     {
         return createInstImpl<T>(
-            builder->getModule(),
             builder,
             op,
             type,
@@ -1736,35 +1703,12 @@ namespace Slang
     }
 
     template<typename T>
-    static T* createInstImpl(
-        IRBuilder*      builder,
-        IROp            op,
-        IRType*         type,
-        UInt            fixedArgCount,
-        IRInst* const*  fixedArgs,
-        UInt                    varArgListCount,
-        UInt const*             listArgCount,
-        IRInst* const* const*   listArgs)
-    {
-        return createInstImpl<T>(
-            builder->getModule(),
-            builder,
-            op,
-            type,
-            fixedArgCount,
-            fixedArgs,
-            varArgListCount,
-            listArgCount,
-            listArgs);
-    }
-
-    template<typename T>
     static T* createInst(
         IRBuilder*      builder,
         IROp            op,
         IRType*         type,
-        UInt            argCount,
-        IRInst* const* args)
+        Int             argCount,
+        IRInst* const*  args)
     {
         return createInstImpl<T>(
             builder,
@@ -1825,8 +1769,8 @@ namespace Slang
         IRBuilder*      builder,
         IROp            op,
         IRType*         type,
-        UInt            argCount,
-        IRInst* const* args)
+        Int             argCount,
+        IRInst* const*  args)
     {
         return createInstImpl<T>(
             builder,
@@ -1841,9 +1785,9 @@ namespace Slang
         IRBuilder*      builder,
         IROp            op,
         IRType*         type,
-        UInt            fixedArgCount,
+        Int             fixedArgCount,
         IRInst* const*  fixedArgs,
-        UInt            varArgCount,
+        Int             varArgCount,
         IRInst* const*  varArgs)
     {
         return createInstImpl<T>(
@@ -1862,7 +1806,7 @@ namespace Slang
         IROp            op,
         IRType*         type,
         IRInst*         arg1,
-        UInt            varArgCount,
+        Int             varArgCount,
         IRInst* const*  varArgs)
     {
         IRInst* fixedArgs[] = { arg1 };
@@ -2038,8 +1982,7 @@ namespace Slang
         }
     }
 
-    static IRConstant* findOrEmitConstant(
-        IRBuilder*      builder,
+    IRConstant* IRBuilder::_findOrEmitConstant(
         IRConstant&     keyInst)
     {
         // We now know where we want to insert, but there might
@@ -2054,7 +1997,7 @@ namespace Slang
         key.inst = &keyInst;
 
         IRConstant* irValue = nullptr;
-        if( builder->sharedBuilder->constantMap.TryGetValue(key, irValue) )
+        if( getSharedBuilder()->getConstantMap().TryGetValue(key, irValue) )
         {
             // We found a match, so just use that.
             return irValue;
@@ -2072,19 +2015,22 @@ namespace Slang
             case kIROp_BoolLit:
             case kIROp_IntLit:
             {
-                irValue = static_cast<IRConstant*>(createInstWithSizeImpl(builder, keyInst.getOp(), keyInst.getFullType(), prefixSize + sizeof(IRIntegerValue)));
+                const size_t instSize = prefixSize + sizeof(IRIntegerValue);
+                irValue = static_cast<IRConstant*>(_createInst(instSize, keyInst.getFullType(), keyInst.getOp()));
                 irValue->value.intVal = keyInst.value.intVal;
                 break; 
             }
             case kIROp_FloatLit:
             {
-                irValue = static_cast<IRConstant*>(createInstWithSizeImpl(builder, keyInst.getOp(), keyInst.getFullType(), prefixSize + sizeof(IRFloatingPointValue)));
+                const size_t instSize = prefixSize + sizeof(IRFloatingPointValue);
+                irValue = static_cast<IRConstant*>(_createInst(instSize, keyInst.getFullType(), keyInst.getOp()));
                 irValue->value.floatVal = keyInst.value.floatVal;
                 break;
             }
             case kIROp_PtrLit:
             {
-                irValue = static_cast<IRConstant*>(createInstWithSizeImpl(builder, keyInst.getOp(), keyInst.getFullType(), prefixSize + sizeof(void*)));
+                const size_t instSize = prefixSize + sizeof(void*);
+                irValue = static_cast<IRConstant*>(_createInst(instSize, keyInst.getFullType(), keyInst.getOp()));
                 irValue->value.ptrVal = keyInst.value.ptrVal;
                 break;
             }
@@ -2095,7 +2041,7 @@ namespace Slang
                 const size_t sliceSize = slice.getLength();
                 const size_t instSize = prefixSize + offsetof(IRConstant::StringValue, chars) + sliceSize; 
 
-                irValue = static_cast<IRConstant*>(createInstWithSizeImpl(builder, keyInst.getOp(), keyInst.getFullType(), instSize));
+                irValue = static_cast<IRConstant*>(_createInst(instSize, keyInst.getFullType(), keyInst.getOp()));
 
                 IRConstant::StringValue& dstString = irValue->value.stringVal;
 
@@ -2110,9 +2056,9 @@ namespace Slang
         }
 
         key.inst = irValue;
-        builder->sharedBuilder->constantMap.Add(key, irValue);
+        getSharedBuilder()->getConstantMap().Add(key, irValue);
 
-        addHoistableInst(builder, irValue);
+        addHoistableInst(this, irValue);
 
         return irValue;
     }
@@ -2126,7 +2072,7 @@ namespace Slang
         keyInst.m_op = kIROp_BoolLit;
         keyInst.typeUse.usedValue = getBoolType();
         keyInst.value.intVal = IRIntegerValue(inValue);
-        return findOrEmitConstant(this, keyInst);
+        return _findOrEmitConstant(keyInst);
     }
 
     IRInst* IRBuilder::getIntValue(IRType* type, IRIntegerValue inValue)
@@ -2135,8 +2081,33 @@ namespace Slang
         memset(&keyInst, 0, sizeof(keyInst));
         keyInst.m_op = kIROp_IntLit;
         keyInst.typeUse.usedValue = type;
-        keyInst.value.intVal = inValue;
-        return findOrEmitConstant(this, keyInst);
+        // Truncate the input value based on `type`.
+        switch (type->getOp())
+        {
+        case kIROp_Int8Type:
+            keyInst.value.intVal = static_cast<int8_t>(inValue);
+            break;
+        case kIROp_Int16Type:
+            keyInst.value.intVal = static_cast<int16_t>(inValue);
+            break;
+        case kIROp_IntType:
+            keyInst.value.intVal = static_cast<int32_t>(inValue);
+            break;
+        case kIROp_UInt8Type:
+            keyInst.value.intVal = static_cast<uint8_t>(inValue);
+            break;
+        case kIROp_UInt16Type:
+            keyInst.value.intVal = static_cast<uint16_t>(inValue);
+            break;
+        case kIROp_BoolType:
+        case kIROp_UIntType:
+            keyInst.value.intVal = static_cast<uint32_t>(inValue);
+            break;
+        default:
+            keyInst.value.intVal = inValue;
+            break;
+        }
+        return _findOrEmitConstant(keyInst);
     }
 
     IRInst* IRBuilder::getFloatValue(IRType* type, IRFloatingPointValue inValue)
@@ -2145,8 +2116,21 @@ namespace Slang
         memset(&keyInst, 0, sizeof(keyInst));
         keyInst.m_op = kIROp_FloatLit;
         keyInst.typeUse.usedValue = type;
-        keyInst.value.floatVal = inValue;
-        return findOrEmitConstant(this, keyInst);
+        // Truncate the input value based on `type`.
+        switch (type->getOp())
+        {
+        case kIROp_FloatType:
+            keyInst.value.floatVal = static_cast<float>(inValue);
+            break;
+        case kIROp_HalfType:
+            keyInst.value.floatVal = HalfToFloat(FloatToHalf((float)inValue));
+            break;
+        default:
+            keyInst.value.floatVal = inValue;
+            break;
+        }
+        
+        return _findOrEmitConstant(keyInst);
     }
 
     IRStringLit* IRBuilder::getStringValue(const UnownedStringSlice& inSlice)
@@ -2167,7 +2151,7 @@ namespace Slang
         dstSlice.chars = const_cast<char*>(inSlice.begin());
         dstSlice.numChars = uint32_t(inSlice.getLength());
 
-        return static_cast<IRStringLit*>(findOrEmitConstant(this, keyInst));
+        return static_cast<IRStringLit*>(_findOrEmitConstant(keyInst));
     }
 
     IRPtrLit* IRBuilder::getPtrValue(void* value)
@@ -2179,7 +2163,7 @@ namespace Slang
         keyInst.m_op = kIROp_PtrLit;
         keyInst.typeUse.usedValue = type;
         keyInst.value.ptrVal = value;
-        return (IRPtrLit*) findOrEmitConstant(this, keyInst);
+        return (IRPtrLit*) _findOrEmitConstant(keyInst);
     }
 
     IRInst* IRBuilder::getCapabilityValue(CapabilitySet const& caps)
@@ -2226,7 +2210,7 @@ namespace Slang
             operandCount += listOperandCounts[ii];
         }
 
-        auto& memoryArena = getModule()->memoryArena;
+        auto& memoryArena = getModule()->getMemoryArena();
         void* cursor = memoryArena.getCursor();
 
         // We are going to create a 'dummy' instruction on the memoryArena
@@ -2266,7 +2250,7 @@ namespace Slang
             IRInstKey key = { inst };
 
             // Ideally we would add if not found, else return if was found instead of testing & then adding.
-            IRInst** found = sharedBuilder->globalValueNumberingMap.TryGetValueOrAdd(key, inst);
+            IRInst** found = getSharedBuilder()->getGlobalValueNumberingMap().TryGetValueOrAdd(key, inst);
             SLANG_ASSERT(endCursor == memoryArena.getCursor());
             // If it's found, just return, and throw away the instruction
             if (found)
@@ -2285,7 +2269,7 @@ namespace Slang
                 inst->typeUse.init(inst, type);
             }
 
-            maybeSetSourceLoc(this, inst);
+            _maybeSetSourceLoc(inst);
 
             IRUse*const operands = inst->getOperands();
             for (UInt i = 0; i < operandCount; ++i)
@@ -2316,7 +2300,7 @@ namespace Slang
             operandCount += listOperandCounts[ii];
         }
 
-        auto& memoryArena = getModule()->memoryArena;
+        auto& memoryArena = getModule()->getMemoryArena();
         void* cursor = memoryArena.getCursor();
 
         // We are going to create a 'dummy' instruction on the memoryArena
@@ -2356,7 +2340,7 @@ namespace Slang
             IRInstKey key = { inst };
 
             // Ideally we would add if not found, else return if was found instead of testing & then adding.
-            IRInst** found = sharedBuilder->globalValueNumberingMap.TryGetValueOrAdd(key, inst);
+            IRInst** found = getSharedBuilder()->getGlobalValueNumberingMap().TryGetValueOrAdd(key, inst);
             SLANG_ASSERT(endCursor == memoryArena.getCursor());
             // If it's found, just return, and throw away the instruction
             if (found)
@@ -2375,7 +2359,7 @@ namespace Slang
                 inst->typeUse.init(inst, type);
             }
 
-            maybeSetSourceLoc(this, inst);
+            _maybeSetSourceLoc(inst);
 
             IRUse*const operands = inst->getOperands();
             for (UInt i = 0; i < operandCount; ++i)
@@ -2820,6 +2804,17 @@ namespace Slang
         return getType(kIROp_ConjunctionType, typeCount, (IRInst* const*)types);
     }
 
+    IRType* IRBuilder::getAttributedType(
+        IRType*         baseType,
+        UInt            attributeCount,
+        IRAttr* const*  attributes)
+    {
+        List<IRInst*> operands;
+        operands.add(baseType);
+        for(UInt i = 0; i < attributeCount; ++i)
+            operands.add(attributes[i]);
+        return getType(kIROp_AttributedType, operands.getCount(), operands.getBuffer());
+    }
 
 
     void IRBuilder::setDataType(IRInst* inst, IRType* dataType)
@@ -3216,22 +3211,13 @@ namespace Slang
         return inst;
     }
 
-    IRModule* IRBuilder::createModule()
+    RefPtr<IRModule> IRModule::create(Session* session)
     {
-        auto module = new IRModule();
-        module->session = getSession();
+        RefPtr<IRModule> module = new IRModule(session);
 
-        auto moduleInst = createInstImpl<IRModuleInst>(
-            module,
-            this,
-            kIROp_Module,
-            nullptr,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            nullptr);
-        module->moduleInst = moduleInst;
+        auto moduleInst = module->_allocateInst<IRModuleInst>(kIROp_Module, 0);
+
+        module->m_moduleInst = moduleInst;
         moduleInst->module = module;
 
         return module;
@@ -3248,7 +3234,9 @@ namespace Slang
         // parent instruction for the builder, and
         // possibly work our way up.
         //
-        auto parent = builder->insertIntoParent;
+        auto defaultInsertLoc = builder->getInsertLoc();
+        auto defaultParent = defaultInsertLoc.getParent();
+        auto parent = defaultParent;
         while(parent)
         {
             // Inserting into the top level of a module?
@@ -3281,10 +3269,9 @@ namespace Slang
         // current "insert into" parent for the builder, then
         // we need to respect its "insert before" setting
         // as well.
-        if (parent == builder->insertIntoParent
-            && builder->insertBeforeInst)
+        if (parent == defaultParent)
         {
-            value->insertBefore(builder->insertBeforeInst);
+            value->insertAt(defaultInsertLoc);
         }
         else
         {
@@ -3298,7 +3285,7 @@ namespace Slang
             this,
             kIROp_Func,
             nullptr);
-        maybeSetSourceLoc(this, rsFunc);
+        _maybeSetSourceLoc(rsFunc);
         addGlobalValue(this, rsFunc);
         return rsFunc;
     }
@@ -3311,7 +3298,7 @@ namespace Slang
             this,
             kIROp_GlobalVar,
             ptrType);
-        maybeSetSourceLoc(this, globalVar);
+        _maybeSetSourceLoc(globalVar);
         addGlobalValue(this, globalVar);
         return globalVar;
     }
@@ -3323,7 +3310,7 @@ namespace Slang
             this,
             kIROp_GlobalParam,
             valueType);
-        maybeSetSourceLoc(this, inst);
+        _maybeSetSourceLoc(inst);
         addGlobalValue(this, inst);
         return inst;
     }
@@ -3588,6 +3575,21 @@ namespace Slang
             dstPtr,
             srcVal);
 
+        addInst(inst);
+        return inst;
+    }
+
+    IRInst* IRBuilder::emitImageLoad(IRType* type, IRInst* image, IRInst* coord)
+    {
+        auto inst = createInst<IRImageLoad>(this, kIROp_ImageLoad, type, image, coord);
+        addInst(inst);
+        return inst;
+    }
+
+    IRInst* IRBuilder::emitImageStore(IRType* type, IRInst* image, IRInst* coord, IRInst* value)
+    {
+        IRInst* args[] = {image, coord, value};
+        auto inst = createInst<IRImageStore>(this, kIROp_ImageStore, type, 3, args);
         addInst(inst);
         return inst;
     }
@@ -4320,6 +4322,16 @@ namespace Slang
             operands));
     }
 
+    IRAttr* IRBuilder::getAttr(IROp op, UInt operandCount, IRInst* const* operands)
+    {
+        return cast<IRAttr>(findOrEmitHoistableInst(
+            getVoidType(),
+            op,
+            operandCount,
+            operands));
+    }
+
+
 
     IRTypeLayout* IRBuilder::getTypeLayout(IROp op, List<IRInst*> const& operands)
     {
@@ -4360,6 +4372,7 @@ namespace Slang
         int             indent  = 0;
 
         IRDumpOptions   options;
+        SourceManager*  sourceManager;
         PathInfo        lastPathInfo = PathInfo::makeUnknown();
         
         Dictionary<IRInst*, String> mapValueToName;
@@ -4555,9 +4568,12 @@ namespace Slang
     static void dumpDebugID(IRDumpContext* context, IRInst* inst)
     {
 #if SLANG_ENABLE_IR_BREAK_ALLOC
-        dump(context, "[#");
-        dump(context, String(inst->_debugUID));
-        dump(context, "]");
+        if (context->options.flags & IRDumpOptions::Flag::DumpDebugIds)
+        {
+            dump(context, "[#");
+            dump(context, String(inst->_debugUID));
+            dump(context, "]");
+        }
 #else
         SLANG_UNUSED(context);
         SLANG_UNUSED(inst);
@@ -5115,7 +5131,7 @@ namespace Slang
 
         // Output the originating source location
         {
-            SourceManager* sourceManager = context->options.sourceManager;
+            SourceManager* sourceManager = context->sourceManager;
             if (sourceManager && context->options.flags & IRDumpOptions::Flag::SourceLocations)
             {
                 StringBuilder buf;
@@ -5168,17 +5184,18 @@ namespace Slang
         }
     }
 
-    void printSlangIRAssembly(StringBuilder& builder, IRModule* module, const IRDumpOptions& options)
+    void printSlangIRAssembly(StringBuilder& builder, IRModule* module, const IRDumpOptions& options, SourceManager* sourceManager)
     {
         IRDumpContext context;
         context.builder = &builder;
         context.indent = 0;
         context.options = options;
+        context.sourceManager = sourceManager;
         
         dumpIRModule(&context, module);
     }
 
-    void dumpIR(IRInst* globalVal, const IRDumpOptions& options, ISlangWriter* writer)
+    void dumpIR(IRInst* globalVal, const IRDumpOptions& options, SourceManager* sourceManager, ISlangWriter* writer)
     {
         StringBuilder sb;
 
@@ -5186,6 +5203,7 @@ namespace Slang
         context.builder = &sb;
         context.indent = 0;
         context.options = options;
+        context.sourceManager = sourceManager;
 
         dumpInst(&context, globalVal);
 
@@ -5193,7 +5211,7 @@ namespace Slang
         writer->flush();
     }
 
-    void dumpIR(IRModule* module, const IRDumpOptions& options, char const* label, ISlangWriter* inWriter)
+    void dumpIR(IRModule* module, const IRDumpOptions& options, char const* label, SourceManager* sourceManager, ISlangWriter* inWriter)
     {
         WriterHelper writer(inWriter);
 
@@ -5204,7 +5222,7 @@ namespace Slang
             writer.put(":\n");
         }
 
-        dumpIR(module, options, inWriter);
+        dumpIR(module, options, sourceManager, inWriter);
 
         if (label)
         {
@@ -5212,16 +5230,16 @@ namespace Slang
         }
     }
 
-    String getSlangIRAssembly(IRModule* module, const IRDumpOptions& options)
+    String getSlangIRAssembly(IRModule* module, const IRDumpOptions& options, SourceManager* sourceManager)
     {
         StringBuilder sb;
-        printSlangIRAssembly(sb, module, options);
+        printSlangIRAssembly(sb, module, options, sourceManager);
         return sb;
     }
 
-    void dumpIR(IRModule* module, const IRDumpOptions& options, ISlangWriter* writer)
+    void dumpIR(IRModule* module, const IRDumpOptions& options, SourceManager* sourceManager, ISlangWriter* writer)
     {
-        String ir = getSlangIRAssembly(module, options);
+        String ir = getSlangIRAssembly(module, options, sourceManager);
         writer->write(ir.getBuffer(), ir.getLength());
         writer->flush();
     }
@@ -5575,6 +5593,29 @@ namespace Slang
         insertAtEnd(p);
     }
 
+    void IRInst::insertAt(IRInsertLoc const& loc)
+    {
+        removeFromParent();
+        IRInst* other = loc.getInst();
+        switch(loc.getMode())
+        {
+        case IRInsertLoc::Mode::None:
+            break;
+        case IRInsertLoc::Mode::Before:
+            insertBefore(other);
+            break;
+        case IRInsertLoc::Mode::After:
+            insertAfter(other);
+            break;
+        case IRInsertLoc::Mode::AtStart:
+            insertAtStart(other);
+            break;
+        case IRInsertLoc::Mode::AtEnd:
+            insertAtEnd(other);
+            break;
+        }
+    }
+
     // Remove this instruction from its parent block,
     // and then destroy it (it had better have no uses!)
     void IRInst::removeFromParent()
@@ -5742,6 +5783,7 @@ namespace Slang
         case kIROp_makeArray:
         case kIROp_makeStruct:
         case kIROp_Load:    // We are ignoring the possibility of loads from bad addresses, or `volatile` loads
+        case kIROp_ImageSubscript:
         case kIROp_FieldExtract:
         case kIROp_FieldAddress:
         case kIROp_getElement:

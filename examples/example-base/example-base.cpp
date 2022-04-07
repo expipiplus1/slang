@@ -50,7 +50,7 @@ Slang::Result WindowedAppBase::initializeBase(
 
     // Create swapchain and framebuffers.
     gfx::ISwapchain::Desc swapchainDesc = {};
-    swapchainDesc.format = gfx::Format::RGBA_Unorm_UInt8;
+    swapchainDesc.format = gfx::Format::R8G8B8A8_UNORM;
     swapchainDesc.width = width;
     swapchainDesc.height = height;
     swapchainDesc.imageCount = kSwapchainImageCount;
@@ -59,7 +59,7 @@ Slang::Result WindowedAppBase::initializeBase(
     gSwapchain = gDevice->createSwapchain(swapchainDesc, windowHandle);
 
     IFramebufferLayout::AttachmentLayout renderTargetLayout = {gSwapchain->getDesc().format, 1};
-    IFramebufferLayout::AttachmentLayout depthLayout = {gfx::Format::D_Float32, 1};
+    IFramebufferLayout::AttachmentLayout depthLayout = {gfx::Format::D32_FLOAT, 1};
     IFramebufferLayout::Desc framebufferLayoutDesc;
     framebufferLayoutDesc.renderTargetCount = 1;
     framebufferLayoutDesc.renderTargets = &renderTargetLayout;
@@ -71,7 +71,7 @@ Slang::Result WindowedAppBase::initializeBase(
 
     for (uint32_t i = 0; i < kSwapchainImageCount; i++)
     {
-        gfx::ITransientResourceHeap::Desc transientHeapDesc;
+        gfx::ITransientResourceHeap::Desc transientHeapDesc = {};
         transientHeapDesc.constantBufferSize = 4096 * 1024;
         auto transientHeap = gDevice->createTransientResourceHeap(transientHeapDesc);
         gTransientHeaps.add(transientHeap);
@@ -105,6 +105,7 @@ void WindowedAppBase::mainLoop()
 
     gTransientHeaps[frameBufferIndex]->synchronizeAndReset();
     renderFrame(frameBufferIndex);
+    gTransientHeaps[frameBufferIndex]->finish();
 }
 
 void WindowedAppBase::createSwapchainFramebuffers()
@@ -117,7 +118,7 @@ void WindowedAppBase::createSwapchainFramebuffers()
         depthBufferDesc.size.width = gSwapchain->getDesc().width;
         depthBufferDesc.size.height = gSwapchain->getDesc().height;
         depthBufferDesc.size.depth = 1;
-        depthBufferDesc.format = gfx::Format::D_Float32;
+        depthBufferDesc.format = gfx::Format::D32_FLOAT;
         depthBufferDesc.defaultState = ResourceState::DepthWrite;
         depthBufferDesc.allowedStates = ResourceStateSet(ResourceState::DepthWrite);
         
@@ -136,7 +137,7 @@ void WindowedAppBase::createSwapchainFramebuffers()
 
         gfx::IResourceView::Desc depthBufferViewDesc;
         memset(&depthBufferViewDesc, 0, sizeof(depthBufferViewDesc));
-        depthBufferViewDesc.format = gfx::Format::D_Float32;
+        depthBufferViewDesc.format = gfx::Format::D32_FLOAT;
         depthBufferViewDesc.renderTarget.shape = gfx::IResource::Type::Texture2D;
         depthBufferViewDesc.type = gfx::IResourceView::Type::DepthStencil;
         ComPtr<gfx::IResourceView> dsv =
@@ -155,7 +156,7 @@ void WindowedAppBase::createSwapchainFramebuffers()
 void WindowedAppBase::windowSizeChanged()
 {
     // Wait for the GPU to finish.
-    gQueue->wait();
+    gQueue->waitOnHost();
 
     auto clientRect = gWindow->getClientRect();
     if (clientRect.width > 0 && clientRect.height > 0)
