@@ -5341,3 +5341,22 @@ struct VkSubpassInputMS<T>
 {
     T SubpassLoad(int sampleIndex);
 }
+
+//
+// Intrinsics for micromesh support (NV internal!)
+//
+
+/// There are three new proposed HLSL intrinsics available in closesthit (CH) and anyhit (AH) shaders.
+/// Note that the intrinsics are specific to either micromesh or regular triangles. If CH or AH handles both types of hits, the HitKind must be inspected to select the appropriate intrinsic.
+
+/// Returns the three vertices of the intersected triangle. (Must not be called for microtriangle hits).
+__target_intrinsic(hlsl)
+float3x3 HitTriangleObjectPositions();
+
+/// Returns the three vertices of the intersected micro-triangles. (Must not be called for regular triangle hits.)
+__target_intrinsic(hlsl)
+float3x3 HitMicroTriangleObjectPositions();
+
+/// Returns the base triangle barycentric coordinates of the three vertices of the hit triangle. (Must not be called for regular triangle hits.)
+__target_intrinsic(hlsl)
+float3x2 HitMicroTriangleBarycentrics();
