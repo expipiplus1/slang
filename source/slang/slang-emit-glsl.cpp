@@ -12,10 +12,14 @@
 
 namespace Slang {
 
+void trackGLSLTargetCaps(
+    GLSLExtensionTracker* extensionTracker,
+    CapabilitySet const& caps);
+
 GLSLSourceEmitter::GLSLSourceEmitter(const Desc& desc) :
     Super(desc)
 {
-    m_glslExtensionTracker = dynamicCast<GLSLExtensionTracker>(desc.extensionTracker);
+    m_glslExtensionTracker = dynamicCast<GLSLExtensionTracker>(desc.codeGenContext->getExtensionTracker());
     SLANG_ASSERT(m_glslExtensionTracker);
 }
 
@@ -40,7 +44,7 @@ SlangResult GLSLSourceEmitter::init()
         default: break;
     }
 
-    if (m_targetRequest->getForceGLSLScalarBufferLayout())
+    if (getTargetReq()->getForceGLSLScalarBufferLayout())
     {
         m_glslExtensionTracker->requireExtension(
             UnownedStringSlice::fromLiteral("GL_EXT_scalar_block_layout"));
@@ -121,7 +125,7 @@ void GLSLSourceEmitter::_emitGLSLStructuredBuffer(IRGlobalParam* varDecl, IRHLSL
     _requireGLSLVersion(430);
 
     m_writer->emit("layout(");
-    m_writer->emit(m_targetRequest->getForceGLSLScalarBufferLayout() ? "scalar" : "std430");
+    m_writer->emit(getTargetReq()->getForceGLSLScalarBufferLayout() ? "scalar" : "std430");
 
     auto layout = getVarLayout(varDecl);
     if (layout)
@@ -196,7 +200,7 @@ void GLSLSourceEmitter::_emitGLSLByteAddressBuffer(IRGlobalParam* varDecl, IRByt
     _requireGLSLVersion(430);
 
     m_writer->emit("layout(");
-    m_writer->emit(m_targetRequest->getForceGLSLScalarBufferLayout() ? "scalar" : "std430");
+    m_writer->emit(getTargetReq()->getForceGLSLScalarBufferLayout() ? "scalar" : "std430");
 
     auto layout = getVarLayout(varDecl);
     if (layout)
@@ -292,7 +296,7 @@ void GLSLSourceEmitter::_emitGLSLParameterGroup(IRGlobalParam* varDecl, IRUnifor
     {
         // Is writable
         m_writer->emit("layout(");
-        m_writer->emit(m_targetRequest->getForceGLSLScalarBufferLayout() ? "scalar" : "std430");
+        m_writer->emit(getTargetReq()->getForceGLSLScalarBufferLayout() ? "scalar" : "std430");
         m_writer->emit(") buffer ");
     }
     // TODO: what to do with HLSL `tbuffer` style buffers?
@@ -300,7 +304,7 @@ void GLSLSourceEmitter::_emitGLSLParameterGroup(IRGlobalParam* varDecl, IRUnifor
     {
         // uniform is implicitly read only
         m_writer->emit("layout(");
-        m_writer->emit(m_targetRequest->getForceGLSLScalarBufferLayout() ? "scalar" : "std140");
+        m_writer->emit(getTargetReq()->getForceGLSLScalarBufferLayout() ? "scalar" : "std140");
         m_writer->emit(") uniform ");
     }
 
@@ -379,7 +383,7 @@ void GLSLSourceEmitter::_emitGLSLImageFormatModifier(IRInst* var, IRTextureType*
     // treating images without explicit formats as having
     // unknown format.
     //
-    if (m_compileRequest->useUnknownImageFormatAsDefault)
+    if (getCodeGenContext()->getUseUnknownImageFormatAsDefault())
     {
         _requireGLSLExtension(UnownedStringSlice::fromLiteral("GL_EXT_shader_image_load_formatted"));
         return;
@@ -1740,7 +1744,33 @@ void GLSLSourceEmitter::handleRequiredCapabilitiesImpl(IRInst* inst)
     }
 }
 
-void GLSLSourceEmitter::emitPreprocessorDirectivesImpl()
+static Index _getGLSLVersion(ProfileVersion profile)
+{
+    switch (profile)
+    {
+#define CASE(TAG, VALUE) case ProfileVersion::TAG: return VALUE; 
+        CASE(GLSL_110, 110);
+        CASE(GLSL_120, 120);
+        CASE(GLSL_130, 130);
+        CASE(GLSL_140, 140);
+        CASE(GLSL_150, 150);
+        CASE(GLSL_330, 330);
+        CASE(GLSL_400, 400);
+        CASE(GLSL_410, 410);
+        CASE(GLSL_420, 420);
+        CASE(GLSL_430, 430);
+        CASE(GLSL_440, 440);
+        CASE(GLSL_450, 450);
+        CASE(GLSL_460, 460);
+#undef CASE
+
+    default:
+        break;
+    }
+    return -1;
+}
+
+void GLSLSourceEmitter::emitFrontMatterImpl(TargetRequest* targetReq)
 {
     auto effectiveProfile = m_effectiveProfile;
     if (effectiveProfile.getFamily() == ProfileFamily::GLSL)
@@ -1759,44 +1789,34 @@ void GLSLSourceEmitter::emitPreprocessorDirectivesImpl()
     // the user to specify a version as part of the target.
     m_glslExtensionTracker->requireVersion(ProfileVersion::GLSL_450);
 
-    auto requiredProfileVersion = m_glslExtensionTracker->getRequiredProfileVersion();
-    switch (requiredProfileVersion)
+    Index glslVersion = _getGLSLVersion(m_glslExtensionTracker->getRequiredProfileVersion());
+    if (glslVersion < 0)
     {
-#define CASE(TAG, VALUE)    \
-case ProfileVersion::TAG: m_writer->emit("#version " #VALUE "\n"); return
+        // No information is available for us to guess a profile,
+        // so it seems like we need to pick one out of thin air.
+        //
+        // Ideally we should infer a minimum required version based
+        // on the constructs we have seen used in the user's code
+        //
+        // For now we just fall back to a reasonably recent version.
 
-        CASE(GLSL_110, 110);
-        CASE(GLSL_120, 120);
-        CASE(GLSL_130, 130);
-        CASE(GLSL_140, 140);
-        CASE(GLSL_150, 150);
-        CASE(GLSL_330, 330);
-        CASE(GLSL_400, 400);
-        CASE(GLSL_410, 410);
-        CASE(GLSL_420, 420);
-        CASE(GLSL_430, 430);
-        CASE(GLSL_440, 440);
-        CASE(GLSL_450, 450);
-        CASE(GLSL_460, 460);
-#undef CASE
-
-        default:
-            break;
+        glslVersion = 420;
     }
 
-    // No information is available for us to guess a profile,
-    // so it seems like we need to pick one out of thin air.
-    //
-    // Ideally we should infer a minimum required version based
-    // on the constructs we have seen used in the user's code
-    //
-    // For now we just fall back to a reasonably recent version.
+    m_writer->emit("#version ");
+    m_writer->emit(glslVersion);
+    m_writer->emit("\n");
 
-    m_writer->emit("#version 420\n");
-}
+    // Output the extensions
+    if (m_glslExtensionTracker)
+    {
+        trackGLSLTargetCaps(m_glslExtensionTracker, targetReq->getTargetCaps());
 
-void GLSLSourceEmitter::emitLayoutDirectivesImpl(TargetRequest* targetReq)
-{
+        StringBuilder builder;
+        m_glslExtensionTracker->appendExtensionRequireLines(builder);
+        m_writer->emit(builder.getUnownedSlice());
+    }
+
     // Reminder: the meaning of row/column major layout
     // in our semantics is the *opposite* of what GLSL
     // calls them, because what they call "columns"
@@ -1804,16 +1824,16 @@ void GLSLSourceEmitter::emitLayoutDirectivesImpl(TargetRequest* targetReq)
     //
     switch (targetReq->getDefaultMatrixLayoutMode())
     {
-        case kMatrixLayoutMode_RowMajor:
-        default:
-            m_writer->emit("layout(column_major) uniform;\n");
-            m_writer->emit("layout(column_major) buffer;\n");
-            break;
+    case kMatrixLayoutMode_RowMajor:
+    default:
+        m_writer->emit("layout(column_major) uniform;\n");
+        m_writer->emit("layout(column_major) buffer;\n");
+        break;
 
-        case kMatrixLayoutMode_ColumnMajor:
-            m_writer->emit("layout(row_major) uniform;\n");
-            m_writer->emit("layout(row_major) buffer;\n");
-            break;
+    case kMatrixLayoutMode_ColumnMajor:
+        m_writer->emit("layout(row_major) uniform;\n");
+        m_writer->emit("layout(row_major) buffer;\n");
+        break;
     }
 }
 
@@ -1831,6 +1851,47 @@ void GLSLSourceEmitter::emitVectorTypeNameImpl(IRType* elementType, IRIntegerVal
     }
 }
 
+void GLSLSourceEmitter::emitTypeImpl(IRType* type, const StringSliceLoc* nameAndLoc)
+{
+    if (auto refType = as<IRRefType>(type))
+    {
+        m_writer->emit("spirv_by_reference ");
+        type = refType->getValueType();
+    }
+    return Super::emitTypeImpl(type, nameAndLoc);
+}
+
+void GLSLSourceEmitter::emitParamTypeImpl(IRType* type, String const& name)
+{
+    if (auto refType = as<IRRefType>(type))
+    {
+        m_writer->emit("spirv_by_reference ");
+        type = refType->getValueType();
+    }
+    else if (auto spirvLiteralType = as<IRSPIRVLiteralType>(type))
+    {
+        m_writer->emit("spirv_literal ");
+        type = spirvLiteralType->getValueType();
+    }
+
+    Super::emitParamTypeImpl(type, name);
+}
+
+void GLSLSourceEmitter::emitFuncDecorationImpl(IRDecoration* decoration)
+{
+    if (decoration->getOp() == kIROp_SPIRVOpDecoration)
+    {
+        m_glslExtensionTracker->requireExtension(UnownedStringSlice::fromLiteral("GL_EXT_spirv_intrinsics"));
+
+        m_writer->emit("spirv_instruction(id = ");
+        emitSimpleValue(decoration->getOperand(0));
+        m_writer->emit(")\n");
+    }
+    else
+    {
+        Super::emitFuncDecorationImpl(decoration);
+    }
+}
 
 void GLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
 {
