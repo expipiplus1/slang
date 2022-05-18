@@ -96,10 +96,13 @@ Operating system defines, see http://sourceforge.net/p/predef/wiki/OperatingSyst
 #        define SLANG_ANDROID 1
 #    elif defined(__linux__) || defined(__CYGWIN__) /* note: __ANDROID__ implies __linux__ */
 #        define SLANG_LINUX 1
-#    elif defined(__APPLE__) && (defined(__arm__) || defined(__arm64__))
-#        define SLANG_IOS 1
 #    elif defined(__APPLE__)
-#        define SLANG_OSX 1
+#        include "TargetConditionals.h"
+#        if TARGET_OS_MAC
+#            define SLANG_OSX 1
+#        else
+#            define SLANG_IOS 1
+#        endif
 #    elif defined(__CELLOS_LV2__)
 #        define SLANG_PS3 1
 #    elif defined(__ORBIS__)
@@ -518,11 +521,19 @@ extern "C"
     typedef int SlangSeverity;
     enum
     {
-        SLANG_SEVERITY_NOTE = 0,    /**< An informative message. */
-        SLANG_SEVERITY_WARNING,     /**< A warning, which indicates a possible proble. */
-        SLANG_SEVERITY_ERROR,       /**< An error, indicating that compilation failed. */
-        SLANG_SEVERITY_FATAL,       /**< An unrecoverable error, which forced compilation to abort. */
-        SLANG_SEVERITY_INTERNAL,    /**< An internal error, indicating a logic error in the compiler. */
+        SLANG_SEVERITY_DISABLED = 0, /**< A message that is disabled, filtered out. */
+        SLANG_SEVERITY_NOTE,         /**< An informative message. */
+        SLANG_SEVERITY_WARNING,      /**< A warning, which indicates a possible proble. */
+        SLANG_SEVERITY_ERROR,        /**< An error, indicating that compilation failed. */
+        SLANG_SEVERITY_FATAL,        /**< An unrecoverable error, which forced compilation to abort. */
+        SLANG_SEVERITY_INTERNAL,     /**< An internal error, indicating a logic error in the compiler. */
+    };
+
+    typedef int SlangDiagnosticFlags;
+    enum
+    {
+        SLANG_DIAGNOSTIC_FLAG_VERBOSE_PATHS = 0x01,
+        SLANG_DIAGNOSTIC_FLAG_TREAT_WARNINGS_AS_ERRORS = 0x02
     };
 
     typedef int SlangBindableResourceType;
@@ -1706,7 +1717,19 @@ extern "C"
         size_t reproDataSize,
         ISlangFileSystem* replaceFileSystem,
         ISlangFileSystemExt** outFileSystem);
-    
+
+    /*! @see slang::ICompileRequest::overrideDiagnosticSeverity */
+    SLANG_API void spOverrideDiagnosticSeverity(
+        SlangCompileRequest* request,
+        SlangInt messageID,
+        SlangSeverity overrideSeverity);
+
+    /*! @see slang::ICompileRequest::getDiagnosticFlags */
+    SLANG_API SlangDiagnosticFlags spGetDiagnosticFlags(SlangCompileRequest* request);
+
+    /*! @see slang::ICompileRequest::setDiagnosticFlags */
+    SLANG_API void spSetDiagnosticFlags(SlangCompileRequest* request, SlangDiagnosticFlags flags);
+
     /*
     Forward declarations of types used in the reflection interface;
     */
@@ -3880,6 +3903,24 @@ namespace slang
                 If false, the resulting code will std430 for storage buffers.
             */
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetForceGLSLScalarBufferLayout(int targetIndex, bool forceScalarLayout) = 0;
+
+            /** Overrides the severity of a specific diagnostic message.
+
+            @param messageID            Numeric identifier of the message to override,
+                                        as defined in the 1st parameter of the DIAGNOSTIC macro.
+            @param overrideSeverity     New severity of the message. If the message is originally Error or Fatal,
+                                        the new severity cannot be lower than that.
+            */
+        virtual SLANG_NO_THROW void SLANG_MCALL overrideDiagnosticSeverity(
+            SlangInt messageID,
+            SlangSeverity overrideSeverity) = 0;
+
+            /** Returns the currently active flags of the request's diagnostic sink. */
+        virtual SLANG_NO_THROW SlangDiagnosticFlags SLANG_MCALL getDiagnosticFlags() = 0;
+
+            /** Sets the flags of the request's diagnostic sink.
+                The previously specified flags are discarded. */
+        virtual SLANG_NO_THROW void SLANG_MCALL setDiagnosticFlags(SlangDiagnosticFlags flags) = 0;
     };
 
     #define SLANG_UUID_ICompileRequest ICompileRequest::getTypeGuid()
