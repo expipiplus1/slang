@@ -22,10 +22,7 @@ class CLikeSourceEmitter: public SourceEmitterBase
 public:
     struct Desc
     {
-        BackEndCompileRequest* compileRequest = nullptr;
-
-        /// The target language we want to generate code for
-        CodeGenTarget target = CodeGenTarget::Unknown;
+        CodeGenContext* codeGenContext = nullptr;
 
             /// The stage for the entry point we are being asked to compile
         Stage entryPointStage = Stage::Unknown;
@@ -34,15 +31,7 @@ public:
             /// combining information from the target and entry point.
         Profile effectiveProfile = Profile::RawEnum::Unknown;
 
-            /// The capabilities of the target
-        CapabilitySet targetCaps;
-
-            /// The associated extension tracker
-        ExtensionTracker* extensionTracker = nullptr;
-
         SourceWriter* sourceWriter = nullptr;
-
-        TargetRequest* targetRequest = nullptr;
     };
 
     enum
@@ -79,6 +68,7 @@ public:
         {
             Name,
             Ptr,
+            Ref,
             SizedArray,
             UnsizedArray,
             LiteralSizedArray,
@@ -121,6 +111,13 @@ public:
         {}
     };
 
+    struct RefDeclaratorInfo : ChainedDeclaratorInfo
+    {
+        RefDeclaratorInfo(DeclaratorInfo* next)
+            : ChainedDeclaratorInfo(Flavor::Ref, next)
+        {}
+    };
+
     struct SizedArrayDeclaratorInfo : ChainedDeclaratorInfo
     {
         IRInst* elementCount;
@@ -156,6 +153,16 @@ public:
         {}
 
         IRInst* instWithAttributes;
+    };
+
+    struct FuncTypeDeclaratorInfo : ChainedDeclaratorInfo
+    {
+        FuncTypeDeclaratorInfo(DeclaratorInfo* next, IRFuncType* funcTypeInst)
+            : ChainedDeclaratorInfo(Flavor::Attributed, next)
+            , funcType(funcTypeInst)
+        {}
+
+        IRFuncType* funcType;
     };
 
     struct ComputeEmitActionsContext;
@@ -202,13 +209,13 @@ public:
 
     
         /// Get the source manager
-    SourceManager* getSourceManager() { return m_compileRequest->getSourceManager(); }
+    SourceManager* getSourceManager() { return m_codeGenContext->getSourceManager(); }
 
         /// Get the source writer used
     SourceWriter* getSourceWriter() const { return m_writer; }
 
         /// Get the diagnostic sink
-    DiagnosticSink* getSink() { return m_compileRequest->getSink();}
+    DiagnosticSink* getSink() { return m_codeGenContext->getSink();}
 
         /// Get the code gen target
     CodeGenTarget getTarget() { return m_target; }
@@ -217,7 +224,14 @@ public:
 
     void noteInternalErrorLoc(SourceLoc loc) { return getSink()->noteInternalErrorLoc(loc); }
 
-    CapabilitySet getTargetCaps() { return m_targetCaps; }
+    CapabilitySet getTargetCaps() { return m_codeGenContext->getTargetCaps(); }
+
+    CodeGenContext* getCodeGenContext() { return m_codeGenContext; }
+    TargetRequest* getTargetReq() { return m_codeGenContext->getTargetReq(); }
+    Session* getSession() { return m_codeGenContext->getSession(); }
+    Linkage* getLinkage() { return m_codeGenContext->getLinkage(); }
+    ComponentType* getProgram() { return m_codeGenContext->getProgram(); }
+    TargetProgram* getTargetProgram() { return m_codeGenContext->getTargetProgram(); }
 
     //
     // Types
@@ -246,9 +260,6 @@ public:
 
     UInt getBindingOffset(EmitVarChain* chain, LayoutResourceKind kind);
     UInt getBindingSpace(EmitVarChain* chain, LayoutResourceKind kind);
-
-        /// Emit directives to control overall layout computation for the emitted code.
-    void emitLayoutDirectives(TargetRequest* targetReq);
 
         // Utility code for generating unique IDs as needed
         // during the emit process (e.g., for declarations
@@ -288,12 +299,16 @@ public:
     // to the new name with the arguments of the old operation.
     static bool isOrdinaryName(const UnownedStringSlice& name);
 
+    void emitComInterfaceCallExpr(IRCall* inst, EmitOpInfo const& inOuterPrec);
+
     void emitIntrinsicCallExpr(
         IRCall*                         inst,
         IRTargetIntrinsicDecoration*    targetIntrinsic,
         EmitOpInfo const&               inOuterPrec);
 
     void emitCallExpr(IRCall* inst, EmitOpInfo outerPrec);
+
+    void emitLiveness(IRInst* inst) { emitLivenessImpl(inst); }
 
     void emitInstExpr(IRInst* inst, EmitOpInfo const& inOuterPrec);
     void defaultEmitInstExpr(IRInst* inst, EmitOpInfo const& inOuterPrec);
@@ -305,13 +320,6 @@ public:
 
     void emitLayoutSemantics(IRInst* inst, char const* uniformSemanticSpelling = "register");
 
-        // When we are about to traverse an edge from one block to another,
-        // we need to emit the assignments that conceptually occur "along"
-        // the edge. In traditional SSA these are the phi nodes in the
-        // target block, while in our representation these use the arguments
-        // to the branch instruction to fill in the parameters of the target.
-    void emitPhiVarAssignments(UInt argCount, IRUse* args, IRBlock* targetBlock);
-
         /// Emit high-level language statements from a structured region.
     void emitRegion(Region* inRegion);
 
@@ -322,8 +330,6 @@ public:
     bool isDefinition(IRFunc* func);
 
     void emitEntryPointAttributes(IRFunc* irFunc, IREntryPointDecoration* entryPointDecor);
-
-    void emitPhiVarDecls(IRFunc* func);
 
         /// Emit high-level statements for the body of a function.
     void emitFunctionBody(IRGlobalValueWithCode* code);
@@ -344,9 +350,10 @@ public:
     bool isTargetIntrinsic(IRFunc* func);
 
     void emitFunc(IRFunc* func);
-    void emitFuncDecorations(IRFunc* func);
+    void emitFuncDecorations(IRFunc* func) { emitFuncDecorationsImpl(func); }
 
     void emitStruct(IRStructType* structType);
+
 
         /// Emit type attributes that should appear after, e.g., a `struct` keyword
     void emitPostKeywordTypeAttributes(IRInst* inst) { emitPostKeywordTypeAttributesImpl(inst); }
@@ -382,20 +389,21 @@ public:
 
     void ensureGlobalInst(ComputeEmitActionsContext* ctx, IRInst* inst, EmitAction::Level requiredLevel);
 
+    void emitForwardDeclaration(IRInst* inst);
+
     void computeEmitActions(IRModule* module, List<EmitAction>& ioActions);
 
     void executeEmitActions(List<EmitAction> const& actions);
+
+        // Emits front matter, that occurs before the prelude
+        // Doesn't emit generated function/types that's handled by emitPreModule
+    void emitFrontMatter(TargetRequest* targetReq) { emitFrontMatterImpl(targetReq); }
+
+    void emitPreModule() { emitPreModuleImpl(); }
+
     void emitModule(IRModule* module, DiagnosticSink* sink)
         { m_irModule = module; emitModuleImpl(module, sink); }
 
-        /// Emit any preprocessor directives that should come *before* the prelude code
-        ///
-        /// These are directives that are intended to customize some aspect(s) of the
-        /// prelude's behavior.
-        ///
-    void emitPreludeDirectives() { emitPreludeDirectivesImpl(); }
-
-    void emitPreprocessorDirectives() { emitPreprocessorDirectivesImpl(); }
     void emitSimpleType(IRType* type);
 
     void emitVectorTypeName(IRType* elementType, IRIntegerValue elementCount) { emitVectorTypeNameImpl(elementType, elementCount); }
@@ -425,9 +433,14 @@ public:
 
     virtual void emitImageFormatModifierImpl(IRInst* varDecl, IRType* varType) { SLANG_UNUSED(varDecl); SLANG_UNUSED(varType); }
     virtual void emitLayoutQualifiersImpl(IRVarLayout* layout) { SLANG_UNUSED(layout); }
-    virtual void emitPreludeDirectivesImpl() {}
-    virtual void emitPreprocessorDirectivesImpl() {}
-    virtual void emitLayoutDirectivesImpl(TargetRequest* targetReq) { SLANG_UNUSED(targetReq); }
+
+        /// Emit front matter inserting prelude where appropriate
+    virtual void emitFrontMatterImpl(TargetRequest* targetReq);
+        /// Emit any declarations, and other material that is needed before the modules contents
+        /// For example on targets that don't have built in vector/matrix support, this is where
+        /// the appropriate generated declarations occur.
+    virtual void emitPreModuleImpl() {}
+
     virtual void emitRateQualifiersImpl(IRRate* rate) { SLANG_UNUSED(rate); }
     virtual void emitSemanticsImpl(IRInst* inst) { SLANG_UNUSED(inst);  }
     virtual void emitSimpleFuncParamImpl(IRParam* param);
@@ -447,6 +460,9 @@ public:
     virtual void emitFunctionPreambleImpl(IRInst* inst) { SLANG_UNUSED(inst); }
     virtual void emitLoopControlDecorationImpl(IRLoopControlDecoration* decl) { SLANG_UNUSED(decl); }
     virtual void emitFuncDecorationImpl(IRDecoration* decoration) { SLANG_UNUSED(decoration); }
+    virtual void emitLivenessImpl(IRInst* inst);
+
+    virtual void emitFuncDecorationsImpl(IRFunc* func);
 
         // Only needed for glsl output with $ prefix intrinsics - so perhaps removable in the future
     virtual void emitTextureOrTextureSamplerTypeImpl(IRTextureTypeBase*  type, char const* baseName) { SLANG_UNUSED(type); SLANG_UNUSED(baseName); }
@@ -462,22 +478,23 @@ public:
 
     virtual void emitPostKeywordTypeAttributesImpl(IRInst* inst) { SLANG_UNUSED(inst); }
 
-    void _emitType(IRType* type, DeclaratorInfo* declarator);
+    void _emitFuncTypeDeclaration(IRFuncType* type, IRAttributedType* attributes);
+
+    virtual void _emitType(IRType* type, DeclaratorInfo* declarator);
     void _emitInst(IRInst* inst);
 
     virtual void _emitPrefixTypeAttr(IRAttr* attr);
     virtual void _emitPostfixTypeAttr(IRAttr* attr);
 
         // Emit the argument list (including paranthesis) in a `CallInst`
-    void _emitCallArgList(IRCall* call);
+    void _emitCallArgList(IRCall* call, int startingOperandIndex = 1);
 
     String _generateUniqueName(const UnownedStringSlice& slice);
 
         // Sort witnessTable entries according to the order defined in the witnessed interface type.
     List<IRWitnessTableEntry*> getSortedWitnessTableEntries(IRWitnessTable* witnessTable);
-    
-    BackEndCompileRequest* m_compileRequest = nullptr;
-    TargetRequest* m_targetRequest = nullptr;
+
+    CodeGenContext* m_codeGenContext = nullptr;
     IRModule* m_irModule = nullptr;
 
     // The stage for which we are emitting code.
@@ -491,9 +508,6 @@ public:
 
     // The target language we want to generate code for
     CodeGenTarget m_target;
-
-        /// The capabilities of the target
-    CapabilitySet m_targetCaps;
 
     // Source language (based on the more nuanced m_target)
     SourceLanguage m_sourceLanguage;

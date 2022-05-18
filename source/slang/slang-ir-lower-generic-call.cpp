@@ -36,17 +36,13 @@ namespace Slang
             IRType* paramValType = paramType;
             IRType* argValType = arg->getDataType();
             IRInst* argVal = arg;
-            bool isParamPointer = false;
             if (auto ptrType = as<IRPtrTypeBase>(paramType))
             {
-                isParamPointer = true;
                 paramValType = ptrType->getValueType();
             }
-            bool isArgPointer = false;
             auto argType = arg->getDataType();
             if (auto argPtrType = as<IRPtrTypeBase>(argType))
             {
-                isArgPointer = true;
                 argValType = argPtrType->getValueType();
                 argVal = builder->emitLoad(arg);
             }
@@ -278,6 +274,15 @@ namespace Slang
         {
             // If we see a call(lookup_interface_method(...), ...), we need to translate
             // all occurences of associatedtypes.
+
+            // If `w` in `lookup_interface_method(w, ...)` is a COM interface, bail.
+            if (lookupInst->getWitnessTable()
+                    ->getDataType()
+                    ->findDecoration<IRComInterfaceDecoration>())
+            {
+                return;
+            }
+
             auto interfaceType = cast<IRInterfaceType>(
                 cast<IRWitnessTableTypeBase>(lookupInst->getWitnessTable()->getDataType())
                     ->getConformanceType());
