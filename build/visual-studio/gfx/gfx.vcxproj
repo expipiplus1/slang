@@ -164,6 +164,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>_DEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
@@ -174,6 +175,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ImportLibrary>..\..\..\bin\windows-x86\debug\gfx.lib</ImportLibrary>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
     <PostBuildEvent>
       <Command>"$(SolutionDir)tools\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/x86/" "../../../bin/windows-x86/debug/"</Command>
@@ -183,6 +185,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>_DEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
@@ -193,6 +196,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ImportLibrary>..\..\..\bin\windows-x64\debug\gfx.lib</ImportLibrary>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
     <PostBuildEvent>
       <Command>"$(SolutionDir)tools\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/x64/" "../../../bin/windows-x64/debug/"</Command>
@@ -202,6 +206,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>_DEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
@@ -212,6 +217,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ImportLibrary>..\..\..\bin\windows-aarch64\debug\gfx.lib</ImportLibrary>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
     <PostBuildEvent>
       <Command>"$(SolutionDir)tools\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/aarch64/" "../../../bin/windows-aarch64/debug/"</Command>
@@ -221,6 +227,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>NDEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <Optimization>Full</Optimization>
@@ -235,6 +242,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ImportLibrary>..\..\..\bin\windows-x86\release\gfx.lib</ImportLibrary>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
     <PostBuildEvent>
       <Command>"$(SolutionDir)tools\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/x86/" "../../../bin/windows-x86/release/"</Command>
@@ -244,6 +252,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>NDEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <Optimization>Full</Optimization>
@@ -258,6 +267,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ImportLibrary>..\..\..\bin\windows-x64\release\gfx.lib</ImportLibrary>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
     <PostBuildEvent>
       <Command>"$(SolutionDir)tools\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/x64/" "../../../bin/windows-x64/release/"</Command>
@@ -267,6 +277,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>NDEBUG;SLANG_GFX_DYNAMIC;SLANG_GFX_DYNAMIC_EXPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..\..\..;..\..\..\external;..\..\..\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <Optimization>Full</Optimization>
@@ -281,6 +292,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ImportLibrary>..\..\..\bin\windows-aarch64\release\gfx.lib</ImportLibrary>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
     </Link>
     <PostBuildEvent>
       <Command>"$(SolutionDir)tools\copy-hlsl-libs.bat" "$(WindowsSdkDir)Redist/D3D/aarch64/" "../../../bin/windows-aarch64/release/"</Command>
@@ -295,9 +307,31 @@
     <ClInclude Include="..\..\..\tools\gfx\d3d\d3d-swapchain.h" />
     <ClInclude Include="..\..\..\tools\gfx\d3d\d3d-util.h" />
     <ClInclude Include="..\..\..\tools\gfx\d3d11\render-d3d11.h" />
-    <ClInclude Include="..\..\..\tools\gfx\d3d12\descriptor-heap-d3d12.h" />
-    <ClInclude Include="..\..\..\tools\gfx\d3d12\render-d3d12.h" />
-    <ClInclude Include="..\..\..\tools\gfx\d3d12\resource-d3d12.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-base.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-buffer.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-command-buffer.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-command-encoder.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-command-queue.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-descriptor-heap.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-device.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-fence.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-framebuffer.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-helper-functions.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-pipeline-state.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-query.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-render-pass.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-resource-views.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-resource.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-sampler.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-shader-object-layout.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-shader-object.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-shader-program.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-shader-table.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-submitter.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-swap-chain.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-texture.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-transient-heap.h" />
+    <ClInclude Include="..\..\..\tools\gfx\d3d12\d3d12-vertex-layout.h" />
     <ClInclude Include="..\..\..\tools\gfx\debug-layer.h" />
     <ClInclude Include="..\..\..\tools\gfx\flag-combiner.h" />
     <ClInclude Include="..\..\..\tools\gfx\immediate-renderer-base.h" />
@@ -324,9 +358,28 @@
     <ClCompile Include="..\..\..\tools\gfx\d3d\d3d-swapchain.cpp" />
     <ClCompile Include="..\..\..\tools\gfx\d3d\d3d-util.cpp" />
     <ClCompile Include="..\..\..\tools\gfx\d3d11\render-d3d11.cpp" />
-    <ClCompile Include="..\..\..\tools\gfx\d3d12\descriptor-heap-d3d12.cpp" />
-    <ClCompile Include="..\..\..\tools\gfx\d3d12\render-d3d12.cpp" />
-    <ClCompile Include="..\..\..\tools\gfx\d3d12\resource-d3d12.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-buffer.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-command-buffer.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-command-encoder.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-command-queue.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-descriptor-heap.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-device.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-fence.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-helper-functions.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-pipeline-state.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-query.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-render-pass.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-resource-views.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-resource.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-sampler.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-shader-object-layout.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-shader-object.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-shader-program.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-shader-table.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-submitter.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-swap-chain.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-texture.cpp" />
+    <ClCompile Include="..\..\..\tools\gfx\d3d12\d3d12-transient-heap.cpp" />
     <ClCompile Include="..\..\..\tools\gfx\debug-layer.cpp" />
     <ClCompile Include="..\..\..\tools\gfx\flag-combiner.cpp" />
     <ClCompile Include="..\..\..\tools\gfx\immediate-renderer-base.cpp" />

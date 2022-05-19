@@ -56,10 +56,10 @@ protected:
     virtual void emitParameterGroupImpl(IRGlobalParam* varDecl, IRUniformParameterGroupType* type) SLANG_OVERRIDE;
     virtual void emitEntryPointAttributesImpl(IRFunc* irFunc, IREntryPointDecoration* entryPointDecor) SLANG_OVERRIDE;
     virtual void emitSimpleTypeImpl(IRType* type) SLANG_OVERRIDE;
-    virtual void emitTypeImpl(IRType* type, const StringSliceLoc* nameLoc) SLANG_OVERRIDE;
+    virtual void _emitType(IRType* type, DeclaratorInfo* declarator) SLANG_OVERRIDE;
     virtual void emitVectorTypeNameImpl(IRType* elementType, IRIntegerValue elementCount) SLANG_OVERRIDE;
     virtual bool tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOuterPrec) SLANG_OVERRIDE;
-    virtual void emitPreprocessorDirectivesImpl() SLANG_OVERRIDE;
+    virtual void emitPreModuleImpl() SLANG_OVERRIDE;
     virtual void emitSimpleValueImpl(IRInst* value) SLANG_OVERRIDE;
     virtual void emitSimpleFuncParamImpl(IRParam* param) SLANG_OVERRIDE;
     virtual void emitModuleImpl(IRModule* module, DiagnosticSink* sink) SLANG_OVERRIDE;
@@ -69,10 +69,10 @@ protected:
     virtual void emitGlobalRTTISymbolPrefix();
     virtual void emitWitnessTable(IRWitnessTable* witnessTable) SLANG_OVERRIDE;
     virtual void emitInterface(IRInterfaceType* interfaceType) SLANG_OVERRIDE;
+    void emitComInterface(IRInterfaceType* interfaceType);
     virtual void emitRTTIObject(IRRTTIObject* rttiObject) SLANG_OVERRIDE;
     virtual bool tryEmitGlobalParamImpl(IRGlobalParam* varDecl, IRType* varType) SLANG_OVERRIDE;
     virtual void emitIntrinsicCallExprImpl(IRCall* inst, IRTargetIntrinsicDecoration* targetIntrinsic, EmitOpInfo const& inOuterPrec) SLANG_OVERRIDE;
-
     virtual void emitLoopControlDecorationImpl(IRLoopControlDecoration* decl) SLANG_OVERRIDE;
 
     virtual const UnownedStringSlice* getVectorElementNames(BaseType elemType, Index elemCount);

@@ -665,20 +665,6 @@ bool HLSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
     return false;
 }
 
-void HLSLSourceEmitter::emitLayoutDirectivesImpl(TargetRequest* targetReq)
-{
-    switch (targetReq->getDefaultMatrixLayoutMode())
-    {
-        case kMatrixLayoutMode_RowMajor:
-        default:
-            m_writer->emit("#pragma pack_matrix(row_major)\n");
-            break;
-        case kMatrixLayoutMode_ColumnMajor:
-            m_writer->emit("#pragma pack_matrix(column_major)\n");
-            break;
-    }
-}
-
 void HLSLSourceEmitter::emitVectorTypeNameImpl(IRType* elementType, IRIntegerValue elementCount)
 {
     // In some cases we *need* to use the built-in syntax sugar for vector types,
@@ -725,6 +711,36 @@ void HLSLSourceEmitter::emitLoopControlDecorationImpl(IRLoopControlDecoration* d
     default:
         break;
     }
+}
+
+static bool _canEmitExport(const Profile& profile)
+{
+    const auto family = profile.getFamily();
+    const auto version = profile.getVersion();
+    // Is ita late enough version of shader model to output with 'export'
+    return (family == ProfileFamily::DX && version >= ProfileVersion::DX_6_1);
+}
+
+/* virtual */void HLSLSourceEmitter::emitFuncDecorationsImpl(IRFunc* func)
+{
+    // Specially handle export, as we don't want to emit it multiple times
+    if (getTargetReq()->isWholeProgramRequest() && 
+        _canEmitExport(m_effectiveProfile))
+    {
+        for (auto decoration : func->getDecorations())
+        {
+            const auto op = decoration->getOp();
+            if (op == kIROp_PublicDecoration ||
+                op == kIROp_HLSLExportDecoration)
+            {
+                m_writer->emit("export\n");
+                break;
+            }
+        }
+    }
+
+    // Use the default for others
+    Super::emitFuncDecorationsImpl(func);
 }
 
 void HLSLSourceEmitter::emitFuncDecorationImpl(IRDecoration* decoration)
@@ -1011,6 +1027,8 @@ void HLSLSourceEmitter::_emitPrefixTypeAttr(IRAttr* attr)
 
 void HLSLSourceEmitter::emitSimpleFuncParamImpl(IRParam* param)
 {
+    emitRateQualifiers(param);
+
     if (auto decor = param->findDecoration<IRGeometryInputPrimitiveTypeDecoration>())
     {
         switch (decor->getOp())
@@ -1101,9 +1119,9 @@ void HLSLSourceEmitter::handleRequiredCapabilitiesImpl(IRInst* inst)
     }
 }
 
-void HLSLSourceEmitter::emitPreludeDirectivesImpl()
+void HLSLSourceEmitter::emitFrontMatterImpl(TargetRequest* targetReq) 
 {
-    if( m_extensionTracker->m_requiresNVAPI )
+    if (m_extensionTracker->m_requiresNVAPI)
     {
         // If the generated code includes implicit NVAPI use,
         // then we need to ensure that NVAPI support is included
@@ -1127,7 +1145,7 @@ void HLSLSourceEmitter::emitPreludeDirectivesImpl()
         // they could pass in these `#define`s using command-line
         // or API options.
         //
-        if( auto decor = m_irModule->getModuleInst()->findDecoration<IRNVAPISlotDecoration>() )
+        if (auto decor = m_irModule->getModuleInst()->findDecoration<IRNVAPISlotDecoration>())
         {
             m_writer->emit("#define NV_SHADER_EXTN_SLOT ");
             m_writer->emit(decor->getRegisterName());
@@ -1139,13 +1157,26 @@ void HLSLSourceEmitter::emitPreludeDirectivesImpl()
             // understanding of `space`s).
             //
             auto spaceName = decor->getSpaceName();
-            if( spaceName != "space0" )
+            if (spaceName != "space0")
             {
                 m_writer->emit("#define NV_SHADER_EXTN_REGISTER_SPACE ");
                 m_writer->emit(spaceName);
                 m_writer->emit("\n");
             }
         }
+    }
+
+    // Emit any layout declarations
+
+    switch (targetReq->getDefaultMatrixLayoutMode())
+    {
+    case kMatrixLayoutMode_RowMajor:
+    default:
+        m_writer->emit("#pragma pack_matrix(row_major)\n");
+        break;
+    case kMatrixLayoutMode_ColumnMajor:
+        m_writer->emit("#pragma pack_matrix(column_major)\n");
+        break;
     }
 }
 
