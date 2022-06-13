@@ -13,6 +13,7 @@
 #include "slang-compiler.h"
 
 #include "../compiler-core/slang-lexer.h"
+#include "../compiler-core/slang-artifact.h"
 
 #include "slang-lower-to-ir.h"
 #include "slang-mangle.h"
@@ -56,14 +57,7 @@ namespace Slang
 
 bool isHeterogeneousTarget(CodeGenTarget target)
 {
-    switch (target)
-    {
-    case CodeGenTarget::HostCPPSource:
-    case CodeGenTarget::HostExecutable:
-        return true;
-    default:
-        return false;
-    }
+    return ArtifactDesc::makeFromCompileTarget(asExternal(target)).style == ArtifactStyle::Host;
 }
 
 void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
@@ -140,6 +134,28 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         }
 
         outBlob = blob;
+        return SLANG_OK;
+    }
+
+    SlangResult CompileResult::isParameterLocationUsed(SlangParameterCategory category, UInt spaceIndex, UInt registerIndex, bool& outUsed)
+    {
+        if (!postEmitMetadata)
+            return SLANG_E_NOT_AVAILABLE;
+
+        if (!ShaderBindingRange::isUsageTracked((slang::ParameterCategory)category))
+            return SLANG_E_NOT_AVAILABLE;
+
+        // TODO: optimize this with a binary search through a sorted list
+        for (const auto& range : postEmitMetadata->usedBindings)
+        {
+            if (range.containsBinding((slang::ParameterCategory)category, spaceIndex, registerIndex))
+            {
+                outUsed = true;
+                return SLANG_OK;
+            }
+        }
+        
+        outUsed = false;
         return SLANG_OK;
     }
 
@@ -570,6 +586,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
             case CodeGenTarget::ShaderHostCallable:
             case CodeGenTarget::ShaderSharedLibrary:
             case CodeGenTarget::HostExecutable:
+            case CodeGenTarget::HostHostCallable:
             {
                 // We need some C/C++ compiler
                 return PassThroughMode::GenericCCpp;
@@ -662,7 +679,8 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
     }
 
     SlangResult CodeGenContext::emitEntryPointsSource(
-        String&                 outSource)
+        String&                 outSource,
+        RefPtr<PostEmitMetadata>& outMetadata)
     {
         outSource = String();
 
@@ -714,7 +732,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         else
         {
             return emitEntryPointsSourceFromIR(
-                outSource);
+                outSource, outMetadata);
         }
     }
 
@@ -960,9 +978,14 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         {
             case CodeGenTarget::ShaderHostCallable:
             case CodeGenTarget::ShaderSharedLibrary:
+            {
                 return CodeGenTarget::CPPSource;
+            }
+            case CodeGenTarget::HostHostCallable:
             case CodeGenTarget::HostExecutable:
+            {
                 return CodeGenTarget::HostCPPSource;
+            }
             case CodeGenTarget::PTX:                return CodeGenTarget::CUDASource;
             case CodeGenTarget::DXBytecode:         return CodeGenTarget::HLSL;
             case CodeGenTarget::DXIL:               return CodeGenTarget::HLSL;
@@ -974,18 +997,13 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
 
     static bool _isCPUHostTarget(CodeGenTarget target)
     {
-        switch (target)
-        {
-        case CodeGenTarget::HostCPPSource:
-        case CodeGenTarget::HostExecutable:
-            return true;
-        default:
-            return false;
-        }
+        auto desc = ArtifactDesc::makeFromCompileTarget(asExternal(target));
+        return desc.style == ArtifactStyle::Host;
     }
 
     SlangResult CodeGenContext::emitWithDownstreamForEntryPoints(
-        RefPtr<DownstreamCompileResult>& outResult)
+        RefPtr<DownstreamCompileResult>& outResult,
+        RefPtr<PostEmitMetadata>& outMetadata)
     {
         outResult.setNull();
 
@@ -1085,14 +1103,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
             {
                 preprocessorDefinitions.Add(define.Key, define.Value);
             }
-            {
-                auto linkage = getLinkage();
-                for (auto& define : linkage->preprocessorDefinitions)
-                {
-                    preprocessorDefinitions.Add(define.Key, define.Value);
-                }
-            }
-
+            
             {
                 /* TODO(JS): Not totally clear what options should be set here. If we are using the pass through - then using say the defines/includes
                 all makes total sense. If we are generating C++ code from slang, then should we really be using these values -> aren't they what is
@@ -1127,7 +1138,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                 options.sourceContentsPath = calcSourcePathForEntryPoints();
 
                 CodeGenContext sourceCodeGenContext(this, sourceTarget, extensionTracker);
-                SLANG_RETURN_ON_FAIL(sourceCodeGenContext.emitEntryPointsSource(options.sourceContents));
+                SLANG_RETURN_ON_FAIL(sourceCodeGenContext.emitEntryPointsSource(options.sourceContents, outMetadata));
             }
             else
             {
@@ -1144,10 +1155,26 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         else
         {
             CodeGenContext sourceCodeGenContext(this, sourceTarget, extensionTracker);
-            SLANG_RETURN_ON_FAIL(sourceCodeGenContext.emitEntryPointsSource(options.sourceContents));
+            SLANG_RETURN_ON_FAIL(sourceCodeGenContext.emitEntryPointsSource(options.sourceContents, outMetadata));
             sourceCodeGenContext.maybeDumpIntermediate(options.sourceContents.getBuffer());
 
             sourceLanguage = (SourceLanguage)TypeConvertUtil::getSourceLanguageFromTarget((SlangCompileTarget)sourceTarget);
+        }
+
+        // Add any preprocessor definitions associated with the linkage
+        {
+            // TODO(JS): This is somewhat arguable - should defines passed to Slang really be
+            // passed to downstream compilers? It does appear consistent with the behavior if 
+            // there is an endToEndReq.
+            // 
+            // That said it's very convenient and provides way to control aspects 
+            // of downstream compilation. 
+            
+            auto linkage = getLinkage();
+            for (auto& define : linkage->preprocessorDefinitions)
+            {
+                preprocessorDefinitions.Add(define.Key, define.Value);
+            }
         }
 
         // If we have an extension tracker, we may need to set options such as SPIR-V version
@@ -1275,7 +1302,8 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         }
 
         // If we aren't using LLVM 'host callable', we want downstream compile to produce a shared library
-        if (compilerType != PassThroughMode::LLVM && target == CodeGenTarget::ShaderHostCallable)
+        if (compilerType != PassThroughMode::LLVM && 
+            ArtifactDesc::makeFromCompileTarget(asExternal(target)).kind == ArtifactKind::Callable)
         {
             target = CodeGenTarget::ShaderSharedLibrary;
         }
@@ -1504,7 +1532,8 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
 
     SlangResult emitSPIRVForEntryPointsDirectly(
         CodeGenContext* codeGenContext,
-        List<uint8_t>&  spirvOut);
+        List<uint8_t>&  spirvOut,
+        RefPtr<PostEmitMetadata>& outMetadata);
 
     static CodeGenTarget _getIntermediateTarget(CodeGenTarget target)
     {
@@ -1519,7 +1548,8 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
 
         /// Function to simplify the logic around emitting, and dissassembling
     SlangResult CodeGenContext::_emitEntryPoints(
-        RefPtr<DownstreamCompileResult>& outDownstreamResult)
+        RefPtr<DownstreamCompileResult>& outDownstreamResult,
+        RefPtr<PostEmitMetadata>& outMetadata)
     {
         auto target = getTargetFormat();
         switch (target)
@@ -1533,7 +1563,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                 CodeGenContext intermediateContext(this, intermediateTarget);
 
                 RefPtr<DownstreamCompileResult> code;
-                SLANG_RETURN_ON_FAIL(intermediateContext._emitEntryPoints(code));
+                SLANG_RETURN_ON_FAIL(intermediateContext._emitEntryPoints(code, outMetadata));
                 intermediateContext.maybeDumpIntermediate(code);
 
                 // Then disassemble the intermediate binary result to get the desired output
@@ -1548,7 +1578,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                 if (getTargetReq()->shouldEmitSPIRVDirectly())
                 {
                     List<uint8_t> spirv;
-                    SLANG_RETURN_ON_FAIL(emitSPIRVForEntryPointsDirectly(this, spirv));
+                    SLANG_RETURN_ON_FAIL(emitSPIRVForEntryPointsDirectly(this, spirv, outMetadata));
                     auto spirvBlob = ListBlob::moveCreate(spirv);
                     outDownstreamResult = new BlobDownstreamCompileResult(DownstreamDiagnostics(), spirvBlob);
                     return SLANG_OK;
@@ -1560,7 +1590,8 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
             case CodeGenTarget::ShaderHostCallable:
             case CodeGenTarget::ShaderSharedLibrary:
             case CodeGenTarget::HostExecutable:
-                SLANG_RETURN_ON_FAIL(emitWithDownstreamForEntryPoints(outDownstreamResult));
+            case CodeGenTarget::HostHostCallable:
+                SLANG_RETURN_ON_FAIL(emitWithDownstreamForEntryPoints(outDownstreamResult, outMetadata));
                 return SLANG_OK;
 
             default: break;
@@ -1585,16 +1616,18 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         case CodeGenTarget::DXIL:
         case CodeGenTarget::DXBytecode:
         case CodeGenTarget::PTX:
+        case CodeGenTarget::HostHostCallable:
         case CodeGenTarget::ShaderHostCallable:
         case CodeGenTarget::ShaderSharedLibrary:
         case CodeGenTarget::HostExecutable:
             {
                 RefPtr<DownstreamCompileResult> downstreamResult;
+                RefPtr<PostEmitMetadata> metadata;
 
-                if (SLANG_SUCCEEDED(_emitEntryPoints(downstreamResult)))
+                if (SLANG_SUCCEEDED(_emitEntryPoints(downstreamResult, metadata)))
                 {
                     maybeDumpIntermediate(downstreamResult);
-                    result = CompileResult(downstreamResult);
+                    result = CompileResult(downstreamResult, metadata);
                 }
             }
             break;
@@ -1606,17 +1639,18 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
         case CodeGenTarget::CSource:
             {
                 RefPtr<ExtensionTracker> extensionTracker = _newExtensionTracker(target);
+                RefPtr<PostEmitMetadata> metadata;
 
                 CodeGenContext subContext(this, target, extensionTracker);
 
                 String code;
-                if (SLANG_FAILED(subContext.emitEntryPointsSource(code)))
+                if (SLANG_FAILED(subContext.emitEntryPointsSource(code, metadata)))
                 {
                     return result;
                 }
 
                 subContext.maybeDumpIntermediate(code.getBuffer());
-                result = CompileResult(code);
+                result = CompileResult(code, metadata);
             }
             break;
 
@@ -1766,7 +1800,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                 ComPtr<ISlangBlob> blob;
                 if (SLANG_FAILED(result.getBlob(blob)))
                 {
-                    if (targetReq->getTarget() == CodeGenTarget::ShaderHostCallable)
+                    if (ArtifactDesc::makeFromCompileTarget(asExternal(targetReq->getTarget())).kind == ArtifactKind::Callable)
                     {
                         // Some HostCallable are not directly representable as a 'binary'.
                         // So here, we just ignore if that appears the case, and don't output an unexpected error.
@@ -1810,6 +1844,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                     case CodeGenTarget::PTX:
                         // For now we just dump PTX out as hex
 
+                    case CodeGenTarget::HostHostCallable:
                     case CodeGenTarget::ShaderHostCallable:
                     case CodeGenTarget::ShaderSharedLibrary:
                     case CodeGenTarget::HostExecutable:
@@ -2383,11 +2418,19 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
             case CodeGenTarget::CUDASource:         return ".cu";
             case CodeGenTarget::CPPSource:          return ".cpp";
             case CodeGenTarget::HostCPPSource:      return ".cpp";
-                // What these should be called is target specific, but just use these exts to make clear for now
-                // for now
-            case CodeGenTarget::HostExecutable:      return ".exe";
+
+            // What these should be called is target specific, but just use these exts to make clear for now
+            // for now
+            case CodeGenTarget::HostExecutable:      
+            {
+                return ".exe";
+            }
+            case CodeGenTarget::HostHostCallable:
             case CodeGenTarget::ShaderHostCallable:
-            case CodeGenTarget::ShaderSharedLibrary: return ".shared-lib";
+            case CodeGenTarget::ShaderSharedLibrary: 
+            {
+                return ".shared-lib";
+            }
             default: break;
         }
         return nullptr;
@@ -2401,22 +2444,16 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
             return;
 
         auto target = getTargetFormat();
-        switch (target)
-        {    
-            case CodeGenTarget::CPPSource:
-            case CodeGenTarget::HostCPPSource:
-            case CodeGenTarget::CUDASource:
-            case CodeGenTarget::CSource:
-            case CodeGenTarget::DXILAssembly:
-            case CodeGenTarget::DXBytecodeAssembly:
-            case CodeGenTarget::SPIRVAssembly:
-            case CodeGenTarget::GLSL:
-            case CodeGenTarget::HLSL:
-            {
-                dumpIntermediateText(data, size, _getTargetExtension(target));
-                break;
-            }
+        const auto desc = ArtifactDesc::makeFromCompileTarget(asExternal(target));
 
+        if (desc.kind == ArtifactKind::Text)
+        {
+            dumpIntermediateText(data, size, _getTargetExtension(target));
+            return;
+        }
+        
+        switch (target)
+        {
 #if 0
             case CodeGenTarget::SlangIRAssembly:
             {
@@ -2424,7 +2461,6 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                 break;
             }
 #endif
-
             case CodeGenTarget::DXIL:
             case CodeGenTarget::DXBytecode:
             case CodeGenTarget::SPIRV:
@@ -2443,6 +2479,7 @@ void printDiagnosticArg(StringBuilder& sb, CodeGenTarget val)
                 break;
             }
 
+            case CodeGenTarget::HostHostCallable:
             case CodeGenTarget::ShaderHostCallable:
             case CodeGenTarget::ShaderSharedLibrary:
             case CodeGenTarget::HostExecutable:
