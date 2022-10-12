@@ -620,7 +620,9 @@ int D3DUtil::getShaderModelFromProfileName(const char* name)
     if (nameSlice.endsWith("6_6"))
         return D3D_SHADER_MODEL_6_6;
     if (nameSlice.endsWith("6_7"))
-        return 0x67;
+        return D3D_SHADER_MODEL_6_7;
+    if (nameSlice.endsWith("6_8"))
+        return 0x68;
     return 0;
 }
 

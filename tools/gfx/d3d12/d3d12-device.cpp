@@ -778,9 +778,17 @@ Result DeviceImpl::initialize(const Desc& desc)
         compileTarget = SLANG_DXIL;
         profileName = "sm_6_5";
         break;
-    case 0x67:
+    case D3D_SHADER_MODEL_6_6:
+        compileTarget = SLANG_DXIL;
+        profileName = "sm_6_6";
+        break;
+    case D3D_SHADER_MODEL_6_7:
         compileTarget = SLANG_DXIL;
         profileName = "sm_6_7";
+        break;
+    case 0x68:
+        compileTarget = SLANG_DXIL;
+        profileName = "sm_6_8";
         break;
     default:
         compileTarget = SLANG_DXIL;
