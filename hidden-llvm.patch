@@ -1,0 +1,23 @@
+diff --git a/premake5.lua b/premake5.lua
+index 5c6f71e..d4c2f71 100644
+--- a/premake5.lua
++++ b/premake5.lua
+@@ -295,8 +295,16 @@ workspace "slang-llvm"
+         linkoptions{  "-Wl,-rpath,'$$ORIGIN',--no-as-needed,--no-undefined" }
+         -- Allow libraries to be listed in any order (adds opening and closing --start-group --end-group)
+         linkgroups "On"
+-                 
+-                 
++
++        -- We need `--exclude-libs All` (or at least `--exclude-libs
++        -- llvm1,llvm2...`) to avoid exporting anything from llvm which could
++        -- clash with other LLVM's loaded at runtime, for example from
++        -- LLVMPipe.
++        -- This typically manifests with a message like:
++        -- "inconsistency in registered CommandLine options" followed by segfault.
++        -- (TODO: On macOS use: -hidden-l... instead of -l...)
++        linkoptions{ "-Wl,--exclude-libs,ALL" }
++
+     filter { "system:macosx" }
+         --buildoptions { "-ffunction-sections", "-fdata-sections" }
+         -- z is for zlib support
