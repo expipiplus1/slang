@@ -177,7 +177,7 @@ let
 
     export CC=${pkgs.clang}/bin/clang
     export CXX=${pkgs.clang}/bin/clang++
-    premake5 $premakeFlags --cc=clang
+    premake5 $premakeFlags --cc=clang "$@"
     ${pkgs.bear}/bin/bear --append -- make --ignore-errors --keep-going config=debug_x64 -j$(nproc)
   '';
 
