@@ -5,59 +5,23 @@ let
     inherit crossSystem;
     overlays = [
       (self: super: {
-        # llvmPackages_13 = super.llvmPackages_13 // (let
-        #   tools = super.llvmPackages_13.tools.extend (selfT: superT: {
-        #     libclang = superT.libclang.overrideAttrs (old: {
-        #       cmakeFlags = old.cmakeFlags ++ [
-        #         # "-DCLANG_BUILD_TOOLS=0"
-        #         "-DCMAKE_CXX_VISIBILITY_PRESET=hidden"
-        #         # -DCLANG_BUILD_TOOLS=0
-        #         # -DCLANG_ENABLE_STATIC_ANALYZER=0
-        #         # -DCLANG_ENABLE_ARCMT=0
-        #         # -DCLANG_INCLUDE_DOCS=0
-        #         # -DCLANG_INCLUDE_TESTS=0
-
-        #       ];
-        #     });
-        #     libllvm = superT.libllvm.overrideAttrs (old: {
-        #       doCheck = false;
-        #       cmakeFlags = old.cmakeFlags ++ [
-        #         "-DCMAKE_CXX_VISIBILITY_PRESET=hidden"
-        #         # "-DLLVM_BUILD_LLVM_C_DYLIB=NO"
-        #         # "-DLLVM_BUILD_LLVM_DYLIB=NO"
-        #         # "-DLLVM_INCLUDE_BENCHMARKS=NO"
-        #         # "-DLLVM_INCLUDE_DOCS=NO"
-        #         # "-DLLVM_INCLUDE_EXAMPLES=NO"
-        #         # "-DLLVM_BUILD_TOOLS=YES"
-        #         # "-DLLVM_INCLUDE_TESTS=NO"
-        #         # "-DLLVM_ENABLE_TERMINFO=NO"
-        #         "-DLLVM_LINK_LLVM_DYLIB=NO"
-        #       ];
-        #     });
-        #   });
-        #   libraries = super.llvmPackages_13.libraries;
-        # in { inherit tools libraries; } // tools // libraries);
-        # llvmPackages = self.llvmPackages_13;
         dxvk_2 = # self.enableDebugging
-          (super.dxvk_2.override { sdl2Support = false; }).overrideAttrs
-          (old: { src = /home/e/work/dxvk; });
+          (super.dxvk_2.override {
+            sdl2Support = false;
+            glfwSupport = false;
+          }).overrideAttrs (old: { src = /home/e/work/dxvk; });
         directx-shader-compiler = super.directx-shader-compiler.overrideAttrs
           (old: {
             patches = old.patches or [ ]
               ++ [ ./fix-shutdown-use-after-free.patch ];
           });
-        vkd3d-proton = self.enableDebugging (self.callPackage
-          ({ stdenv, meson, ninja, wine64, glslang, git }:
-            stdenv.mkDerivation {
-              name = "vkd3d-proton";
-              src = /home/e/work/tmp/vkd3d-proton;
-              nativeBuildInputs = [ meson ninja wine64 glslang git ];
-            }) { });
       })
     ];
   };
 
   enableCuda = true;
+  enableDXC = true;
+  enableDirectX = true;
 
   # Eww, some packages put things in etc and others in share. This ruins the
   # order, but ehh
@@ -92,9 +56,6 @@ let
         cp bin/*/release/*.so "$out/lib"
       '';
     }) { };
-
-  # llvmPackages = pkgsStatic.llvmPackages_13;
-  # llvmPackages = llvmPackages_13;
 
   slang-llvm = pkgs.callPackage
     ({ stdenv, fetchFromGitHub, symlinkJoin, premake5, llvmPackages, ncurses }:
@@ -184,7 +145,7 @@ let
   slang = pkgs.callPackage ({ stdenv, lib, nix-gitignore, premake5, xorg
     , cudaPackages, directx-shader-compiler, vulkan-loader
     , vulkan-validation-layers, vulkan-tools-lunarg, addOpenGLRunpath, dxvk_2
-    , vkd3d, vkd3d-proton, SDL2, glslang, renderdoc }:
+    , vkd3d, vkd3d-proton, glslang, renderdoc }:
     stdenv.mkDerivation {
       name = "slang";
       # src = nix-gitignore.gitignoreSource [ "default.nix" ] ./.;
@@ -194,11 +155,12 @@ let
         premake5
         # So we can find libcuda.so at runtime in /run/opengl or wherever
       ] ++ lib.optional enableCuda cudaPackages.autoAddOpenGLRunpathHook;
-      NIX_LDFLAGS = [ "-lSDL2" ]
-        ++ lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
+      NIX_LDFLAGS =
+        lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
       autoPatchelfIgnoreMissingDeps = lib.optional enableCuda "libcuda.so";
 
-      buildInputs = [ dxvk-native-headers xorg.libX11 SDL2 ]
+      buildInputs = [ xorg.libX11 ]
+        ++ lib.optional enableDirectX dxvk-native-headers
         ++ lib.optional enableCuda cudaPackages.cudatoolkit;
       passthru = { inherit slang-llvm slang-glslang gen-compile-commands; };
 
@@ -215,7 +177,7 @@ let
       ] ++ lib.optionals enableCuda [
         "--cuda-sdk-path=${cudaPackages.cudatoolkit}"
         "--optix-sdk-path=${optix}"
-      ];
+      ] ++ lib.optionals enableDirectX [ "--dx-on-vk=true" ];
       makeFlags = [ "config=release_x64" ];
       enableParallelBuilding = true;
       installPhase = ''
@@ -229,13 +191,14 @@ let
       shellHook = ''
         export PATH=${lib.makeBinPath [ glslang gen-compile-commands ]}:$PATH
         export LD_LIBRARY_PATH=${
-          lib.makeLibraryPath
-          ([ directx-shader-compiler vulkan-loader slang-llvm ]
+          lib.makeLibraryPath ([ vulkan-loader slang-llvm ]
+            ++ lib.optional enableDXC directx-shader-compiler
             ++ lib.optionals enableCuda [
               # for libcuda.so
               addOpenGLRunpath.driverLink
               # for libnvrtc.so
               cudaPackages.cudatoolkit.out
+            ] ++ lib.optionals enableDirectX [
               # for dx11
               dxvk_2
               # for vkd3d-shader.sh (d3dcompiler)
@@ -259,7 +222,7 @@ let
         # export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow format relro bindnow"
         # Disable 'format' hardening as some of the tests generate offending output
         export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow relro bindnow"
-
+      '' + lib.optionalString enableDirectX ''
         export VKD3D_DEBUG=err
         export DXVK_LOG_LEVEL=error
       '';
