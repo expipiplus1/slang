@@ -3,19 +3,20 @@
 git clean \
   -d \
   -x \
-  --exclude="*.nix" \
   --exclude="*.md" \
-  --exclude=.clang-format \
-  --exclude=gdb-pretty.py \
-  --exclude=tests \
-  --exclude=hidden-llvm.patch \
-  --exclude=clean.sh \
-  --exclude=compile_flags.txt \
-  --exclude=compile_commands.json \
+  --exclude="*.nix" \
   --exclude=.cache \
-  --exclude=.vscode \
-  --exclude=.mailmap \
+  --exclude=.clang-format \
+  --exclude=.clangd \
   --exclude=.gdb_history \
-  --exclude=vkd3d-proton.cache \
   --exclude=.ignore \
+  --exclude=.mailmap \
+  --exclude=.vscode \
+  --exclude=clean.sh \
+  --exclude=compile_commands.json \
+  --exclude=compile_flags.txt \
+  --exclude=gdb-pretty.py \
+  --exclude=hidden-llvm.patch \
+  --exclude=tests \
+  --exclude=vkd3d-proton.cache \
   "$@"
