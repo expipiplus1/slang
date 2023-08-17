@@ -8,6 +8,8 @@ git clean \
   --exclude=.cache \
   --exclude=.clang-format \
   --exclude=.clangd \
+  --exclude=.direnv \
+  --exclude=.envrc \
   --exclude=.gdb_history \
   --exclude=.ignore \
   --exclude=.mailmap \
