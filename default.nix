@@ -42,8 +42,8 @@ let
       src = fetchFromGitHub {
         owner = "expipiplus1";
         repo = "slang-glslang";
-        rev = "a1d133f12c0b5bbff6aecb474cb3eadb0fc7afd4"; # submodule-protocol
-        sha256 = "0c1xkcxan3vvv8sxg61advdd842jly9ig8kxg8m9h9kgimgch84f";
+        rev = "8c732f5d1868cba621bffc1d5085a5a18dae2683";
+        sha256 = "sha256-cCFYd/VIGUvFN3ZpswH4DwTTJkWXXavWbY9B3QZ+UgY=";
         fetchSubmodules = true;
       };
       nativeBuildInputs = [ premake5 ];
