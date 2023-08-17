@@ -83,6 +83,21 @@
             (makeSearchPathOutput "lib" "etc/vulkan/implicit_layer.d" ps)
           ];
 
+        make-helper = pkgs.writeShellScriptBin "mk" ''
+          if [ -z "$1" ]
+          then
+            config=debug
+          else
+            config="$1"
+          fi
+          make config="$config""_${arch}" -j$(nproc) slangc
+          "./bin/linux-${arch}/$config/slangc" & slangc=$!
+          make config="$config""_${arch}" -j$(nproc)
+          echo "done building, waiting for slangc..."
+          wait $slangc
+          echo ...done
+        '';
+
         gen-compile-commands =
           pkgs.writeShellScriptBin "gen-compile-commands" ''
             git clean -x -f \
@@ -221,7 +236,7 @@
             # TODO: We should wrap slanc and add these.
             shellHook = ''
               export PATH=$PATH:${
-                lib.makeBinPath [ glslang gen-compile-commands ]
+                lib.makeBinPath [ glslang gen-compile-commands make-helper ]
               }
               export LD_LIBRARY_PATH=${
                 lib.makeLibraryPath ([ vulkan-loader slang-llvm ]
