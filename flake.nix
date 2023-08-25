@@ -1,12 +1,14 @@
 {
   description = "The Slang compiler";
 
-  inputs.nixpkgs.url =
-    "github:NixOS/nixpkgs/b19e3cf161c8cc571f53d10806e9eee921df812d";
+  inputs = {
+    nixpkgs.url =
+      "github:NixOS/nixpkgs/f564a7b4acf7777bf16615401b95c5ab269ecea6";
 
-  inputs.gitignore = {
-    url = "github:hercules-ci/gitignore.nix";
-    inputs.nixpkgs.follows = "nixpkgs";
+    gitignore = {
+      url = "github:hercules-ci/gitignore.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { self, nixpkgs, gitignore }: {
@@ -150,7 +152,6 @@
         slang-llvm = with pkgs;
           stdenv.mkDerivation {
             name = "slang-llvm";
-            # src = /home/e/work/slang-llvm;
             src = fetchFromGitHub {
               owner = "shader-slang";
               repo = "slang-llvm";
