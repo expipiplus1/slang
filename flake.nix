@@ -22,56 +22,48 @@
         enableDXC = true;
         enableDirectX = true;
 
-        overlay = (self: super: {
-          dxvk_2 = (super.dxvk_2.override {
-            sdl2Support = false;
-            glfwSupport = false;
-          }).overrideAttrs (old: {
-            src = pkgs.fetchFromGitHub {
-              owner = "doitsujin";
-              repo = "dxvk";
-              rev = "2069fd25147dcd0a4b24de2abfac1e305cd4a19c"; # pin
-              sha256 = "sha256-x7OQ0s4Tcavpw3nTEhXMBwYjMrdSv8fjPFjVxYRZ4ms=";
-              fetchSubmodules = true;
-            };
-          });
-          directx-shader-compiler = super.directx-shader-compiler.overrideAttrs
-            (old: {
-              src = pkgs.fetchFromGitHub {
-                owner = "microsoft";
-                repo = "DirectXShaderCompiler";
-                rev = "756125cb46ec03bbd49541c714082bb577ca0176";
-                sha256 = "sha256-3L5DMOlT9uRjap8tpp3QX/CEr/ZNJC5eLvi4BOfoqJM=";
-                fetchSubmodules = true;
-              };
-            });
-          optix-headers = pkgs.fetchzip {
-            url =
-              "https://developer.download.nvidia.com/redist/optix/v7.3/OptiX-7.3.0-Include.zip";
-            sha256 = "0max1j4822mchj0xpz9lqzh91zkmvsn4py0r174cvqfz8z8ykjk8";
-          };
-          dxvk-native-headers = pkgs.symlinkJoin {
-            name = "dxvk-native-headers";
-            paths = [
-              (pkgs.fetchFromGitHub {
-                owner = "expipiplus1";
-                repo = "mingw-directx-headers";
-                rev = "aa5dc120215c9ef929a41b636e635c582a88d771"; # headers
-                sha256 = "0v0f5z7kbdhny31i8w3iw6pn8iikyczadjr9acmq5cv6s2q98zba";
-              })
-              (self.dxvk_2.src + "/include/native/windows")
-              (self.dxvk_2.src + "/include/native")
-            ];
-            postBuild = ''
-              ln -s . $out/include
-            '';
-          };
-        });
-
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
-          overlays = [ overlay ];
+          overlays = [
+            (self: super: {
+              dxvk_2 = (super.dxvk_2.override {
+                sdl2Support = false;
+                glfwSupport = false;
+              }).overrideAttrs (old: {
+                src = pkgs.fetchFromGitHub {
+                  owner = "doitsujin";
+                  repo = "dxvk";
+                  rev = "2069fd25147dcd0a4b24de2abfac1e305cd4a19c"; # pin
+                  sha256 =
+                    "sha256-x7OQ0s4Tcavpw3nTEhXMBwYjMrdSv8fjPFjVxYRZ4ms=";
+                  fetchSubmodules = true;
+                };
+              });
+              optix-headers = pkgs.fetchzip {
+                url =
+                  "https://developer.download.nvidia.com/redist/optix/v7.3/OptiX-7.3.0-Include.zip";
+                sha256 = "0max1j4822mchj0xpz9lqzh91zkmvsn4py0r174cvqfz8z8ykjk8";
+              };
+              dxvk-native-headers = pkgs.symlinkJoin {
+                name = "dxvk-native-headers";
+                paths = [
+                  (pkgs.fetchFromGitHub {
+                    owner = "expipiplus1";
+                    repo = "mingw-directx-headers";
+                    rev = "aa5dc120215c9ef929a41b636e635c582a88d771"; # headers
+                    sha256 =
+                      "0v0f5z7kbdhny31i8w3iw6pn8iikyczadjr9acmq5cv6s2q98zba";
+                  })
+                  (self.dxvk_2.src + "/include/native/windows")
+                  (self.dxvk_2.src + "/include/native")
+                ];
+                postBuild = ''
+                  ln -s . $out/include
+                '';
+              };
+            })
+          ];
         };
 
         # Eww, some packages put things in etc and others in share. This ruins the
