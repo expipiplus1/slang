@@ -2,8 +2,7 @@
   description = "The Slang compiler";
 
   inputs = {
-    nixpkgs.url =
-      "github:NixOS/nixpkgs/f564a7b4acf7777bf16615401b95c5ab269ecea6";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     gitignore = {
       url = "github:hercules-ci/gitignore.nix";
@@ -18,8 +17,14 @@
       "aarch64-linux"
     ] (system:
       let
+        # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
+        # optix toolkits
         enableCuda = true;
+        # Allow loading and running DXC to generate DXIL output
         enableDXC = true;
+        # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
+        # very useful, as we don't have FXC so can't generate shaders, dxvk
+        # is necessary however to supply libdxgi)
         enableDirectX = true;
 
         pkgs = import nixpkgs {
@@ -27,24 +32,33 @@
           config.allowUnfree = true;
           overlays = [
             (self: super: {
+
+              # DXVK with the none-wsi patch, we don't need SDL or GLFW
               dxvk_2 = (super.dxvk_2.override {
                 sdl2Support = false;
                 glfwSupport = false;
               }).overrideAttrs (old: {
-                src = pkgs.fetchFromGitHub {
-                  owner = "doitsujin";
-                  repo = "dxvk";
-                  rev = "2069fd25147dcd0a4b24de2abfac1e305cd4a19c"; # pin
-                  sha256 =
-                    "sha256-x7OQ0s4Tcavpw3nTEhXMBwYjMrdSv8fjPFjVxYRZ4ms=";
-                  fetchSubmodules = true;
-                };
+                patches = old.patches or [ ] ++ [
+                  (self.fetchpatch {
+                    url = "https://github.com/doitsujin/dxvk/pull/3365.diff";
+                    sha256 =
+                      "sha256-6k86HR7z6etW6g7KZFRuMTBBXOZStaJ59OFlGGK1qls=";
+                  })
+                ];
+                mesonFlags = old.mesonFlags or [ ]
+                  ++ [ "-Ddxvk_native_wsi=none" ];
               });
+
               optix-headers = pkgs.fetchzip {
                 url =
                   "https://developer.download.nvidia.com/redist/optix/v7.3/OptiX-7.3.0-Include.zip";
                 sha256 = "0max1j4822mchj0xpz9lqzh91zkmvsn4py0r174cvqfz8z8ykjk8";
               };
+
+              # Sadly there's no unified place to get Linux compatible DX
+              # headers which include a compatible <windows.h> shim, so
+              # construct them ourselves from the dxvk headers (with a bumped
+              # version of the d3d12 headers)
               dxvk-native-headers = pkgs.symlinkJoin {
                 name = "dxvk-native-headers";
                 paths = [
@@ -77,6 +91,10 @@
             (makeSearchPathOutput "lib" "etc/vulkan/implicit_layer.d" ps)
           ];
 
+        # A script in the devshell which calls `make` with the correct options
+        # for the arch, call like `mk` (for a debug build) or `mk release` for
+        # a release build. It also starts `slangc` to generate stdlib as early
+        # as possible and waits for that to complete.
         make-helper = pkgs.writeShellScriptBin "mk" ''
           if [ -z "$1" ]
           then
@@ -92,6 +110,10 @@
           echo ...done
         '';
 
+        # A script in the devshell which cleans the build output and
+        # regenerates it with clang, capturing a `compile_commands.json` file
+        # for use with any build tool which supports that, for example the
+        # clangd LSP server.
         gen-compile-commands =
           pkgs.writeShellScriptBin "gen-compile-commands" ''
             git clean -x -f \
@@ -109,6 +131,7 @@
             ${pkgs.bear}/bin/bear --append -- make --ignore-errors --keep-going config=debug_${arch} -j$(nproc)
           '';
 
+        # Some helpful utils for constructing the below derivations
         arch = {
           x86_64-linux = "x64";
           i686-linux = "x86";
@@ -120,6 +143,8 @@
       in rec {
         default = slang;
 
+        # We build slang-glslang from source, ignoring whatever's in the
+        # submodule
         slang-glslang = with pkgs;
           stdenv.mkDerivation {
             name = "slang-glslang";
@@ -141,6 +166,7 @@
             '';
           };
 
+        # We build slang-llvm using the LLVM in nixpkgs, speeds things up
         slang-llvm = with pkgs;
           stdenv.mkDerivation {
             name = "slang-llvm";
@@ -219,6 +245,7 @@
             ] ++ lib.optionals enableDirectX [ "--dx-on-vk=true" ];
             makeFlags = [ "config=release_x64" ];
             enableParallelBuilding = true;
+
             installPhase = ''
               mkdir -p $out/bin
               mkdir -p $out/lib
@@ -226,46 +253,70 @@
               rm bin/*/release/*.a
               cp bin/*/release/* $out/bin
             '';
-            # TODO: We should wrap slanc and add these.
+
+            # TODO: We should wrap slanc and add most of the env variables used here.
             shellHook = ''
-              export PATH=$PATH:${
-                lib.makeBinPath [ glslang gen-compile-commands make-helper ]
-              }
-              export LD_LIBRARY_PATH=${
+              export PATH="''${PATH:+''${PATH}:}${
+                lib.makeBinPath [
+                  # Useful for testing, although the actual glslang implementation used in the compiler comes from slang-glslang above
+                  glslang
+                  # Build utilities from this flake
+                  gen-compile-commands
+                  make-helper
+                  # Used in the bump-glslang.sl script
+                  cmake
+                  python3
+                ]
+              }"
+
+              # Vulkan, dxc
+              export LD_LIBRARY_PATH="${
                 lib.makeLibraryPath ([ vulkan-loader slang-llvm ]
-                  ++ lib.optional enableDXC directx-shader-compiler
-                  ++ lib.optionals enableCuda [
+                  ++ lib.optional enableDXC directx-shader-compiler)
+              }''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+
+              # cuda
+              ${lib.optionalString enableCuda ''
+                export CUDA_PATH="${cudaPackages.cudatoolkit}''${CUDA_PATH:+:''${CUDA_PATH}}"
+                export LD_LIBRARY_PATH="${
+                  lib.makeLibraryPath [
                     # for libcuda.so
                     addOpenGLRunpath.driverLink
                     # for libnvrtc.so
                     cudaPackages.cudatoolkit.out
-                  ] ++ lib.optionals enableDirectX [
+                  ]
+                }''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+              ''}
+
+              # dxvk and vkd3d-proton
+              ${lib.optionalString enableDirectX ''
+                # Make dxvk and vkd3d-proton less noisy
+                export VKD3D_DEBUG=err
+                export DXVK_LOG_LEVEL=error
+                export LD_LIBRARY_PATH="${
+                  lib.makeLibraryPath [
                     # for dx11
                     dxvk_2
                     # for vkd3d-shader.sh (d3dcompiler)
                     vkd3d
                     # for dx12
                     vkd3d-proton
-                  ])
-              }:$LD_LIBRARY_PATH
-              ${lib.optionalString enableCuda ''
-                export CUDA_PATH="${cudaPackages.cudatoolkit}"
+                  ]
+                }''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
               ''}
 
-              export VK_LAYER_PATH=${
+              # Provision several handy Vulkan tools and make them available
+              export VK_LAYER_PATH="${
                 makeVkLayerPath [
                   vulkan-validation-layers
                   vulkan-tools-lunarg
                   renderdoc
                 ]
-              }
+              }''${VK_LAYER_PATH:+:''${VK_LAYER_PATH}}"
+
               # Disable 'fortify' hardening as it makes warnings in debug mode
-              # export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow format relro bindnow"
               # Disable 'format' hardening as some of the tests generate offending output
-              export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow relro bindnow"
-            '' + lib.optionalString enableDirectX ''
-              export VKD3D_DEBUG=err
-              export DXVK_LOG_LEVEL=error
+              export NIX_HARDENING_ENABLE=$(echo "$NIX_HARDENING_ENABLE" | sed -i 's/fortify//;s/format//')
             '';
           };
       });
