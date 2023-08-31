@@ -318,7 +318,7 @@
 
               # Disable 'fortify' hardening as it makes warnings in debug mode
               # Disable 'format' hardening as some of the tests generate offending output
-              export NIX_HARDENING_ENABLE=$(echo "$NIX_HARDENING_ENABLE" | sed -i 's/fortify//;s/format//')
+              export NIX_HARDENING_ENABLE="fortify3 stackprotector pic strictoverflow relro bindnow"
             '';
           };
       });
