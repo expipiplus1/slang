@@ -38,13 +38,14 @@
                 sdl2Support = false;
                 glfwSupport = false;
               }).overrideAttrs (old: {
-                patches = old.patches or [ ] ++ [
-                  (self.fetchpatch {
-                    url = "https://github.com/doitsujin/dxvk/pull/3365.diff";
-                    sha256 =
-                      "sha256-6k86HR7z6etW6g7KZFRuMTBBXOZStaJ59OFlGGK1qls=";
-                  })
-                ];
+                src = self.fetchFromGitHub {
+                  owner = "doitsujin";
+                  repo = "dxvk";
+                  rev = "c611baac8c3a84051309c2d8111d533ad229de7b"; # pin
+                  sha256 =
+                    "0ra11yv7dg99z1896mr4m3cgdh0sp4mr6fsy07swn869yvl1nclp";
+                  fetchSubmodules = true;
+                };
                 mesonFlags = old.mesonFlags or [ ]
                   ++ [ "-Ddxvk_native_wsi=none" ];
               });
@@ -80,10 +81,11 @@
           ];
         };
 
-        # Eww, some packages put things in etc and others in share. This ruins the
-        # order, but ehh
+        # A helper to construct a vk layer path from a list of packages
         makeVkLayerPath = with pkgs.lib;
           ps:
+          # Eww, some packages put things in etc and others in share. This ruins the
+          # order, but ehh
           concatStringsSep ":" [
             (makeSearchPathOutput "lib" "share/vulkan/explicit_layer.d" ps)
             (makeSearchPathOutput "lib" "share/vulkan/implicit_layer.d" ps)
