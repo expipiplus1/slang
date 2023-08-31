@@ -8,11 +8,6 @@
       url = "github:hercules-ci/gitignore.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    # mini-compile-commands = {
-    #   url = "github:danielbarter/mini_compile_commands";
-    #   flake = false;
-    # };
   };
 
   outputs = { self, nixpkgs, gitignore }:
@@ -342,63 +337,10 @@
             config.allowUnfree = true;
             overlays = [ overlay ];
           };
-          #
-          # gen-compile-commands-background =
-          #   pkgs.writeShellScriptBin "gen-compile-commands-background" ''
-          #     set -e
-          #     set -x
-          #     ccj=$(nix build --impure --expr \
-          #       '((builtins.getFlake (toString ../slang-ellie)).packages.x86_64-linux.compile-commands-json)
-          #       {src = ./.;}')/compile_commands.json
-          #     echo new compile commands at $ccj
-          #     old_ccj=./compile_commands.json
-          #     echo merging with $old_ccj
-          #     jq --slurp
-          #       '[(.[0] + [.[1] | .[] | (.directory, .file, .output) |= sub("/build/slang";"'$(pwd)'")]) | group_by(.output)[] | .[-1]]' \
-          #       $old_ccj \
-          #       $ccj \
-          #       > "$old_ccj"
-          #   '';
-
         in rec {
           inherit (pkgs) shader-slang slang-llvm slang-glslang;
           slang = shader-slang;
           default = slang;
-
-          # compile-commands-json = { src }:
-          #   slang.overrideAttrs (old: {
-          #     name = "slang_compile_commands.json";
-          #     inherit src;
-          #     postUnpack = ''
-          #       rm -rf \
-          #         Makefile \
-          #         bin/ \
-          #         build/ \
-          #         intermediate/ \
-          #         source/slang/slang-generated-* \
-          #         source/slang/*.meta.slang.h \
-          #         prelude/slang-*-prelude.h.cpp \
-          #         compile_commands.json
-          #     '';
-          #     premakeFlags = old.premakeFlags ++ [ "--cc=clang" ];
-          #     hardeningDisable = [ "fortify" ];
-          #     buildPhase = ''
-          #       export CC="${pkgs.clang_16}/bin/clang"
-          #       export CXX="${pkgs.clang_16}/bin/clang++"
-          #       ${pkgs.bear}/bin/bear \
-          #         --append \
-          #         -- make \
-          #            --ignore-errors \
-          #            --keep-going \
-          #            config=debug_${arch} \
-          #            --jobs=$NIX_BUILD_CORES
-          #     '';
-          #     installPhase = ''
-          #       mkdir -p $out
-          #       mv compile_commands.json $out
-          #     '';
-          #   });
-
         });
     };
 }
