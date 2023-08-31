@@ -8,9 +8,14 @@
       url = "github:hercules-ci/gitignore.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    mini-compile-commands = {
+      url = "github:danielbarter/mini_compile_commands";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, gitignore }:
+  outputs = { self, nixpkgs, gitignore, mini-compile-commands }:
     let
       # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
       # optix toolkits
@@ -113,7 +118,7 @@
         , vulkan-validation-layers, vulkan-tools-lunarg, dxvk_2, vkd3d
         , vkd3d-proton, dxvk-native-headers, directx-shader-compiler, glslang
         , cmake, python3, addOpenGLRunpath, renderdoc, writeShellScriptBin
-        , clang_16, bear }:
+        , clang_16, bear, buildConfig ? "release" }:
         with sysHelper stdenv.hostPlatform.system;
         let
           # A script in the devshell which calls `make` with the
@@ -159,7 +164,7 @@
           '';
         in stdenv.mkDerivation {
           name = "slang";
-          src = gitignore.lib.gitignoreSource ./.;
+          src = self;
           nativeBuildInputs = [ premake5 ] ++
             # So we can find libcuda.so at runtime in /run/opengl or wherever
             lib.optional enableCuda cudaPackages.autoAddOpenGLRunpathHook;
@@ -181,15 +186,15 @@
             "--cuda-sdk-path=${cudaPackages.cudatoolkit}"
             "--optix-sdk-path=${optix-headers}"
           ] ++ lib.optionals enableDirectX [ "--dx-on-vk=true" ];
-          makeFlags = [ "config=release_x64" ];
+          makeFlags = [ "config=${buildConfig}_${arch}" ];
           enableParallelBuilding = true;
 
           installPhase = ''
             mkdir -p $out/bin
             mkdir -p $out/lib
-            mv bin/*/release/*.so $out/lib
-            rm bin/*/release/*.a
-            cp bin/*/release/* $out/bin
+            mv bin/*/${buildConfig}/*.so $out/lib
+            rm bin/*/${buildConfig}/*.a
+            cp bin/*/${buildConfig}/* $out/bin
           '';
 
           # TODO: We should wrap slanc and add most of the env variables used here.
@@ -338,8 +343,17 @@
             overlays = [ overlay ];
           };
         in rec {
-          inherit (pkgs) shader-slang slang-llvm slang-glslang;
-          slang = shader-slang;
+          inherit (pkgs) slang-llvm slang-glslang;
+          slang = pkgs.shader-slang;
+          slang-debug =
+            pkgs.enableDebugging (slang.override { buildConfig = "debug"; });
+          slang-compile-commands = let
+            mcc-env =
+              (pkgs.callPackage mini-compile-commands { }).wrap pkgs.stdenv;
+            mcc-hook = (pkgs.callPackage mini-compile-commands { }).hook;
+          in (slang.override { stdenv = mcc-env; buildConfig = "debug";}).overrideAttrs
+          (old: { buildInputs = (old.buildInputs or [ ]) ++ [ mcc-hook ]; });
+
           default = slang;
         });
     };
