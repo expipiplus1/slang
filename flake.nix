@@ -46,10 +46,10 @@
         stdenv.mkDerivation {
           name = "slang-glslang";
           src = fetchFromGitHub {
-            owner = "expipiplus1";
+            owner = "shader-slang";
             repo = "slang-glslang";
             rev = "8c732f5d1868cba621bffc1d5085a5a18dae2683";
-            sha256 = "sha256-cCFYd/VIGUvFN3ZpswH4DwTTJkWXXavWbY9B3QZ+UgY=";
+            sha256 = "01jjgq3dshcgdpbanpcp8lkd610gz00v6sbn6z2ln6a8ymvmh8bh";
             fetchSubmodules = true;
           };
           nativeBuildInputs = [ premake5 ];
