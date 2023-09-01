@@ -72,8 +72,8 @@
           src = fetchFromGitHub {
             owner = "shader-slang";
             repo = "slang-llvm";
-            rev = "3a97b3861cf663b47c9151b83e4a9b1a7eb1a36a";
-            sha256 = "1plbyp2f6m3v9ap23hvbp8aarvd6skjqf6s7zgcmb6pcmqfca454";
+            rev = "0e48669c5a8e94589f5614104bdee77cf165be25";
+            sha256 = "13jkvyrhfixvij4rqvis6azq5sdhfqfq6pv1z6aybynfcxr6wdg4";
             fetchSubmodules = true;
           };
           # patches = [ ./hidden-llvm.patch ];
