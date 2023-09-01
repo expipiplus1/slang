@@ -10,7 +10,7 @@
     };
 
     mini-compile-commands = {
-      url = "github:danielbarter/mini_compile_commands";
+      url = "github:expipiplus1/mini_compile_commands";
       flake = false;
     };
   };
@@ -27,21 +27,22 @@
       # is necessary however to supply libdxgi)
       enableDirectX = true;
 
-      sysHelper = system: rec {
+      sysHelper = stdenv: rec {
         # Some helpful utils for constructing the below derivations
         arch = {
           x86_64-linux = "x64";
           i686-linux = "x86";
           aarch64-linux = "aarch64";
-        }.${system};
-        commonPremakeFlags = [ "gmake2" "--deps=false" "--arch=${arch}" ];
+        }.${stdenv.hostPlatform.system};
+        commonPremakeFlags = [ "gmake2" "--deps=false" "--arch=${arch}" ]
+          ++ nixpkgs.lib.optional stdenv.cc.isClang "--cc=clang";
         makeFlags = [ "config=release_${arch}" "verbose=1" ];
       };
 
       # We build slang-glslang from source, ignoring whatever's in the
       # submodule
       slang-glslang = { stdenv, fetchFromGitHub, premake5 }:
-        with sysHelper stdenv.hostPlatform.system;
+        with sysHelper stdenv;
         stdenv.mkDerivation {
           name = "slang-glslang";
           src = fetchFromGitHub {
@@ -65,7 +66,7 @@
       # We build slang-llvm using the LLVM in nixpkgs, speeds things up
       slang-llvm = { stdenv, fetchFromGitHub, symlinkJoin, premake5, ncurses
         , libclang, llvm }:
-        with sysHelper stdenv.hostPlatform.system;
+        with sysHelper stdenv;
         stdenv.mkDerivation {
           name = "slang-llvm";
           src = fetchFromGitHub {
@@ -119,7 +120,7 @@
         , vkd3d-proton, dxvk-native-headers, directx-shader-compiler, glslang
         , cmake, python3, addOpenGLRunpath, renderdoc, writeShellScriptBin
         , clang_16, bear, buildConfig ? "release" }:
-        with sysHelper stdenv.hostPlatform.system;
+        with sysHelper stdenv;
         let
           # A script in the devshell which calls `make` with the
           # correct options for the arch, call like `mk` (for a debug
@@ -188,6 +189,7 @@
           ] ++ lib.optionals enableDirectX [ "--dx-on-vk=true" ];
           makeFlags = [ "config=${buildConfig}_${arch}" ];
           enableParallelBuilding = true;
+          hardeningDisable = lib.optional (buildConfig == "debug") "fortify";
 
           installPhase = ''
             mkdir -p $out/bin
@@ -271,7 +273,7 @@
 
             # Disable 'fortify' hardening as it makes warnings in debug mode
             # Disable 'format' hardening as some of the tests generate offending output
-            export NIX_HARDENING_ENABLE="fortify3 stackprotector pic strictoverflow relro bindnow"
+            export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow relro bindnow"
           '';
         };
 
@@ -347,11 +349,15 @@
           slang = pkgs.shader-slang;
           slang-debug =
             pkgs.enableDebugging (slang.override { buildConfig = "debug"; });
+
           slang-compile-commands = let
-            mcc-env =
-              (pkgs.callPackage mini-compile-commands { }).wrap pkgs.stdenv;
+            mcc-env = (pkgs.callPackage mini-compile-commands { }).wrap
+              pkgs.llvmPackages_13.stdenv;
             mcc-hook = (pkgs.callPackage mini-compile-commands { }).hook;
-          in (slang.override { stdenv = mcc-env; buildConfig = "debug";}).overrideAttrs
+          in (slang.override {
+            stdenv = mcc-env;
+            buildConfig = "debug";
+          }).overrideAttrs
           (old: { buildInputs = (old.buildInputs or [ ]) ++ [ mcc-hook ]; });
 
           default = slang;

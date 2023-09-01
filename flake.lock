@@ -23,15 +23,15 @@
     "mini-compile-commands": {
       "flake": false,
       "locked": {
-        "lastModified": 1689962671,
-        "narHash": "sha256-qPyV3iU8rXhIlHEELAtu2UwXtdZgsWMK9dHySlVa8Jo=",
-        "owner": "danielbarter",
+        "lastModified": 1693472416,
+        "narHash": "sha256-QZTB3Z1HHOLVCZIgvbE5gSaBw5AeUwA7rUWvPOsvOQA=",
+        "owner": "expipiplus1",
         "repo": "mini_compile_commands",
-        "rev": "073ad72d27287f3e8073c3ef0c9069223fb2048c",
+        "rev": "c759f1a0c2091f20065d761b600b8cde76b19fb0",
         "type": "github"
       },
       "original": {
-        "owner": "danielbarter",
+        "owner": "expipiplus1",
         "repo": "mini_compile_commands",
         "type": "github"
       }
