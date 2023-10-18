@@ -179,6 +179,83 @@
               --append \
               -- make --ignore-errors --keep-going config=debug_${arch} -j$(nproc)
           '';
+
+          test-helper = writeShellScriptBin "t" ''
+            shopt -s nullglob
+
+            bins=("bin/linux-${arch}"/{release,debug}/slang-test)
+            bin=
+            for file in "''${bins[@]}"; do
+              [[ $file -nt "$bin" ]] && bin=$file
+            done
+
+            exec "$bin" "$@"
+          '';
+
+          test-shader-helper = writeShellScriptBin "auto" ''
+            shopt -s nullglob
+
+            bins=("bin/linux-${arch}"/{release,debug}/slangc)
+            bin=
+            for file in "''${bins[@]}"; do
+              [[ $file -nt $bin ]] && bin=$file
+            done
+
+            [ -z "$bin" ] && echo "Unable to find any of ''${bins[@]}" && exit 1
+
+            file=
+            stage=
+            entry=
+
+            go(){
+              for e in $(grep --only-matching --no-messages "$2" -- "$arg"); do
+                stage=$1
+                entry=$e
+              done
+            }
+
+            for arg in "$@"; do
+              if [ "$explicit" ]; then
+                stage="$arg"
+                entry="$arg"Main
+                break
+              fi
+              if [[ "$arg" == -stage ]]; then
+                explicit=1
+              fi
+            done
+
+            if ! [ "$explicit" ]; then
+              for arg in "$@"; do
+                if [[ "$arg" == *.slang ]]; then
+                  file="$arg"
+                  for s in compute vertex fragment; do
+                    go "$s" "$s"Main
+                  done
+                fi
+              done
+
+              [ -z "$file" ] && echo "Unable to find a .slang file in args" && exit 1
+              [ ! -f "$file" ] && echo "$file doesn't exist" && exit 1
+              [ -z "$stage" ] && echo "Unable to determine stage for $file" && exit 1
+              [ -z "$entry" ] && echo "Unable to determine entry point for $file" && exit 1
+            fi
+
+            if [ "$explicit" ]; then
+              set -x
+              "$bin" \
+                -line-directive-mode none \
+                "$@"
+            else
+              set -x
+              "$bin" \
+                -line-directive-mode none \
+                -entry "$entry" \
+                -stage "$stage" \
+                "$@"
+            fi
+          '';
+
         in stdenv.mkDerivation {
           name = "slang";
           src = self;
