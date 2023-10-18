@@ -256,10 +256,28 @@
             fi
           '';
 
+          runtimeLibraries = [ slang-llvm ]
+            ++ lib.optional enableDXC directx-shader-compiler;
+          runtimeLibraryPath = lib.makeLibraryPath runtimeLibraries;
+          testsRuntimeLibraryPath = lib.makeLibraryPath (runtimeLibraries
+            ++ [ vulkan-loader ] ++ lib.optionals enableCuda [
+              # for libcuda.so
+              addOpenGLRunpath.driverLink
+              # for libnvrtc.so
+              cudaPackages.cudatoolkit.out
+            ] ++ lib.optionals enableDirectX [
+              # for dx11
+              dxvk_2
+              # for vkd3d-shader.sh (d3dcompiler)
+              vkd3d
+              # for dx12
+              vkd3d-proton
+            ] ++ lib.optional enableSwiftshader libX11);
+
         in stdenv.mkDerivation {
           name = "slang";
           src = self;
-          nativeBuildInputs = [ premake5 ] ++
+          nativeBuildInputs = [ premake5 makeWrapper ] ++
             # So we can find libcuda.so at runtime in /run/opengl or wherever
             lib.optional enableCuda cudaPackages.autoAddOpenGLRunpathHook;
           NIX_LDFLAGS =
@@ -279,51 +297,79 @@
           ] ++ lib.optionals enableCuda [
             "--cuda-sdk-path=${cudaPackages.cudatoolkit}"
             "--optix-sdk-path=${optix-headers}"
-          ] ++ lib.optionals enableDirectX [ "--dx-on-vk=true" ];
+          ] ++ lib.optional enableDirectX "--dx-on-vk=true"
+            ++ lib.optional enableSwiftshader "--enable-xlib=false";
           makeFlags = [ "config=${buildConfig}_${arch}" ];
           enableParallelBuilding = true;
           hardeningDisable = lib.optional (buildConfig == "debug") "fortify";
 
           installPhase = ''
-            mkdir -p $out/bin
+            runHook preInstall
+
+            mkdir -p $out/include/
+            cp slang.h $out/include/
+            cp slang-com-helper.h $out/include/
+            cp slang-com-ptr.h $out/include/
+            cp slang-tag-version.h $out/include/
+            cp slang-gfx.h $out/include/
+
+            mkdir -p $out/share/prelude
+            cp prelude/*.h $out/share/prelude/
+
             mkdir -p $out/lib
             mv bin/*/${buildConfig}/*.so $out/lib
             rm bin/*/${buildConfig}/*.a
+
+            mkdir -p $out/bin
             cp bin/*/${buildConfig}/* $out/bin
+
+            mkdir -p $out/share/doc
+            cp docs/*.md $out/share/doc/
+
+            runHook postInstall
           '';
 
-          # TODO: We should wrap slanc and add most of the env variables used here.
+          postFixup = ''
+            for bin in $(find "$out" -executable -type f -not -name slangc); do
+              if [[ $bin == */slangc ]] then
+                wrapProgram $bin \
+                  --prefix PATH : ${lib.makeBinPath [ spirv-tools gcc ]} \
+                  --prefix LD_LIBRARY_PATH : ${runtimeLibraryPath}
+              else
+                wrapProgram $bin \
+                  --prefix PATH : ${lib.makeBinPath [ spirv-tools gcc ]} \
+                  --prefix LD_LIBRARY_PATH : ${testsRuntimeLibraryPath}
+              fi
+            done
+          '';
+
           shellHook = ''
             export PATH="''${PATH:+''${PATH}:}${
               lib.makeBinPath [
-                # Useful for testing, although the actual glslang implementation used in the compiler comes from slang-glslang above
+                # Useful for testing, although the actual glslang
+                # implementation used in the compiler comes from slang-glslang
+                # above, similarly dxc is loaded via shared library
                 glslang
+                directx-shader-compiler
+                renderdoc
+                vulkan-tools
+                spirv-cross
                 # Build utilities from this flake
                 gen-compile-commands
                 make-helper
+                test-shader-helper
+                test-helper
                 # Used in the bump-glslang.sl script
                 cmake
                 python3
               ]
             }"
 
-            # Vulkan, dxc
-            export LD_LIBRARY_PATH="${
-              lib.makeLibraryPath ([ vulkan-loader slang-llvm ]
-                ++ lib.optional enableDXC directx-shader-compiler)
-            }''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+            export LD_LIBRARY_PATH="${testsRuntimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 
             # cuda
             ${lib.optionalString enableCuda ''
               export CUDA_PATH="${cudaPackages.cudatoolkit}''${CUDA_PATH:+:''${CUDA_PATH}}"
-              export LD_LIBRARY_PATH="${
-                lib.makeLibraryPath [
-                  # for libcuda.so
-                  addOpenGLRunpath.driverLink
-                  # for libnvrtc.so
-                  cudaPackages.cudatoolkit.out
-                ]
-              }''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
             ''}
 
             # dxvk and vkd3d-proton
@@ -331,16 +377,6 @@
               # Make dxvk and vkd3d-proton less noisy
               export VKD3D_DEBUG=err
               export DXVK_LOG_LEVEL=error
-              export LD_LIBRARY_PATH="${
-                lib.makeLibraryPath [
-                  # for dx11
-                  dxvk_2
-                  # for vkd3d-shader.sh (d3dcompiler)
-                  vkd3d
-                  # for dx12
-                  vkd3d-proton
-                ]
-              }''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
             ''}
 
             # Provision several handy Vulkan tools and make them available
@@ -357,12 +393,16 @@
                     "etc/vulkan/explicit_layer.d"
                     "etc/vulkan/implicit_layer.d"
                   ]);
-              in makeVkLayerPath [
+              in makeVkLayerPath ([
                 vulkan-validation-layers
                 vulkan-tools-lunarg
                 renderdoc
-              ]
+              ])
             }''${VK_LAYER_PATH:+:''${VK_LAYER_PATH}}"
+
+            ${lib.optionalString enableSwiftshader ''
+              export VK_ICD_FILENAMES=${swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json
+            ''}
 
             # Disable 'fortify' hardening as it makes warnings in debug mode
             # Disable 'format' hardening as some of the tests generate offending output
