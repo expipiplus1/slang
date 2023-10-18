@@ -17,16 +17,6 @@
 
   outputs = { self, nixpkgs, gitignore, mini-compile-commands }:
     let
-      # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
-      # optix toolkits
-      enableCuda = true;
-      # Allow loading and running DXC to generate DXIL output
-      enableDXC = true;
-      # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
-      # very useful, as we don't have FXC so can't generate shaders, dxvk
-      # is necessary however to supply libdxgi)
-      enableDirectX = true;
-
       sysHelper = stdenv: rec {
         # Some helpful utils for constructing the below derivations
         arch = {
@@ -114,12 +104,38 @@
           '';
         };
 
-      shader-slang = { lib, stdenv, premake5, slang-glslang, slang-llvm
-        , cudaPackages, optix-headers, libX11, spirv-tools, vulkan-loader
-        , vulkan-validation-layers, vulkan-tools-lunarg, dxvk_2, vkd3d
-        , vkd3d-proton, dxvk-native-headers, directx-shader-compiler, glslang
-        , cmake, python3, addOpenGLRunpath, renderdoc, writeShellScriptBin
-        , clang_16, bear, buildConfig ? "release" }:
+      shader-slang = {
+        # build tools
+        lib, stdenv, premake5, makeWrapper
+        # internal deps
+        , slang-glslang, slang-llvm
+        # external deps
+        , spirv-tools, libX11, gcc
+        # cuda
+        , cudaPackages, optix-headers, addOpenGLRunpath
+        # vulkan
+        , vulkan-loader, vulkan-validation-layers, vulkan-tools-lunarg
+        # directx
+        , dxvk_2, vkd3d, vkd3d-proton, dxvk-native-headers
+        , directx-shader-compiler
+        # devtools
+        , glslang, cmake, python3, clang_16, bear, renderdoc
+        , writeShellScriptBin, swiftshader, vulkan-tools, spirv-cross
+        # "release" or "debug"
+        , buildConfig ? "release"
+          # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
+          # optix toolkits
+        , enableCuda ? false
+          # Allow loading and running DXC to generate DXIL output
+        , enableDXC ? true
+          # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
+          # very useful, as we don't have FXC so can't generate shaders, dxvk
+          # is necessary however to supply libdxgi)
+          # This is only for the test suite, not for the compiler itself
+        , enableDirectX ? true
+          # Put Swiftshader in the shell environment and force its usage via
+          # VK_ICD_FILENAMES, again, only used for tests
+        , enableSwiftshader ? false }:
         with sysHelper stdenv;
         let
           # A script in the devshell which calls `make` with the
