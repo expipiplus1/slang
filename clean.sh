@@ -11,6 +11,9 @@ intermediate/.*
 prelude/slang-[a-z-]\+-prelude.h.cpp
 source/slang/[a-z]\+.meta.slang.h
 source/slang/slang-generated-[a-z-]\+.h
+.*_dxgi.log
+.*_d3d11.log
+vkd3d-proton.cache.write
 EOF
 )
 
