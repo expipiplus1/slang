@@ -453,16 +453,58 @@
             (self.fetchFromGitHub {
               owner = "expipiplus1";
               repo = "mingw-directx-headers";
-              rev = "aa5dc120215c9ef929a41b636e635c582a88d771"; # headers
-              sha256 = "0v0f5z7kbdhny31i8w3iw6pn8iikyczadjr9acmq5cv6s2q98zba";
+              rev = "353b4c7606126f00bd0c9264b6ab1da48391eb00"; # headers
+              sha256 = "0pixlxk17a1l91xyai98jw5zm7kddy5lyqq9xdknn443ycy0b6kp";
             })
             (self.dxvk_2.src + "/include/native/windows")
             (self.dxvk_2.src + "/include/native")
           ];
           postBuild = ''
             ln -s . $out/include
+
+            # Also pull in the d3dx12 headers from the official repo
+            # These require a little wrapper
+            cp ${
+              (self.fetchFromGitHub {
+                owner = "Microsoft";
+                repo = "DirectX-Headers";
+                rev = "3654cebda60262111c7b43ea140d33f21e0daa0b"; # pin
+                sha256 = "1z1j23lpjvvv2pm660ad46gvfnid4xf4flrqjk3710my4mgldqv7";
+              })
+            }/include/directx/d3dx12*.h $out/
+            mv $out/d3dx12.h $out/d3dx12-unwrapped.h
+            cat > $out/d3dx12.h <<EOF
+            #pragma once
+
+            #include <limits.h>
+
+            // SAL defines
+            #define _In_
+            #define _Out_
+            #define _Outptr_
+            #define _In_reads_(x)
+            #define _In_reads_opt_(x)
+            #define _In_range_(x, y)
+            #define _In_opt_
+            #define _Always_(x)
+            #define __analysis_assume(x)
+
+            inline HANDLE GetProcessHeap(){ return 0; }
+            inline void* HeapAlloc(HANDLE, DWORD flags, SIZE_T size){
+              const DWORD HEAP_ZERO_MEMORY = 0x00000008;
+              return flags & HEAP_ZERO_MEMORY ? calloc(1, size) : malloc(size);
+            }
+            inline void HeapFree(HANDLE, DWORD, void* ptr){
+              free(ptr);
+            }
+
+            #include "d3dx12-unwrapped.h"
+            EOF
           '';
         };
+
+        vulkan-validation-layers = super.vulkan-validation-layers.overrideAttrs
+          (old: { separateDebugInfo = true; });
 
       });
     in {
