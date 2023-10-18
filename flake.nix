@@ -521,7 +521,9 @@
           };
         in rec {
           inherit (pkgs) slang-llvm slang-glslang;
-          slang = pkgs.shader-slang;
+          slang = pkgs.shader-slang.override {
+            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.ccacheStdenv;
+          };
           slang-debug =
             pkgs.enableDebugging (slang.override { buildConfig = "debug"; });
 
