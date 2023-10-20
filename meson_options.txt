@@ -1,0 +1,14 @@
+option('embed-stdlib', type : 'boolean', value : false,
+  description : 'build slang with an embedded version of the stdlib')
+option('embed-stdlib-source', type : 'boolean', value : false,
+  description : 'do not include stdlib source in the binary')
+option('full-debug-validation', type : 'boolean', value : false,
+  description : 'enable full IR validation in debug builds (SLOW!)')
+
+# newoption {
+#     trigger     = "skip-source-generation",
+#     description = "(Optional) If true will skip source generation steps.",
+#     value       = "bool",
+#     default     = "false",
+#     allowed     = { { "true", "True"}, { "false", "False" } }
+# }

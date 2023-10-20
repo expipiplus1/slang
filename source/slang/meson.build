@@ -1,0 +1,297 @@
+slang_source = [
+  'slang-api.cpp',
+  'slang-artifact-output-util.cpp',
+  'slang-ast-base.cpp',
+  'slang-ast-builder.cpp',
+  'slang-ast-decl-ref.cpp',
+  'slang-ast-decl.cpp',
+  'slang-ast-dump.cpp',
+  'slang-ast-modifier.cpp',
+  'slang-ast-natural-layout.cpp',
+  'slang-ast-print.cpp',
+  'slang-ast-reflect.cpp',
+  'slang-ast-support-types.cpp',
+  'slang-ast-synthesis.cpp',
+  'slang-ast-type.cpp',
+  'slang-ast-val.cpp',
+  'slang-capability.cpp',
+  'slang-check-conformance.cpp',
+  'slang-check-constraint.cpp',
+  'slang-check-conversion.cpp',
+  'slang-check-decl.cpp',
+  'slang-check-expr.cpp',
+  'slang-check-inheritance.cpp',
+  'slang-check-modifier.cpp',
+  'slang-check-overload.cpp',
+  'slang-check-resolve-val.cpp',
+  'slang-check-shader.cpp',
+  'slang-check-stmt.cpp',
+  'slang-check-type.cpp',
+  'slang-check.cpp',
+  'slang-compiler.cpp',
+  'slang-container-pool.cpp',
+  'slang-diagnostics.cpp',
+  'slang-doc-ast.cpp',
+  'slang-doc-markdown-writer.cpp',
+  'slang-emit-base.cpp',
+  'slang-emit-c-like.cpp',
+  'slang-emit-cpp.cpp',
+  'slang-emit-cpp.h',
+  'slang-emit-cuda.cpp',
+  'slang-emit-glsl.cpp',
+  'slang-emit-hlsl.cpp',
+  'slang-emit-precedence.cpp',
+  'slang-emit-source-writer.cpp',
+  'slang-emit-spirv.cpp',
+  'slang-emit-torch.cpp',
+  'slang-emit.cpp',
+  'slang-glsl-extension-tracker.cpp',
+  'slang-hlsl-to-vulkan-layout-options.cpp',
+  'slang-intrinsic-expand.cpp',
+  'slang-ir-addr-inst-elimination.cpp',
+  'slang-ir-address-analysis.cpp',
+  'slang-ir-any-value-inference.cpp',
+  'slang-ir-any-value-marshalling.cpp',
+  'slang-ir-augment-make-existential.cpp',
+  'slang-ir-autodiff-cfg-norm.cpp',
+  'slang-ir-autodiff-fwd.cpp',
+  'slang-ir-autodiff-pairs.cpp',
+  'slang-ir-autodiff-primal-hoist.cpp',
+  'slang-ir-autodiff-region.cpp',
+  'slang-ir-autodiff-rev.cpp',
+  'slang-ir-autodiff-transcriber-base.cpp',
+  'slang-ir-autodiff-unzip.cpp',
+  'slang-ir-autodiff.cpp',
+  'slang-ir-bind-existentials.cpp',
+  'slang-ir-byte-address-legalize.cpp',
+  'slang-ir-check-differentiability.cpp',
+  'slang-ir-cleanup-void.cpp',
+  'slang-ir-clone.cpp',
+  'slang-ir-collect-global-uniforms.cpp',
+  'slang-ir-com-interface.cpp',
+  'slang-ir-composite-reg-to-mem.cpp',
+  'slang-ir-constexpr.cpp',
+  'slang-ir-dce.cpp',
+  'slang-ir-deduplicate-generic-children.cpp',
+  'slang-ir-deduplicate.cpp',
+  'slang-ir-defunctionalization.cpp',
+  'slang-ir-diff-call.cpp',
+  'slang-ir-dll-export.cpp',
+  'slang-ir-dll-import.cpp',
+  'slang-ir-dominators.cpp',
+  'slang-ir-eliminate-multilevel-break.cpp',
+  'slang-ir-eliminate-phis.cpp',
+  'slang-ir-entry-point-pass.cpp',
+  'slang-ir-entry-point-raw-ptr-params.cpp',
+  'slang-ir-entry-point-uniforms.cpp',
+  'slang-ir-explicit-global-context.cpp',
+  'slang-ir-explicit-global-init.cpp',
+  'slang-ir-extract-value-from-type.cpp',
+  'slang-ir-fuse-satcoop.cpp',
+  'slang-ir-generics-lowering-context.cpp',
+  'slang-ir-glsl-legalize.cpp',
+  'slang-ir-glsl-liveness.cpp',
+  'slang-ir-init-local-var.cpp',
+  'slang-ir-inline.cpp',
+  'slang-ir-layout.cpp',
+  'slang-ir-legalize-array-return-type.cpp',
+  'slang-ir-legalize-mesh-outputs.cpp',
+  'slang-ir-legalize-types.cpp',
+  'slang-ir-legalize-uniform-buffer-load.cpp',
+  'slang-ir-legalize-varying-params.cpp',
+  'slang-ir-legalize-vector-types.cpp',
+  'slang-ir-link.cpp',
+  'slang-ir-liveness.cpp',
+  'slang-ir-loop-inversion.cpp',
+  'slang-ir-loop-unroll.cpp',
+  'slang-ir-lower-append-consume-structured-buffer.cpp',
+  'slang-ir-lower-binding-query.cpp',
+  'slang-ir-lower-bit-cast.cpp',
+  'slang-ir-lower-buffer-element-type.cpp',
+  'slang-ir-lower-com-methods.cpp',
+  'slang-ir-lower-error-handling.cpp',
+  'slang-ir-lower-existential.cpp',
+  'slang-ir-lower-generic-call.cpp',
+  'slang-ir-lower-generic-function.cpp',
+  'slang-ir-lower-generic-type.cpp',
+  'slang-ir-lower-generics.cpp',
+  'slang-ir-lower-l-value-cast.cpp',
+  'slang-ir-lower-optional-type.cpp',
+  'slang-ir-lower-reinterpret.cpp',
+  'slang-ir-lower-result-type.cpp',
+  'slang-ir-lower-size-of.cpp',
+  'slang-ir-lower-tuple-types.cpp',
+  'slang-ir-lower-witness-lookup.cpp',
+  'slang-ir-marshal-native-call.cpp',
+  'slang-ir-metadata.cpp',
+  'slang-ir-missing-return.cpp',
+  'slang-ir-obfuscate-loc.cpp',
+  'slang-ir-optix-entry-point-uniforms.cpp',
+  'slang-ir-peephole.cpp',
+  'slang-ir-propagate-func-properties.cpp',
+  'slang-ir-pytorch-cpp-binding.cpp',
+  'slang-ir-pytorch-cpp-binding.h',
+  'slang-ir-reachability.cpp',
+  'slang-ir-redundancy-removal.cpp',
+  'slang-ir-remove-unused-generic-param.cpp',
+  'slang-ir-restructure-scoping.cpp',
+  'slang-ir-restructure.cpp',
+  'slang-ir-sccp.cpp',
+  'slang-ir-simplify-cfg.cpp',
+  'slang-ir-simplify-for-emit.cpp',
+  'slang-ir-single-return.cpp',
+  'slang-ir-specialize-arrays.cpp',
+  'slang-ir-specialize-buffer-load-arg.cpp',
+  'slang-ir-specialize-dispatch.cpp',
+  'slang-ir-specialize-dynamic-associatedtype-lookup.cpp',
+  'slang-ir-specialize-function-call.cpp',
+  'slang-ir-specialize-matrix-layout.cpp',
+  'slang-ir-specialize-resources.cpp',
+  'slang-ir-specialize-target-switch.cpp',
+  'slang-ir-specialize.cpp',
+  'slang-ir-spirv-legalize.cpp',
+  'slang-ir-spirv-snippet.cpp',
+  'slang-ir-ssa-register-allocate.cpp',
+  'slang-ir-ssa-simplification.cpp',
+  'slang-ir-ssa.cpp',
+  'slang-ir-string-hash.cpp',
+  'slang-ir-strip-cached-dict.cpp',
+  'slang-ir-strip-witness-tables.cpp',
+  'slang-ir-strip.cpp',
+  'slang-ir-synthesize-active-mask.cpp',
+  'slang-ir-use-uninitialized-out-param.cpp',
+  'slang-ir-util.cpp',
+  'slang-ir-validate.cpp',
+  'slang-ir-vk-invert-y.cpp',
+  'slang-ir-witness-table-wrapper.cpp',
+  'slang-ir-wrap-structured-buffers.cpp',
+  'slang-ir.cpp',
+  'slang-language-server-ast-lookup.cpp',
+  'slang-language-server-auto-format.cpp',
+  'slang-language-server-completion.cpp',
+  'slang-language-server-document-symbols.cpp',
+  'slang-language-server-inlay-hints.cpp',
+  'slang-language-server-semantic-tokens.cpp',
+  'slang-language-server.cpp',
+  'slang-legalize-types.cpp',
+  'slang-lookup-glslstd450.cpp',
+  'slang-lookup.cpp',
+  'slang-lower-to-ir.cpp',
+  'slang-mangle.cpp',
+  'slang-mangled-lexer.cpp',
+  'slang-module-library.cpp',
+  'slang-options.cpp',
+  'slang-parameter-binding.cpp',
+  'slang-parser.cpp',
+  'slang-preprocessor.cpp',
+  'slang-profile.cpp',
+  'slang-ref-object-reflect.cpp',
+  'slang-reflection-api.cpp',
+  'slang-repro.cpp',
+  'slang-serialize-ast.cpp',
+  'slang-serialize-container.cpp',
+  'slang-serialize-factory.cpp',
+  'slang-serialize-ir-types.cpp',
+  'slang-serialize-ir.cpp',
+  'slang-serialize-reflection.cpp',
+  'slang-serialize-source-loc.cpp',
+  'slang-serialize-types.cpp',
+  'slang-serialize.cpp',
+  'slang-spirv-core-grammar-embed.cpp',
+  'slang-spirv-val.cpp',
+  'slang-stdlib-api.cpp',
+  'slang-stdlib-textures.cpp',
+  'slang-stdlib.cpp',
+  'slang-syntax.cpp',
+  'slang-type-layout.cpp',
+  'slang-type-system-shared.cpp',
+  'slang-value-reflect.cpp',
+  'slang-workspace-version.cpp',
+  'slang.cpp',
+] + prelude_source
+
+################################################################
+# Generated headers
+################################################################
+
+reflect_input = [
+  'slang-ast-support-types.h',
+  'slang-ast-base.h',
+  'slang-ast-decl.h',
+  'slang-ast-expr.h',
+  'slang-ast-modifier.h',
+  'slang-ast-stmt.h',
+  'slang-ast-type.h',
+  'slang-ast-val.h',
+]
+reflect_output = []
+foreach type : [ 'obj', 'ast', 'value' ]
+  foreach macro : [ '', '-macro' ]
+    reflect_output += 'slang-generated-' + type + macro + '.h'
+  endforeach
+endforeach
+reflect_options = [
+  '-strip-prefix',
+  'slang-',
+  '-o',
+  'slang-generated',
+  '-output-fields',
+  '-mark-suffix',
+  '_CLASS',
+]
+reflect_headers = custom_target('ast-reflection',
+  command : [ cpp_extractor ] + reflect_options,
+  output : reflect_output,
+  input : reflect_input,
+)
+
+################################################################
+#
+################################################################
+
+# The way that we currently configure things through `slang.h`,
+# we need to set a preprocessor definitions to ensure that
+# we declare the Slang API functions for *export* and not *import*.
+slang_defs = [ '-DSLANG_DYNAMIC_EXPORT' ]
+
+if not get_option('embed-stdlib-source')
+  slang_defs += [ '-DSLANG_DISABLE_STDLIB_SOURCE' ]
+endif
+if get_option('full-debug-validation')
+  slang_defs += [ '-DSLANG_ENABLE_FULL_IR_VALIDATION' ]
+endif
+if not get_option('embed-stdlib')
+  slang_defs += ['-DSLANG_WITHOUT_EMBEDDED_STD_LIB']
+endif
+
+# add core.natvis
+
+
+    # if disableStdlibSource then
+    #     defines { "SLANG_DISABLE_STDLIB_SOURCE" }
+    # end
+    #
+    # if fullDebugValidation then
+    #     defines { "SLANG_ENABLE_FULL_IR_VALIDATION" }
+    # end
+    #
+    # if enableEmbedStdLib then
+    #     -- We only have this dependency if we are embedding stdlib
+    #     if not skipSourceGeneration then
+    #         dependson { "embed-stdlib-generator" }
+    #     end
+    # else
+    #     -- Disable StdLib embedding
+    #     defines { "SLANG_WITHOUT_EMBEDDED_STD_LIB" }
+    # end
+
+slang = library('slang',
+  sources : slang_source,
+  include_directories : [
+    include_directories('../../'),
+    include_directories('../../external/spirv-headers/include'),
+  ],
+  link_with : [ core, compiler_core, miniz, lz4 ],
+  pic : true,
+  cpp_args : slang_defs,
+)
