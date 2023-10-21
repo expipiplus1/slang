@@ -216,6 +216,31 @@ slang_include_directories = [
 ]
 
 ################################################################
+# *.meta.slang headers
+################################################################
+
+meta_modules = [
+  'core.meta.slang',
+  'hlsl.meta.slang',
+  'diff.meta.slang',
+]
+meta_module_headers = []
+foreach meta : meta_modules
+  meta_module_headers += [ meta + '.h' ]
+endforeach
+meta_slang_generated = custom_target('generate-' + meta,
+  command : [
+    slang_generate,
+    '@INPUT@',
+    '--target-directory',
+    '@OUTDIR@',
+  ],
+  input : meta_modules,
+  output : meta_module_headers,
+)
+slang_source += meta_slang_generated
+
+################################################################
 # Static slang
 ################################################################
 
