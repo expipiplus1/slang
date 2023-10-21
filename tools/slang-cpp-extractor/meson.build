@@ -15,6 +15,5 @@ cpp_extractor = executable('slang-cpp-extractor',
     'unit-test.cpp',
   ],
   link_with : [ core_native, compiler_core_native ],
-  cpp_args : [ '-Wno-unused-but-set-variable', '-Wno-unused-function', '-Wno-unused-parameter', '-Wno-implicit-fallthrough' ],
   native : true,
 )

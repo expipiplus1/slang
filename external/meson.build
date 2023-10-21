@@ -16,15 +16,22 @@ else
   miniz_deps = []
 endif
 
+miniz_source = [
+  'miniz/miniz.c',
+  'miniz/miniz_tdef.c',
+  'miniz/miniz_tinfl.c',
+  'miniz/miniz_zip.c',
+]
 miniz = static_library('miniz',
-  sources : [
-    'miniz/miniz.c',
-    'miniz/miniz_tdef.c',
-    'miniz/miniz_tinfl.c',
-    'miniz/miniz_zip.c',
-  ],
+  sources : miniz_source,
   c_args : miniz_defs,
-  dependencies : miniz_deps
+  dependencies : miniz_deps,
+)
+miniz_native = static_library('miniz-native',
+  sources : miniz_source,
+  c_args : miniz_defs,
+  dependencies : miniz_deps,
+  native : true,
 )
 
 ################################################################
@@ -37,7 +44,13 @@ else
   lz4_deps = []
 endif
 
+lz4_source = [ 'lz4/lib/lz4.c' ]
 lz4 = static_library('lz4',
-  sources : [ 'lz4/lib/lz4.c' ],
-  dependencies : lz4_deps
+  sources : lz4_source,
+  dependencies : lz4_deps,
+)
+lz4_native = static_library('lz4-native',
+  sources : lz4_source,
+  dependencies : lz4_deps,
+  native : true,
 )

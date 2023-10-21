@@ -3,7 +3,6 @@ executable('test-server',
     'test-server-diagnostics.cpp',
     'test-server-main.cpp',
   ],
-  include_directories : [ include_directories('../../') ],
-  cpp_args : [ '-Wno-unused-variable', '-Wno-unused-parameter', '-Wno-sign-compare' ],
+  include_directories : [ '../../' ],
   link_with : [ core, compiler_core, slang ],
 )

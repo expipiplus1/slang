@@ -210,6 +210,59 @@ slang_source = [
   'slang.cpp',
 ] + prelude_source
 
+slang_include_directories = [
+    '../../',
+    '../../external/spirv-headers/include',
+]
+
+################################################################
+# Static slang
+################################################################
+
+slang_static = static_library('slang-static',
+  sources : slang_source,
+  include_directories : slang_include_directories,
+  cpp_args : [ '-DSLANG_STATIC', '-DSLANG_WITHOUT_EMBEDDED_STD_LIB' ],
+  link_with : [ core, compiler_core, miniz, lz4 ],
+  pic : true,
+)
+
+slang_static_native = static_library('slang-static-native',
+  sources : slang_source,
+  include_directories : slang_include_directories,
+  cpp_args : [ '-DSLANG_STATIC', '-DSLANG_WITHOUT_EMBEDDED_STD_LIB' ],
+  link_with : [ core_native, compiler_core_native, miniz_native, lz4_native ],
+  pic : true,
+  native : true,
+)
+
+################################################################
+# Generated stdlib
+################################################################
+
+if get_option('embed-stdlib')
+  slangc_bootstrap = executable('slangc-bootstrap',
+    sources : [ '../slangc/main.cpp' ],
+    include_directories : slang_include_directories,
+    link_with : [ slang_static_native ],
+    dependencies : dependency('threads'),
+    native : true,
+  )
+
+  stdlib_generated = custom_target('generate-stdlib',
+    command : [
+      slangc_bootstrap,
+      '-archive-type',
+      'riff-lz4',
+      '-save-stdlib-bin-source',
+      '@OUTPUT@',
+    ],
+    output : [ 'slang-stdlib-generated.h' ]
+  )
+
+  slang_source += stdlib_generated
+endif
+
 ################################################################
 # Generated headers
 ################################################################
@@ -230,20 +283,23 @@ foreach type : [ 'obj', 'ast', 'value' ]
     reflect_output += 'slang-generated-' + type + macro + '.h'
   endforeach
 endforeach
-reflect_options = [
-  '-strip-prefix',
-  'slang-',
-  '-o',
-  'slang-generated',
-  '-output-fields',
-  '-mark-suffix',
-  '_CLASS',
-]
 reflect_headers = custom_target('ast-reflection',
-  command : [ cpp_extractor ] + reflect_options,
+  command : [
+    cpp_extractor,
+    '-strip-prefix',
+    'slang-',
+    '-o',
+    '@OUTDIR@' / 'slang-generated',
+    '-output-fields',
+    '-mark-suffix',
+    '_CLASS',
+    '@INPUT@',
+  ],
   output : reflect_output,
   input : reflect_input,
 )
+
+slang_source += reflect_headers
 
 ################################################################
 #
@@ -264,34 +320,10 @@ if not get_option('embed-stdlib')
   slang_defs += ['-DSLANG_WITHOUT_EMBEDDED_STD_LIB']
 endif
 
-# add core.natvis
-
-
-    # if disableStdlibSource then
-    #     defines { "SLANG_DISABLE_STDLIB_SOURCE" }
-    # end
-    #
-    # if fullDebugValidation then
-    #     defines { "SLANG_ENABLE_FULL_IR_VALIDATION" }
-    # end
-    #
-    # if enableEmbedStdLib then
-    #     -- We only have this dependency if we are embedding stdlib
-    #     if not skipSourceGeneration then
-    #         dependson { "embed-stdlib-generator" }
-    #     end
-    # else
-    #     -- Disable StdLib embedding
-    #     defines { "SLANG_WITHOUT_EMBEDDED_STD_LIB" }
-    # end
-
 slang = library('slang',
   sources : slang_source,
-  include_directories : [
-    include_directories('../../'),
-    include_directories('../../external/spirv-headers/include'),
-  ],
+  include_directories : slang_include_directories,
+  cpp_args : slang_defs,
   link_with : [ core, compiler_core, miniz, lz4 ],
   pic : true,
-  cpp_args : slang_defs,
 )
