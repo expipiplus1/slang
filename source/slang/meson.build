@@ -249,7 +249,6 @@ slang_static = static_library('slang-static',
   include_directories : slang_include_directories,
   cpp_args : [ '-DSLANG_STATIC', '-DSLANG_WITHOUT_EMBEDDED_STD_LIB' ],
   link_with : [ core, compiler_core, miniz, lz4 ],
-  pic : true,
 )
 
 slang_static_native = static_library('slang-static-native',
@@ -257,7 +256,6 @@ slang_static_native = static_library('slang-static-native',
   include_directories : slang_include_directories,
   cpp_args : [ '-DSLANG_STATIC', '-DSLANG_WITHOUT_EMBEDDED_STD_LIB' ],
   link_with : [ core_native, compiler_core_native, miniz_native, lz4_native ],
-  pic : true,
   native : true,
 )
 
@@ -338,7 +336,7 @@ slang_defs = [ '-DSLANG_DYNAMIC_EXPORT' ]
 if not get_option('embed-stdlib-source')
   slang_defs += [ '-DSLANG_DISABLE_STDLIB_SOURCE' ]
 endif
-if get_option('full-debug-validation')
+if get_option('enable-full-debug-validation')
   slang_defs += [ '-DSLANG_ENABLE_FULL_IR_VALIDATION' ]
 endif
 if not get_option('embed-stdlib')
@@ -350,5 +348,4 @@ slang = library('slang',
   include_directories : slang_include_directories,
   cpp_args : slang_defs,
   link_with : [ core, compiler_core, miniz, lz4 ],
-  pic : true,
 )

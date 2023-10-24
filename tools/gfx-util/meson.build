@@ -4,5 +4,4 @@ gfx_util = static_library('gfx-util',
     '../../',
   ],
   link_with : [ core ],
-  pic : true,
 )

@@ -109,23 +109,31 @@ gfx_sources = [
 gfx_defs = [ '-DSLANG_GFX_DYNAMIC', '-DSLANG_GFX_DYNAMIC_EXPORT' ]
 gfx_deps = []
 
-if get_option('enable-aftermath')
+if get_option('enable-aftermath').enabled()
   gfx_defs += [ '-DGFX_NV_AFTERMATH' ]
   gfx_deps += [ aftermath ]
 endif
 
-if get_option('enable-xlib')
+if X11.found()
   gfx_defs += [ '-DSLANG_ENABLE_XLIB' ]
-  X11 = dependency('x11', required : true)
   gfx_deps += [ X11 ]
 endif
 
-if get_option('enable-nvapi')
+if get_option('enable-nvapi').enabled()
   gfx_defs += [ '-DGFX_NVAPI' ]
 endif
 
-if get_option('enable-cuda')
-  gfx_defs += [ '-DGFX_ENABLE_CUDA' ]
+if get_option('enable-cuda').enabled()
+  gfx_defs += [
+    '-DGFX_ENABLE_CUDA',
+    '-DRENDER_TEST_CUDA',
+  ]
+endif
+
+if get_option('enable-optix').enabled()
+  gfx_defs += [
+    '-DGFX_OPTIX',
+  ]
 endif
 
 gfx = library('gfx',
@@ -139,5 +147,4 @@ gfx = library('gfx',
   cpp_args : gfx_defs,
   link_with : [ core, slang ],
   dependencies : gfx_deps,
-  pic : true,
 )

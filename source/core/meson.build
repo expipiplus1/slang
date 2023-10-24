@@ -64,21 +64,16 @@ endif
 
 core = static_library('core',
   sources : core_source,
-  # We need the core library to be relocatable to be able to link with slang.so
-  pic : true,
 )
 
 core_native = static_library('core-native',
     sources : core_source,
-    # We need the core library to be relocatable to be able to link with slang.so
-    pic : true,
     native : true,
   )
 
 slang_rt_source = core_source
 slang_rt = library('slang-rt',
   sources : slang_rt_source,
-  pic : true,
   link_with : [miniz, lz4],
   cpp_args : ['-DSLANG_RT_DYNAMIC', '-DSLANG_RT_DYNAMIC_EXPORT'],
   dependencies : dependency('threads'),

@@ -1,8 +1,7 @@
 platform_defs = [ '-DSLANG_PLATFORM_DYNAMIC', '-DSLANG_PLATFORM_DYNAMIC_EXPORT' ]
 platform_deps = []
 
-if get_option('enable-xlib')
-  X11 = dependency('x11', required : true)
+if X11.found()
   platform_defs += [ '-DSLANG_ENABLE_XLIB' ]
   platform_deps += [ X11 ]
 endif
@@ -22,7 +21,6 @@ platform = library('platform',
     '../../source',
     '../../external',
   ],
-  pic : true,
   link_with : [ core ],
   cpp_args : platform_defs,
   dependencies : platform_deps,

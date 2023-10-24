@@ -1,5 +1,5 @@
 render_test_defs = []
-if get_option('enable-cuda')
+if get_option('enable-cuda').enabled() and get_option('enable-optix')
   render_test_defs += [ '-DRENDER_TEST_CUDA' ]
 endif
 

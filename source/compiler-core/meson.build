@@ -48,15 +48,29 @@ if host_machine.system() == 'windows'
   compiler_core_source += 'windows/slang-win-visual-studio-util.cpp'
 endif
 
+# For the DXC headers
+compiler_core_desired_args = [ '-fms-extensions' ]
+
+compiler_core_build_args = []
+compiler_core_host_args = []
+foreach a : compiler_core_desired_args
+  if meson.get_compiler('cpp', native : false).has_argument(a)
+    compiler_core_host_args += [a]
+  endif
+  if meson.get_compiler('cpp', native : true).has_argument(a)
+    compiler_core_build_args += [a]
+  endif
+endforeach
+
 compiler_core = static_library('compiler-core',
   sources : compiler_core_source,
-  pic : true,
+  cpp_args : compiler_core_host_args,
   link_with : core,
 )
 
 compiler_core_native = static_library('compiler-core-native',
-    sources : compiler_core_source,
-    pic : true,
-    link_with : core_native,
-    native : true,
-  )
+  sources : compiler_core_source,
+  cpp_args : compiler_core_build_args,
+  link_with : core_native,
+  native : true,
+)
