@@ -739,19 +739,6 @@ struct DiffTransposePass
 
         return false;
     }
-    
-    IRParam* getParamAt(IRBlock* block, UIndex ii)
-    {
-        UIndex index = 0;
-        for (auto param : block->getParams())
-        {
-            if (ii == index)
-                return param;
-
-            index ++;
-        }
-        SLANG_UNEXPECTED("ii >= paramCount");
-    }
 
     void transposeBlock(IRBlock* fwdBlock, IRBlock* revBlock)
     {
@@ -1841,6 +1828,7 @@ struct DiffTransposePass
     TranspositionResult transposeMakeVector(IRBuilder* builder, IRInst* fwdMakeVector, IRInst* revValue)
     {
         List<RevGradient> gradients;
+        UInt offset = 0;
         for (UIndex ii = 0; ii < fwdMakeVector->getOperandCount(); ii++)
         {
             auto argOperand = fwdMakeVector->getOperand(ii);
@@ -1857,12 +1845,12 @@ struct DiffTransposePass
                 gradAtIndex = builder->emitElementExtract(
                     argOperand->getDataType(),
                     revValue,
-                    builder->getIntValue(builder->getIntType(), ii));
+                    builder->getIntValue(builder->getIntType(), offset));
             }
             else
             {
                 ShortList<UInt> componentIndices;
-                for (UInt index = ii; index < ii + componentCount; index++)
+                for (UInt index = offset; index < offset + componentCount; index++)
                     componentIndices.add(index);
                 gradAtIndex = builder->emitSwizzle(
                     argOperand->getDataType(),
@@ -1876,6 +1864,8 @@ struct DiffTransposePass
                 fwdMakeVector->getOperand(ii),
                 gradAtIndex,
                 fwdMakeVector));
+            
+            offset += componentCount;
         }
 
         // (A = float3(X, Y, Z)) -> [(dX += dA), (dY += dA), (dZ += dA)]

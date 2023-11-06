@@ -274,7 +274,7 @@ DIAGNOSTIC(30010, Error, whilePredicateTypeError2, "'while': expression must eva
 DIAGNOSTIC(30011, Error, assignNonLValue, "left of '=' is not an l-value.")
 DIAGNOSTIC(30012, Error, noApplicationUnaryOperator, "no overload found for operator $0 ($1).")
 DIAGNOSTIC(30012, Error, noOverloadFoundForBinOperatorOnTypes, "no overload found for operator $0  ($1, $2).")
-DIAGNOSTIC(30013, Error, subscriptNonArray, "no subscript operation found for  type '$0'")
+DIAGNOSTIC(30013, Error, subscriptNonArray, "no subscript operation found for type '$0'")
 DIAGNOSTIC(30014, Error, subscriptIndexNonInteger, "index expression must evaluate to int.")
 DIAGNOSTIC(30015, Error, undefinedIdentifier2, "undefined identifier '$0'.")
 DIAGNOSTIC(30018, Error, typeNotInTheSameHierarchy, "invalid use of 'as' operator: expression evaluates to '$0', which is not in the same type hierarchy as target type '$1'.")
@@ -341,13 +341,11 @@ DIAGNOSTIC(30093, Error, uncaughtTryCallInNonThrowFunc, "the current function or
 DIAGNOSTIC(30094, Error, mustUseTryClauseToCallAThrowFunc, "the callee may throw an error, and therefore must be called within a 'try' clause")
 DIAGNOSTIC(30095, Error, errorTypeOfCalleeIncompatibleWithCaller, "the error type `$1` of callee `$0` is not compatible with the caller's error type `$2`.")
 
-DIAGNOSTIC(30096, Error, differentialTypeShouldServeAsItsOwnDifferentialType, "type '$0' is used as a `Differential` type, therefore it must serve as its own `Differential` type.")
+DIAGNOSTIC(30096, Error, differentialTypeShouldServeAsItsOwnDifferentialType, "cannot use type '$0' a `Differential` type. A differential type's differential must be itself. However, '$0.Differential' is '$1'.")
 DIAGNOSTIC(30097, Error, functionNotMarkedAsDifferentiable, "function '$0' is not marked as $1-differentiable.")
 DIAGNOSTIC(30098, Error, nonStaticMemberFunctionNotAllowedAsDiffOperand, "non-static function reference '$0' is not allowed here.")
 
 DIAGNOSTIC(30099, Error, sizeOfArgumentIsInvalid, "argument to sizeof is invalid")
-
-DIAGNOSTIC(-1, Note, noteSeeUseOfDifferentialType, "see use of '$0' as Differential of '$1'.")
 
 // Attributes
 DIAGNOSTIC(31000, Error, unknownAttributeName, "unknown attribute '$0'")
@@ -393,7 +391,15 @@ DIAGNOSTIC(31147, Error, cannotResolveOriginalFunctionForDerivative, "cannot res
 DIAGNOSTIC(31148, Error, cannotResolveDerivativeFunction, "cannot resolve the custom derivative function")
 DIAGNOSTIC(31149, Error, customDerivativeSignatureMismatchAtPosition, "invalid custom derivative. parameter type mismatch at position $0. expected '$1', got '$2'")
 DIAGNOSTIC(31150, Error, customDerivativeSignatureMismatch, "invalid custom derivative. could not resolve function with expected signature '$0'")
-
+DIAGNOSTIC(31151, Error, cannotResolveGenericArgumentForDerivativeFunction,
+    "The generic arguments to the derivative function cannot be deduced from the parameter list of the original function. "
+    "Consider using [ForwardDerivative], [BackwardDerivative] or [PrimalSubstitute] attributes on the primal function"
+    " with explicit generic arguments to associate it with a generic derivative function. Note that [ForwardDerivativeOf], "
+    "[BackwardDerivativeOf], and [PrimalSubstituteOf] attributes are not supported when the generic arguments to the derivatives cannot be automatically deduced.")
+DIAGNOSTIC(31152, Error, cannotAssociateInterfaceRequirementWithDerivative, "cannot associate an interface requirement with a derivative.")
+DIAGNOSTIC(31153, Error, cannotUseInterfaceRequirementAsDerivative, "cannot use an interface requirement as a derivative.")
+DIAGNOSTIC(31154, Error, customDerivativeSignatureThisParamMismatch, "custom derivative does not match expected signature on `this`. Either both the original and the derivative function are static, or they must have the same `this` type.")
+DIAGNOSTIC(31155, Error, customDerivativeNotAllowedForMemberFunctionsOfDifferentiableType, "custom derivative is not allowed for non-static member functions of a differentiable type.")
 DIAGNOSTIC(31200, Warning, deprecatedUsage, "$0 has been deprecated: $1")
 
 // Enums
@@ -562,6 +568,8 @@ DIAGNOSTIC(38032, Error, useOfNoDiffOnDifferentiableFunc, "use 'no_diff' on a ca
 DIAGNOSTIC(38033, Error, cannotUseNoDiffInNonDifferentiableFunc, "cannot use 'no_diff' in a non-differentiable function.")
 DIAGNOSTIC(38034, Error, cannotUseConstRefOnDifferentiableParameter, "cannot use '__constref' on a differentiable parameter.")
 DIAGNOSTIC(38034, Error, cannotUseConstRefOnDifferentiableMemberMethod, "cannot use '[constref]' on a differentiable member method of a differentiable type.")
+
+DIAGNOSTIC(38040, Error, nonUniformEntryPointParameterMustHaveSemantic, "non-uniform parameter '$0' must have a system-value semantic.")
 
 DIAGNOSTIC(38200, Error, recursiveModuleImport, "module `$0` recursively imports itself")
 DIAGNOSTIC(39999, Error, errorInImportedModule, "import of module '$0' failed because of a compilation error")
