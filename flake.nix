@@ -189,6 +189,7 @@
               [[ $file -nt "$bin" ]] && bin=$file
             done
 
+            set -x
             exec "$bin" "$@"
           '';
 
@@ -296,7 +297,7 @@
             "--deploy-slang-glslang=false"
           ] ++ lib.optionals enableCuda [
             "--cuda-sdk-path=${cudaPackages.cudatoolkit}"
-            "--optix-sdk-path=${optix-headers}"
+            "--optix-sdk-path=${optix-headers}/include"
           ] ++ lib.optional enableDirectX "--dx-on-vk=true"
             ++ lib.optional enableSwiftshader "--enable-xlib=false";
           makeFlags = [ "config=${buildConfig}_${arch}" ];
@@ -440,7 +441,12 @@
         optix-headers = self.fetchzip {
           url =
             "https://developer.download.nvidia.com/redist/optix/v7.3/OptiX-7.3.0-Include.zip";
-          sha256 = "0max1j4822mchj0xpz9lqzh91zkmvsn4py0r174cvqfz8z8ykjk8";
+          sha256 = "sha256-Nqs/6UBDapq9zk+tYYdszhVQY8Cg9koFjvKxHcBQrGg=";
+          postFetch = ''
+            mkdir -p $out/include
+            shopt -s extglob
+            mv --target-directory $out/include $out/!(include)
+          '';
         };
 
         # Sadly there's no unified place to get Linux compatible DX
@@ -523,6 +529,13 @@
           inherit (pkgs) slang-llvm slang-glslang;
           slang = pkgs.shader-slang.override {
             stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.ccacheStdenv;
+            # vkd3d-proton = pkgs.vkd3d-proton.overrideAttrs
+            #   (old: { separateDebugInfo = true; });
+            # vkd3d =
+            #   pkgs.vkd3d.overrideAttrs (old: { separateDebugInfo = true; });
+            # vulkan-validation-layers =
+            #   pkgs.vulkan-validation-layers.overrideAttrs
+            #   (old: { separateDebugInfo = true; });
           };
           slang-debug =
             pkgs.enableDebugging (slang.override { buildConfig = "debug"; });
