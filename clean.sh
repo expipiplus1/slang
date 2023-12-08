@@ -40,6 +40,7 @@ clean()
     --exclude=hidden-llvm.patch \
     --exclude=tests \
     --exclude=vkd3d-proton.cache \
+    --exclude=.vimspector.json \
     "$@"
 }
 
