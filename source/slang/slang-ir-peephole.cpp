@@ -317,7 +317,7 @@ struct PeepholeContext : InstPassBase
             }
             else
             {
-                changed = tryFoldElementExtractFromUpdateInst(inst);
+                changed |= tryFoldElementExtractFromUpdateInst(inst);
             }
             break;
         case kIROp_GetElement:
@@ -382,7 +382,7 @@ struct PeepholeContext : InstPassBase
             }
             else
             {
-                changed = tryFoldElementExtractFromUpdateInst(inst);
+                changed |= tryFoldElementExtractFromUpdateInst(inst);
             }
             break;
         case kIROp_UpdateElement:
@@ -806,7 +806,7 @@ struct PeepholeContext : InstPassBase
         case kIROp_Div:
         case kIROp_And:
         case kIROp_Or:
-            changed = tryOptimizeArithmeticInst(inst);
+            changed |= tryOptimizeArithmeticInst(inst);
             break;
         case kIROp_Param:
             {
@@ -845,8 +845,11 @@ struct PeepholeContext : InstPassBase
                 {
                     if (inst->hasUses())
                     {
-                        // Is argValue a global constant?
-                        if (isChildInstOf(inst, argValue->getParent()))
+                        // Is argValue not a local value, i.e. it's not a child
+                        // of a block, and it's 'visible' from inst because
+                        // inst is a descendent of argValue's parent
+                        if (!as<IRBlock>(argValue->getParent())
+                            && isChildInstOf(inst, argValue->getParent()))
                         {
                             inst->replaceUsesWith(argValue);
                             // Never remove param inst.

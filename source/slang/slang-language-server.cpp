@@ -458,7 +458,7 @@ void appendDefinitionLocation(StringBuilder& sb, Workspace* workspace, const Hum
     sb << "Defined in " << pathSlice << "(" << loc.line << ")\n";
 }
 
-HumaneSourceLoc getModuleLoc(SourceManager* manager, ModuleDecl* moduleDecl)
+HumaneSourceLoc getModuleLoc(SourceManager* manager, ContainerDecl* moduleDecl)
 {
     if (moduleDecl)
     {
@@ -642,10 +642,26 @@ SlangResult LanguageServer::hover(
             }
         }
     };
+    auto fillLoc = [&](SourceLoc loc)
+    {
+        auto humaneLoc = version->linkage->getSourceManager()->getHumaneLoc(loc, SourceLocType::Actual);
+        hover.range.start.line = int(humaneLoc.line - 1);
+        hover.range.end.line = int(humaneLoc.line - 1);
+        hover.range.start.character = int(humaneLoc.column - 1);
+        hover.range.end.character = hover.range.start.character + int(doc->getTokenLength(humaneLoc.line, humaneLoc.column));
+    };
     auto fillExprHoverInfo = [&](Expr* expr)
     {
         if (auto declRefExpr = as<DeclRefExpr>(expr))
             return fillDeclRefHoverInfo(declRefExpr->declRef);
+        else if (as<ThisExpr>(expr))
+        {
+            if (expr->type)
+            {
+                sb << "```\n" << expr->type->toString() << " this" << "\n```\n";
+            }
+            fillLoc(expr->loc);
+        }
         if (const auto higherOrderExpr = as<HigherOrderInvokeExpr>(expr))
         {
             String documentation;
@@ -657,12 +673,7 @@ SlangResult LanguageServer::hover(
                 << "\n```\n";
             sb << documentation;
             maybeAppendAdditionalOverloadsHint();
-            auto humaneLoc = version->linkage->getSourceManager()->getHumaneLoc(
-                expr->loc, SourceLocType::Actual);
-            hover.range.start.line = int(humaneLoc.line - 1);
-            hover.range.end.line = int(humaneLoc.line - 1);
-            hover.range.start.character = int(humaneLoc.column - 1);
-            hover.range.end.character = hover.range.start.character + int(doc->getTokenLength(humaneLoc.line, humaneLoc.column));
+            fillLoc(expr->loc);
         }
     };
     if (auto declRefExpr = as<DeclRefExpr>(leafNode))
@@ -686,6 +697,10 @@ SlangResult LanguageServer::hover(
     {
         fillExprHoverInfo(higherOrderExpr);
     }
+    else if (auto thisExprExpr = as<ThisExpr>(leafNode))
+    {
+        fillExprHoverInfo(thisExprExpr);
+    }
     else if (auto importDecl = as<ImportDecl>(leafNode))
     {
         auto moduleLoc = getModuleLoc(version->linkage->getSourceManager(), importDecl->importedModuleDecl);
@@ -702,6 +717,27 @@ SlangResult LanguageServer::hover(
             hover.range.start.character = (int)utf16Col;
             humaneLoc = version->linkage->getSourceManager()->getHumaneLoc(
                 importDecl->endLoc, SourceLocType::Actual);
+            doc->oneBasedUTF8LocToZeroBasedUTF16Loc(humaneLoc.line, humaneLoc.column, utf16Line, utf16Col);
+            hover.range.end.line = (int)utf16Line;
+            hover.range.end.character = (int)utf16Col;
+        }
+    }
+    else if (auto includeDeclBase = as<IncludeDeclBase>(leafNode))
+    {
+        auto moduleLoc = getModuleLoc(version->linkage->getSourceManager(), includeDeclBase->fileDecl);
+        if (moduleLoc.pathInfo.hasFoundPath())
+        {
+            String path = moduleLoc.pathInfo.foundPath;
+            Path::getCanonical(path, path);
+            sb << path;
+            auto humaneLoc = version->linkage->getSourceManager()->getHumaneLoc(
+                includeDeclBase->startLoc, SourceLocType::Actual);
+            Index utf16Line, utf16Col;
+            doc->oneBasedUTF8LocToZeroBasedUTF16Loc(humaneLoc.line, humaneLoc.column, utf16Line, utf16Col);
+            hover.range.start.line = (int)utf16Line;
+            hover.range.start.character = (int)utf16Col;
+            humaneLoc = version->linkage->getSourceManager()->getHumaneLoc(
+                includeDeclBase->endLoc, SourceLocType::Actual);
             doc->oneBasedUTF8LocToZeroBasedUTF16Loc(humaneLoc.line, humaneLoc.column, utf16Line, utf16Col);
             hover.range.end.line = (int)utf16Line;
             hover.range.end.character = (int)utf16Col;
@@ -815,6 +851,14 @@ SlangResult LanguageServer::gotoDefinition(
     else if (auto importDecl = as<ImportDecl>(leafNode))
     {
         auto location = getModuleLoc(version->linkage->getSourceManager(), importDecl->importedModuleDecl);
+        if (location.pathInfo.hasFoundPath())
+        {
+            locations.add(LocationResult{ location, 0 });
+        }
+    }
+    else if (auto includeDeclBase = as<IncludeDeclBase>(leafNode))
+    {
+        auto location = getModuleLoc(version->linkage->getSourceManager(), includeDeclBase->fileDecl);
         if (location.pathInfo.hasFoundPath())
         {
             locations.add(LocationResult{ location, 0 });
@@ -1240,8 +1284,20 @@ SlangResult LanguageServer::signatureHelp(
         return SLANG_OK;
     }
 
-    auto funcExpr =
-        appExpr->originalFunctionExpr ? appExpr->originalFunctionExpr : appExpr->functionExpr;
+    auto funcExpr = appExpr->functionExpr;
+    if (appExpr->originalFunctionExpr)
+    {
+        bool useOriginalExpr = true;
+        if (auto originalDeclRefExpr = as<DeclRefExpr>(appExpr->originalFunctionExpr))
+        {
+            if (!originalDeclRefExpr->declRef)
+            {
+                useOriginalExpr = false;
+            }
+        }
+        if (useOriginalExpr)
+            funcExpr = appExpr->originalFunctionExpr;
+    }
     if (!funcExpr)
     {
         m_connection->sendResult(NullResponse::get(), responseId);

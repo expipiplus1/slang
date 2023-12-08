@@ -16,7 +16,10 @@ class ConstModifier : public Modifier { SLANG_AST_CLASS(ConstModifier)};
 class InstanceModifier : public Modifier { SLANG_AST_CLASS(InstanceModifier)};
 class BuiltinModifier : public Modifier { SLANG_AST_CLASS(BuiltinModifier)};
 class InlineModifier : public Modifier { SLANG_AST_CLASS(InlineModifier)};
-class PublicModifier : public Modifier { SLANG_AST_CLASS(PublicModifier)};
+class VisibilityModifier : public Modifier {SLANG_AST_CLASS(VisibilityModifier)};
+class PublicModifier : public VisibilityModifier { SLANG_AST_CLASS(PublicModifier)};
+class PrivateModifier : public VisibilityModifier { SLANG_AST_CLASS(PrivateModifier) };
+class InternalModifier : public VisibilityModifier { SLANG_AST_CLASS(InternalModifier) };
 class RequireModifier : public Modifier { SLANG_AST_CLASS(RequireModifier)};
 class ParamModifier : public Modifier { SLANG_AST_CLASS(ParamModifier)};
 class ExternModifier : public Modifier { SLANG_AST_CLASS(ExternModifier)};
@@ -30,7 +33,7 @@ class ExportedModifier : public Modifier { SLANG_AST_CLASS(ExportedModifier)};
 class ConstExprModifier : public Modifier { SLANG_AST_CLASS(ConstExprModifier)};
 class GloballyCoherentModifier : public Modifier { SLANG_AST_CLASS(GloballyCoherentModifier)};
 class ExternCppModifier : public Modifier { SLANG_AST_CLASS(ExternCppModifier)};
-
+class GLSLPrecisionModifier : public Modifier { SLANG_AST_CLASS(GLSLPrecisionModifier)};
 
 // Marks that the definition of a decl is not yet synthesized.
 class ToBeSynthesizedModifier : public Modifier {SLANG_AST_CLASS(ToBeSynthesizedModifier)};
@@ -765,6 +768,12 @@ class DisableArrayFlatteningAttribute : public Attribute
     SLANG_AST_CLASS(DisableArrayFlatteningAttribute);
 };
 
+// A GLSL layout(local_size_x = 64, ... attribute)
+class GLSLLayoutLocalSizeAttribute : public Attribute
+{
+    SLANG_AST_CLASS(GLSLLayoutLocalSizeAttribute)
+};
+
 // TODO: for attributes that take arguments, the syntax node
 // classes should provide accessors for the values of those arguments.
 
@@ -1073,6 +1082,18 @@ class AnyValueSizeAttribute : public Attribute
     SLANG_AST_CLASS(AnyValueSizeAttribute)
 
     int32_t size;
+};
+
+    /// This is a stop-gap solution to break overload ambiguity in stdlib.
+    /// When there is a function overload ambiguity, the compiler will pick the one with higher rank
+    /// specified by this attribute. An overload without this attribute will have a rank of 0.
+    /// In the future, we should enhance our type system to take into account the "specialized"-ness
+    /// of an overload, such that `T overload1<T:IDerived>()` is more specialized than `T overload2<T:IBase>()`
+    /// and preferred during overload resolution.
+class OverloadRankAttribute : public Attribute
+{
+    SLANG_AST_CLASS(OverloadRankAttribute)
+    int32_t rank;
 };
 
     /// An attribute that marks an interface for specialization use only. Any operation that triggers dynamic

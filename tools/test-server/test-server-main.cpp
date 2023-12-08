@@ -117,7 +117,7 @@ SlangResult innerMain(StdWriters* stdWriters, slang::IGlobalSession* sharedSessi
     SLANG_RETURN_ON_FAIL(session->createCompileRequest(compileRequest.writeRef()));
 
     // Do any app specific configuration
-    for (int i = 0; i < SLANG_WRITER_CHANNEL_COUNT_OF; ++i)
+    for (int i = 0; i < int{SLANG_WRITER_CHANNEL_COUNT_OF}; ++i)
     {
         const auto channel = SlangWriterChannel(i);
         compileRequest->setWriter(channel, stdWriters->getWriter(channel));
@@ -214,10 +214,8 @@ ISlangSharedLibrary* TestServer::loadSharedLibrary(const String& name, Diagnosti
 
     auto loader = DefaultSharedLibraryLoader::getSingleton();
 
-    auto toolPath = Path::combine(m_exeDirectory, name);
-
     ComPtr<ISlangSharedLibrary> sharedLibrary;
-    if (SLANG_FAILED(loader->loadSharedLibrary(toolPath.getBuffer(), sharedLibrary.writeRef())))
+    if (SLANG_FAILED(loader->loadSharedLibrary(name.getBuffer(), sharedLibrary.writeRef())))
     {
         if (sink)
         {
@@ -504,6 +502,7 @@ SlangResult TestServer::execute()
     while (m_connection->isActive() && !m_quit)
     {
         // Failure doesn't make the execution terminate
+        [[maybe_unused]]
         const SlangResult res = _executeSingle();
     }
 

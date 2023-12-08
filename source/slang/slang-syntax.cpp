@@ -2,7 +2,7 @@
 
 #include "slang-compiler.h"
 #include "slang-visitor.h"
-
+#include "slang-ast-print.h"
 #include <typeinfo>
 #include <assert.h>
 
@@ -53,6 +53,13 @@ void printDiagnosticArg(StringBuilder& sb, QualType const& type)
         type.type->toText(sb);
     else
         sb << "<null>";
+}
+
+void printDiagnosticArg(StringBuilder& sb, QualifiedDeclPath path)
+{
+    ASTPrinter printer(getCurrentASTBuilder());
+    printer.addDeclPath(path.declRef);
+    sb << printer.getString();
 }
 
 SourceLoc getDiagnosticPos(SyntaxNode const* syntax)
@@ -245,6 +252,22 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
         return m_obj.as<WitnessTable>();
     }
 
+    RefPtr<WitnessTable> WitnessTable::specialize(ASTBuilder* astBuilder, SubstitutionSet const& subst)
+    {
+        auto newBaseType = baseType->substitute(astBuilder, subst);
+        auto newWitnessedType = witnessedType->substitute(astBuilder, subst);
+        if (newBaseType == baseType && newWitnessedType == witnessedType)
+            return this;
+        RefPtr<WitnessTable> result = new WitnessTable();
+        result->baseType = as<Type>(newBaseType);
+        result->witnessedType = as<Type>(newWitnessedType);
+        for (auto requirement : m_requirements)
+        {
+            auto newRequirement = requirement.value.specialize(astBuilder, subst);
+            result->add(requirement.key, newRequirement);
+        }
+        return result;
+    }
 
     RequirementWitness RequirementWitness::specialize(ASTBuilder* astBuilder, SubstitutionSet const& subst)
     {
@@ -256,8 +279,7 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
             return RequirementWitness();
 
         case RequirementWitness::Flavor::witnessTable:
-            SLANG_ASSERT(!subst);
-            return *this;
+            return RequirementWitness(this->getWitnessTable()->specialize(astBuilder, subst));
 
         case RequirementWitness::Flavor::declRef:
             {
@@ -454,6 +476,12 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
             declRef = createDefaultSubstitutionsIfNeeded(astBuilder, nullptr, declRef);
 
             return astBuilder->getOrCreate<ThisType>(declRef.declRefBase);
+        }
+        else if (auto typedefDecl = as<TypeDefDecl>(declRef.getDecl()))
+        {
+            if (typedefDecl->type.type)
+                return as<Type>(typedefDecl->type.type->substitute(astBuilder, SubstitutionSet(declRef)));
+            return astBuilder->getErrorType();
         }
         else
         {
@@ -742,6 +770,17 @@ Module* getModule(Decl* decl)
         return nullptr;
 
     return moduleDecl->module;
+}
+
+ModuleDecl* getModuleDecl(Scope* scope)
+{
+    for (; scope; scope = scope->parent)
+    {
+        if (scope->containerDecl)
+            return getModuleDecl(scope->containerDecl);
+    }
+    return nullptr;
+
 }
 
 Decl* getParentDecl(Decl* decl)
