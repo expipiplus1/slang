@@ -1,116 +1,15 @@
 {
   description = "The Slang compiler";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = { nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; };
 
-    gitignore = {
-      url = "github:hercules-ci/gitignore.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    mini-compile-commands = {
-      url = "github:expipiplus1/mini_compile_commands";
-      flake = false;
-    };
-  };
-
-  outputs = { self, nixpkgs, gitignore, mini-compile-commands }:
+  outputs = { self, nixpkgs }:
     let
-      sysHelper = stdenv: rec {
-        # Some helpful utils for constructing the below derivations
-        arch = {
-          x86_64-linux = "x64";
-          i686-linux = "x86";
-          aarch64-linux = "aarch64";
-        }.${stdenv.hostPlatform.system};
-        commonPremakeFlags = [ "gmake2" "--deps=false" "--arch=${arch}" ]
-          ++ nixpkgs.lib.optional stdenv.cc.isClang "--cc=clang";
-        makeFlags = [ "config=release_${arch}" "verbose=1" ];
-      };
-
-      # We build slang-glslang from source, ignoring whatever's in the
-      # submodule
-      slang-glslang = { stdenv, fetchFromGitHub, premake5 }:
-        with sysHelper stdenv;
-        stdenv.mkDerivation {
-          name = "slang-glslang";
-          src = fetchFromGitHub {
-            owner = "shader-slang";
-            repo = "slang-glslang";
-            rev = "8c732f5d1868cba621bffc1d5085a5a18dae2683";
-            sha256 = "01jjgq3dshcgdpbanpcp8lkd610gz00v6sbn6z2ln6a8ymvmh8bh";
-            fetchSubmodules = true;
-          };
-          nativeBuildInputs = [ premake5 ];
-          premakeFlags = commonPremakeFlags;
-          inherit makeFlags;
-          enableParallelBuilding = true;
-
-          installPhase = ''
-            mkdir -p $out/lib
-            cp bin/*/release/*.so "$out/lib"
-          '';
-        };
-
-      # We build slang-llvm using the LLVM in nixpkgs, speeds things up
-      slang-llvm = { stdenv, fetchFromGitHub, symlinkJoin, premake5, ncurses
-        , libclang, llvm }:
-        with sysHelper stdenv;
-        stdenv.mkDerivation {
-          name = "slang-llvm";
-          src = fetchFromGitHub {
-            owner = "shader-slang";
-            repo = "slang-llvm";
-            rev = "0e48669c5a8e94589f5614104bdee77cf165be25";
-            sha256 = "13jkvyrhfixvij4rqvis6azq5sdhfqfq6pv1z6aybynfcxr6wdg4";
-            fetchSubmodules = true;
-          };
-          # patches = [ ./hidden-llvm.patch ];
-          NIX_LDFLAGS = [
-            "-lncurses"
-            # We need `--exclude-libs All` (or at least `--exclude-libs
-            # llvm1,llvm2...`) to avoid exporting anything from llvm which could
-            # clash with other LLVM's loaded at runtime, for example from LLVMPipe.
-            # This typically manifests with a message like:
-            # "inconsistency in registered CommandLine options" followed by segfault.
-            # (TODO: On macOS use: -hidden-l... instead of -l...)
-            "--exclude-libs"
-            "ALL"
-          ];
-          nativeBuildInputs = [ premake5 ];
-          buildInputs = [ libclang llvm ncurses ];
-          premakeFlags = commonPremakeFlags ++ [
-            "--llvm-path=${
-              symlinkJoin {
-                name = "llvm-and-clang";
-                paths = [ llvm.lib libclang.lib ];
-                postBuild = ''
-                  ln -s . $out/build
-                '';
-              }
-            }"
-          ];
-          inherit makeFlags;
-          shellHook = ''
-            export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow format relro bindnow";
-          '';
-          enableParallelBuilding = true;
-          installPhase = ''
-            mkdir -p $out/lib
-            # TODO: Neaten
-            cp bin/*/release/*.a --target-directory "$out/lib"
-            cp bin/*/release/*.so --target-directory "$out/lib"
-          '';
-        };
-
       shader-slang = {
         # build tools
-        lib, stdenv, premake5, makeWrapper
-        # internal deps
-        , slang-glslang, slang-llvm
+        lib, stdenv, makeWrapper, cmake, ninja, pkg-config, premake5
         # external deps
-        , spirv-tools, libX11, gcc
+        , spirv-tools, libX11, gcc, llvm, libclang, zlib, libxml2
         # cuda
         , cudaPackages, optix-headers, addOpenGLRunpath
         # vulkan
@@ -119,13 +18,13 @@
         , dxvk_2, vkd3d, vkd3d-proton, dxvk-native-headers
         , directx-shader-compiler
         # devtools
-        , glslang, cmake, python3, clang_16, bear, renderdoc
-        , writeShellScriptBin, swiftshader, vulkan-tools, spirv-cross
+        , glslang, python3, clang_16, bear, renderdoc, writeShellScriptBin
+        , swiftshader, vulkan-tools, spirv-cross, gersemi, pkgsCross
         # "release" or "debug"
         , buildConfig ? "release"
           # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
           # optix toolkits
-        , enableCuda ? false
+        , enableCuda ? true
           # Allow loading and running DXC to generate DXIL output
         , enableDXC ? true
           # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
@@ -136,7 +35,6 @@
           # Put Swiftshader in the shell environment and force its usage via
           # VK_ICD_FILENAMES, again, only used for tests
         , enableSwiftshader ? false }:
-        with sysHelper stdenv;
         let
           # A script in the devshell which calls `make` with the
           # correct options for the arch, call like `mk` (for a debug
@@ -150,53 +48,31 @@
             else
               config="$1"
             fi
-            make config="$config""_${arch}" -j$(nproc) slangc
-            "./bin/linux-${arch}/$config/slangc" & slangc=$!
-            make config="$config""_${arch}" -j$(nproc)
+            cmake --build --preset debug --target slangc
+            "./build/Debug/bin/slangc" & slangc=$!
+            cmake --build --preset debug
             echo "done building, waiting for slangc..."
             wait $slangc
             echo ...done
           '';
 
-          # A script in the devshell which cleans the build output and
-          # regenerates it with clang, capturing a
-          # `compile_commands.json` file for use with any build tool
-          # which supports that, for example the clangd LSP server.
-          gen-compile-commands = writeShellScriptBin "gen-compile-commands" ''
-            git clean -x -f \
-              Makefile \
-              bin/ \
-              build/ \
-              intermediate/ \
-              source/slang/slang-generated-* \
-              source/slang/*.meta.slang.h \
-              prelude/slang-*-prelude.h.cpp
-
-            export CC=${clang_16}/bin/clang
-            export CXX=${clang_16}/bin/clang++
-            premake5 $premakeFlags --cc=clang "$@"
-            ${bear}/bin/bear \
-              --append \
-              -- make --ignore-errors --keep-going config=debug_${arch} -j$(nproc)
-          '';
-
           test-helper = writeShellScriptBin "t" ''
             shopt -s nullglob
 
-            bins=("bin/linux-${arch}"/{release,debug}/slang-test)
+            bins=(build/{Release,Debug}/bin/slang-test)
             bin=
             for file in "''${bins[@]}"; do
               [[ $file -nt "$bin" ]] && bin=$file
             done
 
             set -x
-            exec "$bin" "$@"
+            exec "$bin" -use-test-server "$@"
           '';
 
-          test-shader-helper = writeShellScriptBin "auto" ''
+          test-shader-helper = writeShellScriptBin "a" ''
             shopt -s nullglob
 
-            bins=("bin/linux-${arch}"/{release,debug}/slangc)
+            bins=(build/{Release,Debug}/bin/slangc)
             bin=
             for file in "''${bins[@]}"; do
               [[ $file -nt $bin ]] && bin=$file
@@ -228,7 +104,7 @@
 
             if ! [ "$explicit" ]; then
               for arg in "$@"; do
-                if [[ "$arg" == *.slang ]]; then
+                if [[ "$arg" == *.slang ]] || [[ "$arg" == *.hlsl ]]; then
                   file="$arg"
                   for s in compute vertex fragment; do
                     go "$s" "$s"Main
@@ -257,8 +133,7 @@
             fi
           '';
 
-          runtimeLibraries = [ slang-llvm ]
-            ++ lib.optional enableDXC directx-shader-compiler;
+          runtimeLibraries = lib.optional enableDXC directx-shader-compiler;
           runtimeLibraryPath = lib.makeLibraryPath runtimeLibraries;
           testsRuntimeLibraryPath = lib.makeLibraryPath (runtimeLibraries
             ++ [ vulkan-loader ] ++ lib.optionals enableCuda [
@@ -278,57 +153,25 @@
         in stdenv.mkDerivation {
           name = "slang";
           src = self;
-          nativeBuildInputs = [ premake5 makeWrapper ] ++
+          nativeBuildInputs =
+            [ pkg-config cmake ninja makeWrapper gersemi clang_16 premake5 ] ++
             # So we can find libcuda.so at runtime in /run/opengl or wherever
             lib.optional enableCuda cudaPackages.autoAddOpenGLRunpathHook;
           NIX_LDFLAGS =
             lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
           autoPatchelfIgnoreMissingDeps = lib.optional enableCuda "libcuda.so";
 
-          buildInputs = [ spirv-tools libX11 ]
-            ++ lib.optional enableDirectX dxvk-native-headers
+          buildInputs = [ spirv-tools libX11 llvm libclang zlib libxml2 ] ++ [
+            # For any cross build of llvm
+            pkgsCross.aarch64-multiplatform.ncurses
+            pkgsCross.aarch64-multiplatform.libxml2
+            pkgsCross.aarch64-multiplatform.xz
+            pkgsCross.aarch64-multiplatform.zlib
+          ] ++ lib.optional enableDirectX dxvk-native-headers
             ++ lib.optional enableCuda cudaPackages.cudatoolkit;
 
-          premakeFlags = commonPremakeFlags ++ [
-            "--build-glslang=true"
-            "--slang-llvm-path=${slang-llvm}"
-            "--slang-glslang-path=${slang-glslang}"
-            "--deploy-slang-llvm=false"
-            "--deploy-slang-glslang=false"
-          ] ++ lib.optionals enableCuda [
-            "--cuda-sdk-path=${cudaPackages.cudatoolkit}"
-            "--optix-sdk-path=${optix-headers}/include"
-          ] ++ lib.optional enableDirectX "--dx-on-vk=true"
-            ++ lib.optional enableSwiftshader "--enable-xlib=false";
-          makeFlags = [ "config=${buildConfig}_${arch}" ];
           enableParallelBuilding = true;
           hardeningDisable = lib.optional (buildConfig == "debug") "fortify";
-
-          installPhase = ''
-            runHook preInstall
-
-            mkdir -p $out/include/
-            cp slang.h $out/include/
-            cp slang-com-helper.h $out/include/
-            cp slang-com-ptr.h $out/include/
-            cp slang-tag-version.h $out/include/
-            cp slang-gfx.h $out/include/
-
-            mkdir -p $out/share/prelude
-            cp prelude/*.h $out/share/prelude/
-
-            mkdir -p $out/lib
-            mv bin/*/${buildConfig}/*.so $out/lib
-            rm bin/*/${buildConfig}/*.a
-
-            mkdir -p $out/bin
-            cp bin/*/${buildConfig}/* $out/bin
-
-            mkdir -p $out/share/doc
-            cp docs/*.md $out/share/doc/
-
-            runHook postInstall
-          '';
 
           postFixup = ''
             for bin in $(find "$out" -executable -type f -not -name slangc); do
@@ -356,29 +199,17 @@
                 vulkan-tools
                 spirv-cross
                 # Build utilities from this flake
-                gen-compile-commands
                 make-helper
                 test-shader-helper
                 test-helper
-                # Used in the bump-glslang.sl script
-                cmake
+                # Used in the bump-glslang.sh script
                 python3
+                # For cross builds
+                pkgsCross.aarch64-multiplatform.buildPackages.gcc
               ]
             }"
 
             export LD_LIBRARY_PATH="${testsRuntimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
-
-            # cuda
-            ${lib.optionalString enableCuda ''
-              export CUDA_PATH="${cudaPackages.cudatoolkit}''${CUDA_PATH:+:''${CUDA_PATH}}"
-            ''}
-
-            # dxvk and vkd3d-proton
-            ${lib.optionalString enableDirectX ''
-              # Make dxvk and vkd3d-proton less noisy
-              export VKD3D_DEBUG=err
-              export DXVK_LOG_LEVEL=error
-            ''}
 
             # Provision several handy Vulkan tools and make them available
             export VK_LAYER_PATH="${
@@ -401,23 +232,48 @@
               ])
             }''${VK_LAYER_PATH:+:''${VK_LAYER_PATH}}"
 
-            ${lib.optionalString enableSwiftshader ''
-              export VK_ICD_FILENAMES=${swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json
-            ''}
-
             # Disable 'fortify' hardening as it makes warnings in debug mode
             # Disable 'format' hardening as some of the tests generate offending output
             export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow relro bindnow"
+          '' + lib.optionalString enableSwiftshader ''
+            export VK_ICD_FILENAMES=${swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json
+          '' + lib.optionalString enableCuda ''
+            # cuda
+            export CUDA_PATH="${cudaPackages.cudatoolkit}''${CUDA_PATH:+:''${CUDA_PATH}}"
+          '' + lib.optionalString enableDirectX ''
+            # dxvk and vkd3d-proton
+            # Make dxvk and vkd3d-proton less noisy
+            export VKD3D_DEBUG=err
+            export DXVK_LOG_LEVEL=error
           '';
         };
 
+      modifyLlvmPackages = base:
+        { toolsFunc ? final: prev: { }, libsFunc ? final: prev: { } }:
+        let
+          tools = base.tools.extend toolsFunc;
+          libraries = base.libraries.extend libsFunc;
+        in {
+          inherit (base) release_version;
+          inherit tools libraries;
+        } // tools // libraries;
+
       overlay = (self: super: {
-        # The Slang packages themselves
-        slang-glslang = self.callPackage slang-glslang { };
-        slang-llvm = self.callPackage slang-llvm {
-          inherit (self.llvmPackages_13) libclang llvm;
+        # The Slang package itself
+        shader-slang = self.callPackage shader-slang {
+          # inherit (self.llvmPackages_13) libclang llvm;
+          inherit (modifyLlvmPackages self.llvmPackages_13 {
+            toolsFunc = lself: lsuper: {
+              libllvm =
+                lsuper.libllvm.override { enableSharedLibraries = false; };
+              # libllvm = lsuper.libllvm.overrideAttrs (old: {
+              #   cmakeFlags = old.cmakeFlags or [ ]
+              #     ++ [ "-DLLVM_LINK_LLVM_DYLIB=OFF" ];
+              # });
+            };
+          })
+            libclang llvm;
         };
-        shader-slang = self.callPackage shader-slang { };
 
         #
         # A few tweaks to other things
@@ -512,6 +368,21 @@
         vulkan-validation-layers = super.vulkan-validation-layers.overrideAttrs
           (old: { separateDebugInfo = true; });
 
+        gersemi = self.python3Packages.buildPythonApplication rec {
+          pname = "gersemi";
+          version = "0.9.3";
+          src = self.fetchPypi {
+            inherit pname version;
+            sha256 = "sha256-fNhmq9KKOwlc50iDEd9pqHCM0br9Yt+nKtrsoS1d5ng=";
+          };
+          doCheck = false;
+          propagatedBuildInputs = [
+            self.python3Packages.appdirs
+            self.python3Packages.lark
+            self.python3Packages.pyyaml
+          ];
+        };
+
       });
     in {
       packages = nixpkgs.lib.attrsets.genAttrs [
@@ -526,29 +397,28 @@
             overlays = [ overlay ];
           };
         in rec {
-          inherit (pkgs) slang-llvm slang-glslang;
-          slang = pkgs.shader-slang.override {
-            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.ccacheStdenv;
-            # vkd3d-proton = pkgs.vkd3d-proton.overrideAttrs
-            #   (old: { separateDebugInfo = true; });
-            # vkd3d =
-            #   pkgs.vkd3d.overrideAttrs (old: { separateDebugInfo = true; });
-            # vulkan-validation-layers =
-            #   pkgs.vulkan-validation-layers.overrideAttrs
-            #   (old: { separateDebugInfo = true; });
-          };
-          slang-debug =
-            pkgs.enableDebugging (slang.override { buildConfig = "debug"; });
-
-          slang-compile-commands = let
-            mcc-env = (pkgs.callPackage mini-compile-commands { }).wrap
-              pkgs.llvmPackages_13.stdenv;
-            mcc-hook = (pkgs.callPackage mini-compile-commands { }).hook;
-          in (slang.override {
-            stdenv = mcc-env;
+          # slang = pkgs.pkgsCross.aarch64-multiplatform.shader-slang.override {
+          #   enableCuda = false;
+          #   enableDirectX = false;
+          #   enableDXC = false;
+          # };
+          slang = (pkgs.shader-slang.override {
+            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
+          }).overrideAttrs (old: {
+            CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
+            CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
+          });
+          slang-debug = pkgs.enableDebugging (slang.override {
             buildConfig = "debug";
-          }).overrideAttrs
-          (old: { buildInputs = (old.buildInputs or [ ]) ++ [ mcc-hook ]; });
+            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.ccacheStdenv;
+            vkd3d-proton = pkgs.vkd3d-proton.overrideAttrs
+              (old: { separateDebugInfo = true; });
+            vkd3d =
+              pkgs.vkd3d.overrideAttrs (old: { separateDebugInfo = true; });
+            vulkan-validation-layers =
+              pkgs.vulkan-validation-layers.overrideAttrs
+              (old: { separateDebugInfo = true; });
+          });
 
           default = slang;
         });
