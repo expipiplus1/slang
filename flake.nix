@@ -11,7 +11,7 @@
         # external deps
         , spirv-tools, libX11, gcc, llvm, libclang, zlib, libxml2
         # cuda
-        , cudaPackages, optix-headers, addOpenGLRunpath
+        , cudaPackages, optix-headers, addOpenGLRunpath, autoAddDriverRunpath
         # vulkan
         , vulkan-loader, vulkan-validation-layers, vulkan-tools-lunarg
         # directx
@@ -31,7 +31,7 @@
           # very useful, as we don't have FXC so can't generate shaders, dxvk
           # is necessary however to supply libdxgi)
           # This is only for the test suite, not for the compiler itself
-        , enableDirectX ? true
+        , enableDirectX ? false
           # Put Swiftshader in the shell environment and force its usage via
           # VK_ICD_FILENAMES, again, only used for tests
         , enableSwiftshader ? false }:
@@ -54,6 +54,29 @@
             echo "done building, waiting for slangc..."
             wait $slangc
             echo ...done
+          '';
+
+          clean-build-helper = writeShellScriptBin "clean-build" ''
+            rm -rf ./build
+
+            cmake --preset default \
+              -DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM \
+              -DSLANG_EMBED_STDLIB=1 \
+              -DSLANG_EMBED_STDLIB_SOURCE=0 \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_C_COMPILER=clang \
+              --fresh
+            cp build/compile_commands.json .
+            cmake --preset default \
+              -DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM \
+              --fresh \
+              -DSLANG_ENABLE_DX_ON_VK=0
+            mk "$@"
+          '';
+
+          worktree-helper = writeShellScriptBin "new-worktree" ''
+            git worktree add ../"slang-$1" -b "slang-$1" origin/master
           '';
 
           test-helper = writeShellScriptBin "t" ''
@@ -156,7 +179,7 @@
           nativeBuildInputs =
             [ pkg-config cmake ninja makeWrapper gersemi clang_16 premake5 ] ++
             # So we can find libcuda.so at runtime in /run/opengl or wherever
-            lib.optional enableCuda cudaPackages.autoAddOpenGLRunpathHook;
+            lib.optional enableCuda autoAddDriverRunpath;
           NIX_LDFLAGS =
             lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
           autoPatchelfIgnoreMissingDeps = lib.optional enableCuda "libcuda.so";
@@ -193,13 +216,15 @@
                 # Useful for testing, although the actual glslang
                 # implementation used in the compiler comes from slang-glslang
                 # above, similarly dxc is loaded via shared library
-                glslang
+                # glslang
                 directx-shader-compiler
                 renderdoc
                 vulkan-tools
                 spirv-cross
                 # Build utilities from this flake
                 make-helper
+                clean-build-helper
+                worktree-helper
                 test-shader-helper
                 test-helper
                 # Used in the bump-glslang.sh script
