@@ -153,16 +153,19 @@ protected:
 struct AssignValsFromLayoutContext
 {
     IDevice*                device;
+    slang::ISession*        slangSession;
     ShaderOutputPlan&       outputPlan;
     slang::ProgramLayout*   slangReflection;
     IAccelerationStructure* accelerationStructure;
 
     AssignValsFromLayoutContext(
         IDevice*                    device,
+        slang::ISession*            slangSession,
         ShaderOutputPlan&           outputPlan,
         slang::ProgramLayout*       slangReflection,
         IAccelerationStructure*     accelerationStructure)
         : device(device)
+        , slangSession(slangSession)
         , outputPlan(outputPlan)
         , slangReflection(slangReflection)
         , accelerationStructure(accelerationStructure)
@@ -204,7 +207,10 @@ struct AssignValsFromLayoutContext
     {
         const InputBufferDesc& srcBuffer = srcVal->bufferDesc;
         auto& bufferData = srcVal->bufferData;
-        const size_t bufferSize = bufferData.getCount() * sizeof(uint32_t);
+        const size_t bufferSize = Math::Max((size_t)bufferData.getCount() * sizeof(uint32_t), (size_t)(srcBuffer.elementCount * srcBuffer.stride));
+        bufferData.reserve(bufferSize / sizeof(uint32_t));
+        for (size_t i = bufferData.getCount(); i < bufferSize / sizeof(uint32_t); i++)
+            bufferData.add(0);
 
         ComPtr<IBufferResource> bufferResource;
         SLANG_RETURN_ON_FAIL(ShaderRendererUtil::createBufferResource(srcBuffer, /*entry.isOutput,*/ bufferSize, bufferData.getBuffer(), device, bufferResource));
@@ -229,6 +235,7 @@ struct AssignValsFromLayoutContext
                 const InputBufferDesc& counterBufferDesc{
                     InputBufferType::StorageBuffer,
                     sizeof(uint32_t),
+                    1,
                     Format::Unknown,
                 };
                 SLANG_RETURN_ON_FAIL(ShaderRendererUtil::createBufferResource(
@@ -250,7 +257,6 @@ struct AssignValsFromLayoutContext
         IResourceView::Desc viewDesc = {};
         viewDesc.type = IResourceView::Type::UnorderedAccess;
         viewDesc.format = srcBuffer.format;
-        viewDesc.bufferElementSize = srcVal->bufferDesc.stride;
         auto bufferView = device->createBufferView(bufferResource, counterResource, viewDesc);
         dstCursor.setResource(bufferView);
         maybeAddOutput(dstCursor, srcVal, bufferResource);
@@ -389,7 +395,8 @@ struct AssignValsFromLayoutContext
             slangType = slangTypeLayout->getType();
         }
 
-        ComPtr<IShaderObject> shaderObject = device->createShaderObject(slangType);
+        ComPtr<IShaderObject> shaderObject;
+        device->createShaderObject2(slangSession, slangType, ShaderObjectContainerType::None, shaderObject.writeRef());
 
         SLANG_RETURN_ON_FAIL(assign(ShaderCursor(shaderObject), srcVal->contentVal));
         dstCursor.setObject(shaderObject);
@@ -478,15 +485,16 @@ struct AssignValsFromLayoutContext
 };
 
 SlangResult _assignVarsFromLayout(
-    IDevice*                   device,
-    IShaderObject*               shaderObject,
+    IDevice*                    device,
+    slang::ISession*            slangSession,
+    IShaderObject*              shaderObject,
     ShaderInputLayout const&    layout,
     ShaderOutputPlan&           ioOutputPlan,
     slang::ProgramLayout*       slangReflection,
     IAccelerationStructure*     accelerationStructure)
 {
     AssignValsFromLayoutContext context(
-        device, ioOutputPlan, slangReflection, accelerationStructure);
+        device, slangSession, ioOutputPlan, slangReflection, accelerationStructure);
     ShaderCursor rootCursor = ShaderCursor(shaderObject);
     return context.assign(rootCursor, layout.rootVal);
 }
@@ -495,6 +503,8 @@ Result RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* e
 {
     auto slangReflection = (slang::ProgramLayout*)spGetReflection(
         m_compilationOutput.output.getRequestForReflection());
+    ComPtr<slang::ISession> slangSession;
+    m_compilationOutput.output.m_requestForKernels->getSession(slangSession.writeRef());
 
     switch (pipelineType)
     {
@@ -504,6 +514,7 @@ Result RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* e
             auto rootObject = computeEncoder->bindPipeline(m_pipelineState);
             SLANG_RETURN_ON_FAIL(_assignVarsFromLayout(
                 m_device,
+                slangSession,
                 rootObject,
                 m_compilationOutput.layout,
                 m_outputPlan,
@@ -517,6 +528,7 @@ Result RenderTestApp::applyBinding(PipelineType pipelineType, ICommandEncoder* e
             auto rootObject = renderEncoder->bindPipeline(m_pipelineState);
             SLANG_RETURN_ON_FAIL(_assignVarsFromLayout(
                 m_device,
+                slangSession,
                 rootObject,
                 m_compilationOutput.layout,
                 m_outputPlan,
@@ -541,7 +553,7 @@ SlangResult RenderTestApp::initialize(
 
     // We begin by compiling the shader file and entry points that specified via the options.
     //
-    SLANG_RETURN_ON_FAIL(ShaderCompilerUtil::compileWithLayout(device->getSlangSession(), options, input, m_compilationOutput));
+    SLANG_RETURN_ON_FAIL(ShaderCompilerUtil::compileWithLayout(device->getSlangSession()->getGlobalSession(), options, input, m_compilationOutput));
     m_shaderInputLayout = m_compilationOutput.layout;
 
     // Once the shaders have been compiled we load them via the underlying API.
@@ -641,7 +653,7 @@ Result RenderTestApp::_initializeShaders(
     Options::ShaderProgramType shaderType,
     const ShaderCompilerUtil::Input& input)
 {
-    SLANG_RETURN_ON_FAIL(ShaderCompilerUtil::compileWithLayout(device->getSlangSession(), m_options, input,  m_compilationOutput));
+    SLANG_RETURN_ON_FAIL(ShaderCompilerUtil::compileWithLayout(device->getSlangSession()->getGlobalSession(), m_options, input, m_compilationOutput));
     m_shaderInputLayout = m_compilationOutput.layout;
     m_shaderProgram = device->createProgram(m_compilationOutput.output.desc);
     return m_shaderProgram ? SLANG_OK : SLANG_FAIL;
@@ -1268,24 +1280,30 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
             if( options.useDXIL )
             {
                 input.target = SLANG_DXIL;
-                input.profile = "sm_6_0";
+                input.profile = "sm_6_5";
                 slangPassThrough = SLANG_PASS_THROUGH_DXC;
             }
 			break;
 
 		case DeviceType::OpenGl:
 			input.target = SLANG_GLSL;
-            input.profile = "glsl_430";
+            input.profile = "";
 			nativeLanguage = SLANG_SOURCE_LANGUAGE_GLSL;
             slangPassThrough = SLANG_PASS_THROUGH_GLSLANG;
 			break;
 
 		case DeviceType::Vulkan:
 			input.target = SLANG_SPIRV;
-            input.profile = "glsl_430";
+            input.profile = "";
 			nativeLanguage = SLANG_SOURCE_LANGUAGE_GLSL;
             slangPassThrough = SLANG_PASS_THROUGH_GLSLANG;
 			break;
+        case DeviceType::Metal:
+            input.target = SLANG_METAL_LIB;
+            input.profile = "";
+            nativeLanguage = SLANG_SOURCE_LANGUAGE_METAL;
+            slangPassThrough = SLANG_PASS_THROUGH_METAL;
+            break;
         case DeviceType::CPU:
             input.target = SLANG_SHADER_HOST_CALLABLE;
             input.profile = "";
@@ -1402,6 +1420,8 @@ static SlangResult _innerMain(Slang::StdWriters* stdWriters, SlangSession* sessi
         desc.slang.lineDirectiveMode = SLANG_LINE_DIRECTIVE_MODE_NONE;
         if (options.generateSPIRVDirectly)
             desc.slang.targetFlags = SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY;
+        else
+            desc.slang.targetFlags = 0;
 
         List<const char*> requiredFeatureList;
         for (auto& name : options.renderFeatures)
@@ -1525,6 +1545,7 @@ int main(int argc, char**  argv)
     SlangResult res = innerMain(stdWriters, session, argc, argv);
     spDestroySession(session);
 
+    slang::shutdown();
 	return (int)TestToolUtil::getReturnCode(res);
 }
 

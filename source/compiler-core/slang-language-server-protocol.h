@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../../slang-com-helper.h"
-#include "../../slang-com-ptr.h"
-#include "../../slang.h"
+#include "slang-com-helper.h"
+#include "slang-com-ptr.h"
+#include "slang.h"
 
 #include "../../source/core/slang-rtti-info.h"
 #include "../../source/compiler-core/slang-json-value.h"
@@ -299,6 +299,12 @@ struct ServerCapabilities
     static const StructRttiInfo g_rttiInfo;
 };
 
+struct VSServerCapabilities : ServerCapabilities
+{
+    bool _vs_projectContextProvider = false;
+    static const StructRttiInfo g_rttiInfo;
+};
+
 struct WorkspaceFolder
 {
     String uri;
@@ -322,6 +328,14 @@ struct NullResponse
 struct InitializeResult
 {
     ServerCapabilities capabilities;
+    ServerInfo serverInfo;
+
+    static const StructRttiInfo g_rttiInfo;
+};
+
+struct VSInitializeResult
+{
+    VSServerCapabilities capabilities;
     ServerInfo serverInfo;
 
     static const StructRttiInfo g_rttiInfo;

@@ -53,7 +53,7 @@ struct Options
     Slang::String binDir;
 
     // only run test cases with names have one of these prefixes.
-    Slang::List<const char *> testPrefixes;
+    Slang::List<Slang::String> testPrefixes;
 
     // generate extra output (notably: command lines we run)
     bool shouldBeVerbose = false;
@@ -115,7 +115,7 @@ struct Options
     // Maximum number of test servers to run.
     int serverCount = 1;
 
-    bool emitSPIRVDirectly = false;
+    bool emitSPIRVDirectly = true;
 
     Slang::HashSet<Slang::String> expectedFailureList;
 

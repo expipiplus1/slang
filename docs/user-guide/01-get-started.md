@@ -1,5 +1,6 @@
 ---
 layout: user-guide
+permalink: /user-guide/get-started
 ---
 
 # Getting Started with Slang
@@ -32,9 +33,8 @@ void computeMain(uint3 threadId : SV_DispatchThreadID)
 ```
 
 > #### Note ####
-> Slang has official language extension support for Visual Studio Code. The extension is powered by the Slang compiler to support a wide range of
+> Slang has official language extension support for both [Visual Studio](https://marketplace.visualstudio.com/items?itemName=shader-slang.slang-vs-extension) and [Visual Studio Code](https://marketplace.visualstudio.com/items?itemName=shader-slang.slang-language-extension). The extensions are powered by the Slang compiler to support a wide range of
 > assisting features including auto-completion, function signature hinting, semantic highlighting and more.
-> Try it here: https://marketplace.visualstudio.com/items?itemName=shader-slang.slang-language-extension
 
 As you can see, `hello-world.slang` is no different from a normal HLSL shader file. In fact, Slang is compatible with most HLSL code you would write. On top of HLSL, Slang has added many new language and compiler features that simplifies various tasks with shader code, which we will cover in future chapters. For now we will demonstrate one key feature of Slang: cross-compiling to different platforms.
 
@@ -95,7 +95,7 @@ void main()
 
 As you can see, things are being translated just as expected to GLSL: the HLSL `StructuredBuffer` and `RWStructuredBuffer` types are mapped to shader storage objects and the `[numthreads]` attribute are translated into proper `layout(...) in` qualifier on the `main` entry-point.
 
-Note that in the generated GLSL code, all shader parameters are qualified with explicit binding layouts. This is because Slang provides a guarantee that all parameters will have fixed bindings regardless of shader optimization. Without generating explicit binding layout qualifiers, the downstream compiler in the driver may change the binding of a parameter depending on whether any preceding parameters are eliminated during optimization passes. In practice this causes a pain in application code, where developers will need to rely on run-time reflection to determine the binding location of a compiled shader kernel. The issue gets harder to manage when the application also needs to deal with shader specializations. Since Slang will always generate explicit binding locations in its output on all targets as if no parameters are eliminated, the user is assured that parameters always gets a deterministic binding location without having to write any manual binding qualifiers in the Slang code themselves. In fact, we strongly encourage users not to qualify their Slang code with explicit binding qualifiers and let the Slang compiler does its work to properly layout parameters. This is best practice to maintain code modularity and avoid potential binding location conflicts between different shader modules.
+Note that in the generated GLSL code, all shader parameters are qualified with explicit binding layouts. This is because Slang provides a guarantee that all parameters will have fixed bindings regardless of shader optimization. Without generating explicit binding layout qualifiers, the downstream compiler in the driver may change the binding of a parameter depending on whether any preceding parameters are eliminated during optimization passes. In practice this causes a pain in application code, where developers will need to rely on run-time reflection to determine the binding location of a compiled shader kernel. The issue gets harder to manage when the application also needs to deal with shader specializations. Since Slang will always generate explicit binding locations in its output on all targets as if no parameters are eliminated, the user is assured that parameters always gets a deterministic binding location without having to write any manual binding qualifiers in the Slang code themselves. In fact, we strongly encourage users not to qualify their Slang code with explicit binding qualifiers and let the Slang compiler do its work to properly lay out parameters. This is best practice to maintain code modularity and avoid potential binding location conflicts between different shader modules.
 
 ## The full example
 

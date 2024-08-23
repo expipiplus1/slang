@@ -19,7 +19,7 @@ public:
     Dictionary<IRInst*, DifferentiableLevel> differentiableFunctions;
 
     CheckDifferentiabilityPassContext(IRModule* inModule, DiagnosticSink* inSink)
-        : InstPassBase(inModule), sink(inSink), sharedContext(inModule->getModuleInst())
+        : InstPassBase(inModule), sink(inSink), sharedContext(nullptr, inModule->getModuleInst())
     {}
 
     bool _isFuncMarkedForAutoDiff(IRInst* func)
@@ -169,9 +169,7 @@ public:
             switch (addr->getOp())
             {
             case kIROp_Var:
-            case kIROp_GlobalVar:
             case kIROp_Param:
-            case kIROp_GlobalParam:
                 return isDifferentiableType(diffTypeContext, addr->getDataType());
             case kIROp_FieldAddress:
                 if (!as<IRFieldAddress>(addr)->getField() ||

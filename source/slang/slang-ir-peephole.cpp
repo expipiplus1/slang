@@ -3,6 +3,7 @@
 #include "slang-ir-sccp.h"
 #include "slang-ir-dominators.h"
 #include "slang-ir-util.h"
+#include "slang-ir-layout.h"
 
 namespace Slang
 {
@@ -10,11 +11,17 @@ struct PeepholeContext : InstPassBase
 {
     PeepholeContext(IRModule* inModule)
         : InstPassBase(inModule)
-    {}
+    {
+    }
 
     bool changed = false;
     FloatingPointMode floatingPointMode = FloatingPointMode::Precise;
     bool removeOldInst = true;
+    bool isInGeneric = false;
+    bool isPrelinking = false;
+    bool useFastAnalysis = false;
+
+    TargetProgram* targetProgram;
 
     void maybeRemoveOldInst(IRInst* inst)
     {
@@ -245,6 +252,45 @@ struct PeepholeContext : InstPassBase
 
         switch (inst->getOp())
         {
+        case kIROp_AlignOf:
+        case kIROp_SizeOf:
+            {
+                if (!targetProgram)
+                    break;
+
+                // Save the alignment information and exit early if it is invalid
+                IRSizeAndAlignment sizeAlignment;
+                IRType* baseType = nullptr;
+                if (auto t = as<IRType>(inst->getOperand(0)))
+                    baseType = t;
+                else
+                    baseType = inst->getOperand(0)->getDataType();
+
+                if (SLANG_FAILED(getNaturalSizeAndAlignment(targetProgram->getOptionSet(), baseType, &sizeAlignment)))
+                    break;
+                if (sizeAlignment.size == 0)
+                    break;
+
+                IRBuilder builder(module);
+                builder.setInsertBefore(inst);
+                IRInst* resultVal = nullptr;
+                if (inst->getOp() == kIROp_AlignOf)
+                    resultVal = builder.getIntValue(inst->getDataType(), sizeAlignment.alignment);
+                else
+                    resultVal = builder.getIntValue(inst->getDataType(), sizeAlignment.size);
+                inst->replaceUsesWith(resultVal);
+                maybeRemoveOldInst(inst);
+                changed = true;
+            }
+            break;
+        case kIROp_GetArrayLength:
+            if (auto arrayType = as<IRArrayType>(inst->getOperand(0)->getDataType()))
+            {
+                inst->replaceUsesWith(arrayType->getElementCount());
+                maybeRemoveOldInst(inst);
+                changed = true;
+            }
+            break;
         case kIROp_GetResultError:
             if (inst->getOperand(0)->getOp() == kIROp_MakeResultError)
             {
@@ -278,7 +324,11 @@ struct PeepholeContext : InstPassBase
             }
             break;
         case kIROp_GetTupleElement:
-            if (inst->getOperand(0)->getOp() == kIROp_MakeTuple)
+            switch (inst->getOperand(0)->getOp())
+            {
+            case kIROp_MakeTuple:
+            case kIROp_MakeValuePack:
+            case kIROp_MakeWitnessPack:
             {
                 auto element = inst->getOperand(1);
                 if (auto intLit = as<IRIntLit>(element))
@@ -287,6 +337,10 @@ struct PeepholeContext : InstPassBase
                     maybeRemoveOldInst(inst);
                     changed = true;
                 }
+                break;
+            }
+            default:
+                break;
             }
             break;
         case kIROp_FieldExtract:
@@ -577,7 +631,7 @@ struct PeepholeContext : InstPassBase
                 auto ptr = inst->getOperand(0);
                 IRBuilder builder(module);
                 builder.setInsertBefore(inst);
-                auto neq = builder.emitNeq(ptr, builder.getNullVoidPtrValue());
+                auto neq = builder.emitNeq(ptr, builder.getNullPtrValue(ptr->getDataType()));
                 inst->replaceUsesWith(neq);
                 maybeRemoveOldInst(inst);
                 changed = true;
@@ -691,6 +745,13 @@ struct PeepholeContext : InstPassBase
             {
                 if (inst->getOperand(0)->getOp() == kIROp_WitnessTable)
                 {
+                    // Don't fold witness lookups prelinking if the witness table is `extern`.
+                    // These witness tables provides `default`s in case they are not
+                    // explicitly specialized via other linked modules, therefore we don't want
+                    // to resolve them too soon before linking.
+                    if (isPrelinking && inst->getOperand(0)->findDecoration<IRUserExternDecoration>())
+                        break;
+
                     auto wt = as<IRWitnessTable>(inst->getOperand(0));
                     auto key = inst->getOperand(1);
                     for (auto item : wt->getChildren())
@@ -855,7 +916,7 @@ struct PeepholeContext : InstPassBase
                             // Never remove param inst.
                             changed = true;
                         }
-                        else
+                        else if (!useFastAnalysis)
                         {
                             // If argValue is defined locally,
                             // we can replace only if argVal dominates inst.
@@ -946,8 +1007,15 @@ struct PeepholeContext : InstPassBase
             }
         case kIROp_TypeEquals:
             {
-                auto left = inst->getOperand(0)->getDataType();
-                auto right = inst->getOperand(1)->getDataType();
+                auto getTypeFromOperand = [](IRInst* operand) -> IRType*
+                {
+                    if (as<IRTypeType>(operand->getFullType()) || !operand->getFullType() ||
+                        as<IRTypeKind>(operand->getFullType()))
+                        return (IRType*)operand;
+                    return operand->getFullType();
+                };
+                auto left = getTypeFromOperand(inst->getOperand(0));
+                auto right = getTypeFromOperand(inst->getOperand(1));
                 if (isConcreteType(left) && isConcreteType(right))
                 {
                     IRBuilder builder(module);
@@ -959,8 +1027,27 @@ struct PeepholeContext : InstPassBase
                 }
                 break;
             }
+        case kIROp_GetNaturalStride:
+        {
+            if (targetProgram)
+            {
+                if (isInGeneric)
+                    break;
+                auto type = inst->getOperand(0)->getDataType();
+                IRSizeAndAlignment sizeAlignment;
+                getNaturalSizeAndAlignment(targetProgram->getOptionSet(), type, &sizeAlignment);
+                IRBuilder builder(module);
+                builder.setInsertBefore(inst);
+                auto stride = builder.getIntValue(inst->getDataType(), sizeAlignment.getStride());
+                inst->replaceUsesWith(stride);
+                maybeRemoveOldInst(inst);
+                changed = true;
+            }
+            break;
+        }
         case kIROp_IsInt:
         case kIROp_IsFloat:
+        case kIROp_IsHalf:
         case kIROp_IsUnsignedInt:
         case kIROp_IsSignedInt:
         case kIROp_IsBool:
@@ -987,6 +1074,9 @@ struct PeepholeContext : InstPassBase
                     case kIROp_IsFloat:
                         result = isFloatingType(type);
                         break;
+                    case kIROp_IsHalf:
+                        result = type->getOp() == kIROp_HalfType;
+                        break;
                     case kIROp_IsUnsignedInt:
                         result = isIntegralType(type) && !getIntTypeInfo(type).isSigned;
                         break;
@@ -998,6 +1088,40 @@ struct PeepholeContext : InstPassBase
                         break;
                     }
                     inst->replaceUsesWith(builder.getBoolValue(result));
+                    maybeRemoveOldInst(inst);
+                    changed = true;
+                }
+                break;
+            }
+        case kIROp_Load:
+            {
+                // Load from undef is undef.
+                if (as<IRLoad>(inst)->getPtr()->getOp() == kIROp_undefined)
+                {
+                    IRBuilder builder(module);
+                    builder.setInsertBefore(inst);
+                    auto undef = builder.emitUndefined(inst->getDataType());
+                    inst->replaceUsesWith(undef);
+                    maybeRemoveOldInst(inst);
+                    changed = true;
+                }
+                break;
+            }
+        case kIROp_Store:
+            {
+                // Store undef is no-op.
+                if (as<IRStore>(inst)->getVal()->getOp() == kIROp_undefined)
+                {
+                    maybeRemoveOldInst(inst);
+                    changed = true;
+                }
+                break;
+            }
+        case kIROp_DebugValue:
+            {
+                // Update debug value with undef is no-op.
+                if (as<IRDebugValue>(inst)->getValue()->getOp() == kIROp_undefined)
+                {
                     maybeRemoveOldInst(inst);
                     changed = true;
                 }
@@ -1015,7 +1139,12 @@ struct PeepholeContext : InstPassBase
 
     bool processFunc(IRInst* func)
     {
-        func->getModule()->invalidateAllAnalysis();
+        if (!useFastAnalysis)
+            func->getModule()->invalidateAllAnalysis();
+
+        bool lastIsInGeneric = isInGeneric;
+        if (!isInGeneric)
+            isInGeneric = as<IRGeneric>(func) != nullptr;
 
         bool result = false;
         for (;;)
@@ -1027,6 +1156,9 @@ struct PeepholeContext : InstPassBase
             else
                 break;
         }
+
+        isInGeneric = lastIsInGeneric;
+
         return result;
     }
 
@@ -1036,21 +1168,41 @@ struct PeepholeContext : InstPassBase
     }
 };
 
-bool peepholeOptimize(IRModule* module)
+bool peepholeOptimize(TargetProgram* target, IRModule* module, PeepholeOptimizationOptions options)
 {
     PeepholeContext context = PeepholeContext(module);
+    context.targetProgram = target;
+    context.isPrelinking = options.isPrelinking;
+    context.useFastAnalysis = target
+        ? target->getOptionSet().getBoolOption(CompilerOptionName::MinimumSlangOptimization)
+        : true;
     return context.processModule();
 }
 
-bool peepholeOptimize(IRInst* func)
+bool peepholeOptimize(TargetProgram* target, IRInst* func)
 {
     PeepholeContext context = PeepholeContext(func->getModule());
+    context.targetProgram = target;
+    context.useFastAnalysis = target
+        ? target->getOptionSet().getBoolOption(CompilerOptionName::MinimumSlangOptimization)
+        : true;
     return context.processFunc(func);
 }
 
-bool peepholeOptimizeGlobalScope(IRModule* module)
+bool peepholeOptimizeInst(TargetProgram* target, IRModule* module, IRInst* inst)
 {
     PeepholeContext context = PeepholeContext(module);
+    context.targetProgram = target;
+    context.useFastAnalysis = true;
+    context.processInst(inst);
+    return context.changed;
+}
+
+bool peepholeOptimizeGlobalScope(TargetProgram* target, IRModule* module)
+{
+    PeepholeContext context = PeepholeContext(module);
+    context.targetProgram = target;
+    context.useFastAnalysis = true;
     bool result = false;
     for (;;)
     {
@@ -1064,13 +1216,15 @@ bool peepholeOptimizeGlobalScope(IRModule* module)
     return result;
 }
 
-bool tryReplaceInstUsesWithSimplifiedValue(IRModule* module, IRInst* inst)
+bool tryReplaceInstUsesWithSimplifiedValue(TargetProgram* target, IRModule* module, IRInst* inst)
 {
     if (inst != tryConstantFoldInst(module, inst))
         return true;
 
     PeepholeContext context = PeepholeContext(inst->getModule());
+    context.targetProgram = target;
     context.removeOldInst = false;
+    context.useFastAnalysis = true;
     context.processInst(inst);
     return context.changed;
 }

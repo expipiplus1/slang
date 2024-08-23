@@ -118,6 +118,27 @@ public:
         return dispatchIfNotNull(subscriptExpr->baseExpression);
     }
 
+    bool visitSizeOfLikeExpr(SizeOfLikeExpr* expr)
+    {
+        int tokenLength = 0;
+        if (as<CountOfExpr>(expr))
+            tokenLength = 7; // strlen("countof");
+        else if (as<SizeOfExpr>(expr))
+            tokenLength = 6; // strlen("sizeof");
+        else if (as<AlignOfExpr>(expr))
+            tokenLength = 7; // strlen("alignof");
+
+        if (_isLocInRange(context, expr->loc, tokenLength))
+        {
+            ASTLookupResult result;
+            result.path = context->nodePath;
+            result.path.add(expr);
+            context->results.add(result);
+            return true;
+        }
+        return dispatchIfNotNull(expr->value);
+    }
+
     bool visitParenExpr(ParenExpr* expr)
     {
         return dispatchIfNotNull(expr->base);
@@ -187,7 +208,7 @@ public:
                 declLength = _getDeclNameLength(expr->name, expr->declRef.getDecl());
             }
             if (_isLocInRange(
-                    context, expr->loc, declLength))
+                context, expr->loc, declLength))
             {
                 ASTLookupResult result;
                 result.path = context->nodePath;
@@ -196,7 +217,7 @@ public:
                 return true;
             }
         }
-        
+
         return dispatchIfNotNull(expr->originalExpr);
     }
 
@@ -225,7 +246,10 @@ public:
     }
     bool visitSwizzleExpr(SwizzleExpr* expr)
     {
-        if (_isLocInRange(context, expr->memberOpLoc, 0))
+        Index tokenLength = expr->elementIndices.getCount();
+        if (expr->base && as<TupleType>(expr->base->type))
+            tokenLength *= 2;
+        if (_isLocInRange(context, expr->loc, tokenLength))
         {
             ASTLookupResult result;
             result.path = context->nodePath;
@@ -240,6 +264,11 @@ public:
         {
             PushNode pushNode(context, expr);
             if (dispatchIfNotNull(expr->base))
+                return true;
+        }
+        {
+            PushNode pushNode(context, expr);
+            if (dispatchIfNotNull(expr->originalExpr))
                 return true;
         }
         if (expr->lookupResult2.getName() &&
@@ -353,6 +382,11 @@ public:
         return dispatchIfNotNull(expr->baseExpression);
     }
 
+    bool visitOpenRefExpr(OpenRefExpr* expr)
+    {
+        return dispatchIfNotNull(expr->innerExpr);
+    }
+
     bool visitInitializerListExpr(InitializerListExpr* expr)
     {
         for (auto arg : expr->args)
@@ -451,7 +485,16 @@ public:
         return false;
     }
     bool visitTryExpr(TryExpr* expr) { return dispatchIfNotNull(expr->base); }
-    bool visitHigherOrderInvokeExpr(HigherOrderInvokeExpr* expr)
+    bool visitPackExpr(PackExpr* expr)
+    {
+        for (auto arg : expr->args)
+        {
+            if(dispatchIfNotNull(arg))
+                return true;
+        }
+        return false;
+    }
+    bool reportLookupResultIfInExprLeadingIdentifierRange(Expr* expr)
     {
         auto humaneLoc = context->sourceManager->getHumaneLoc(expr->loc, SourceLocType::Actual);
         auto tokenLen = context->doc->getTokenLength(humaneLoc.line, humaneLoc.column);
@@ -463,6 +506,24 @@ public:
             context->results.add(result);
             return true;
         }
+        return false;
+    }
+    bool visitExpandExpr(ExpandExpr* expr)
+    {
+        if (reportLookupResultIfInExprLeadingIdentifierRange(expr))
+            return true;
+        return dispatchIfNotNull(expr->baseExpr);
+    }
+    bool visitEachExpr(EachExpr* expr)
+    {
+        if (reportLookupResultIfInExprLeadingIdentifierRange(expr))
+            return true;
+        return dispatchIfNotNull(expr->baseExpr);
+    }
+    bool visitHigherOrderInvokeExpr(HigherOrderInvokeExpr* expr)
+    {
+        if (reportLookupResultIfInExprLeadingIdentifierRange(expr))
+            return true;
         return dispatchIfNotNull(expr->baseFunction);
     }
     bool visitTreatAsDifferentiableExpr(TreatAsDifferentiableExpr* expr)
@@ -669,6 +730,12 @@ bool _findAstNodeImpl(ASTLookupContext& context, SyntaxNode* node)
             if (visitor.dispatchIfNotNull(extDecl->targetType.exp))
                 return true;
         }
+        else if (auto usingDecl = as<UsingDecl>(node))
+        {
+            ASTLookupExprVisitor visitor(&context);
+            if (visitor.dispatchIfNotNull(usingDecl->arg))
+                return true;
+        }
         else if (auto importDecl = as<FileReferenceDeclBase>(node))
         {
             if (_isLocInRange(&context, importDecl->startLoc, importDecl->endLoc))
@@ -735,6 +802,12 @@ bool _findAstNodeImpl(ASTLookupContext& context, SyntaxNode* node)
                     if (_findAstNodeImpl(context, member))
                         return true;
                 }
+            }
+            if (auto aggTypeDecl = as<AggTypeDecl>(container))
+            {
+                ASTLookupExprVisitor visitor(&context);
+                if (visitor.dispatchIfNotNull(aggTypeDecl->wrappedType.exp))
+                    return true;
             }
         }
     }

@@ -1,5 +1,6 @@
 ---
 layout: user-guide
+permalink: /user-guide/conventional-features
 ---
 
 Conventional Language Features
@@ -17,8 +18,7 @@ Types
 Slang supports conventional shading language types including scalars, vectors, matrices, arrays, structures, enumerations, and resources.
 
 > #### Note ####
-> Slang does not currently support pointer types as in C/C++.
-> Pointers cannot be implemented robustly and completely on many of the target platforms Slang currently supports.
+> Slang has limited support for pointers when targeting platforms with native pointer support, including SPIRV, C++, and CUDA.
 
 ### Scalar Types
 
@@ -54,7 +54,19 @@ All targets support the 32-bit `float`, but support for the other types depends 
 
 ### Boolean Type
 
-The type `bool` is used to represent Boolean truth value: `true` and `false`.
+The type `bool` is used to represent Boolean truth value: `true` and `false`. 
+
+For compatibility reasons, the `sizeof(bool)` depends on the target. 
+
+| Target |      sizeof(bool)      |
+|--------| ---------------------- |
+| GLSL   | 4 bytes / 32-bit value |
+| HLSL   | 4 bytes / 32-bit value |
+| CUDA   | 1 bytes /  8-bit value |
+
+> #### Note ####
+> When storing bool types in structures, make sure to either pad host-side data structures accordingly, or store booleans as, eg, `uint8_t`, to guarantee
+> consistency with the host language's boolean type.
 
 #### The Void Type
 
@@ -99,12 +111,52 @@ In some cases the element count is then inferred from the initial value of a var
 int a[] = { 1, 2, 3 };
 ```
 
-In other cases, the result is a _runtime-sized_ array, where the actual element count will be determined later:
+In other cases, the result is a _unsized_ array, where the actual element count will be determined later:
 
 ```hlsl
 // the type of `b` is `int[]`
 void f( int b[] )
 { ... }
+```
+
+It is allowed to pass a sized array as argument to an unsized array parameter when calling a function.
+
+Array types has a `getCount()` memeber function that returns the length of the array.
+
+```hlsl
+int f( int b[] )
+{
+    return b.getCount(); // Note: all arguments to `b` must be resolvable to sized arrays.
+}
+
+void test()
+{
+    int arr[3] = { 1, 2, 3 };
+    int x = f(arr); // OK, passing sized array to unsized array parameter, x will be 3.
+}
+```
+
+Please note that if a function calls `getCount()` method on an unsized array parameter, then all
+calls to that function must provide a sized array argument, otherwise the compiler will not be able
+to resolve the size and will report an error. The following code shows an example of valid and
+invalid cases.
+
+```hlsl
+int f( int b[] )
+{
+    return b.getCount();
+}
+int g( int b[] )
+{
+    return f(b); // transitive calls are allowed.
+}
+uniform int unsizedParam[];
+void test()
+{
+    g(unsizedParam); // Not OK, `unsizedParam` doesn't have a known size at compile time.
+    int arr[3];
+    g(arr); // OK.
+}
 ```
 
 There are more limits on how runtime-sized arrays can be used than on arrays of statically-known element count.
@@ -132,6 +184,28 @@ struct MyData
 > #### Note ####
 > Slang allows for a trailing semicolon (`;`) on `struct` declarations, but does not require it.
 
+> #### Note ####
+> Unlike C/C++, `class` is not a valid keyword for GPU code and it is reserved for CPU/host side logic.
+
+Structure types can have constructors. Constructors are defined with the `__init` keyword:
+
+```hlsl
+struct MyData
+{
+     int a;
+     __init() { a = 5; }
+     __init(int t) { a = t; }
+}
+void test()
+{
+     MyData d;  // invokes default constructor, d.a = 5
+     MyData h = MyData(4); // invokes overloaded constructor, h.a = 4
+}
+```
+
+> #### Note ####
+> Slang currently does not allow default values on struct members, but we intend to support them in the future.
+
 ### Enumeration Types
 
 Enumeration types can be introduced with the `enum` keyword to provide type-safe constants for a range of values:
@@ -145,8 +219,59 @@ enum Channel
 }
 ```
 
-> #### Note ####
-> Unlike C/C++, `enum` types in Slang are always scoped (like `enum class` in C++). You can write `enum class` in Slang if it makes you happy, but it isn't required.
+Unlike C/C++, `enum` types in Slang are always scoped by default (like `enum class` in C++). You can write `enum class` in Slang if it makes you happy, but it isn't required. If you want a `enum` type to be unscoped, you can use the `[UnscopedEnum]` attribute:
+```csharp
+[UnscopedEnum]
+enum Channel
+{
+    Red, Green, Blue
+}
+void test(Channel c)
+{
+    if (c == Red) { /*...*/ }
+}
+```
+
+You can specify an explicit underlying integer type for `enum` types:
+```csharp
+enum Channel : uint16_t
+{
+    Red, Green, Blue
+}
+```
+
+By default, the underlying type of an enumeration type is `int`. Enumeration types are implicitly convertible to their underlying type. All enumeration types conform to the builtin `ILogical` interface, which provides operator overloads for bit operations. The following code is allowed:
+
+```csharp
+void test()
+{
+    Channel c = Channel.Red | Channel.Green;
+}
+```
+
+You can explicitly assign values to each enum case:
+```csharp
+enum Channel
+{
+    Red = 5,
+    Green,   // = 6
+    Blue     // = 7
+}
+```
+Slang automatically assigns integer values to enum cases without an explicit value. By default, the value starts from 0 and is increment by 1 for each
+enum case.
+
+You can override the implicit value assignment behavior with the `[Flags]` attribute, which will make value assignment start from 1 and increment by power of 2, making it suitable for enums that represent bit flags. For example:
+```csharp
+[Flags]
+enum Channel
+{
+    Red,   //  = 1
+    Green, //  = 2
+    Blue,  //  = 4
+    Alpha, //  = 8
+}
+```
 
 ### Opaque Types
 
@@ -161,7 +286,7 @@ Opaque types (and structure or array types that contain them) may be limited in 
 
 #### Texture Types
 
-Texture types -- including `Texure2D`, `TextureCubeArray`, `RWTexture2D`, and more -- are used to access formatted data for read, write, and sampling operations.
+Texture types -- including `Texture2D`, `TextureCubeArray`, `RWTexture2D`, and more -- are used to access formatted data for read, write, and sampling operations.
 Textures can be used to represent simple images, but also support _mipmapping_ as a way to reduce noise when sampling at lower than full resolution.
 The full space of texture types follows the formula:
 
@@ -171,7 +296,7 @@ where:
 
 * The _access_ can be read-only (no prefix), read-write (`RW`), or read-write with a guarantee of rasterization order for operations on the given resource (`RasterizerOrdered`).
 * The _base shape_ can be `1D`, `2D`, `3D`, or `Cube`.
-* The _multisample-ness_ can non-multiple-sample, or multi-sampled (`MS`).
+* The _multisample-ness_ can be non-multiple-sample, or multi-sampled (`MS`).
 * The _array-ness_  can either be non-arrayed, or arrayed (`Array`).
 * The _element type_ can either be explicitly specified (`<T>`) or left as the default of `float4`
 
@@ -246,7 +371,7 @@ Slang supports the following expression forms with nearly identical syntax to HL
 > #### Note ####
 > Like HLSL but unlike most other C-family languages, the `&&` and `||` operators do *not* currently perform "short-circuiting". 
 > they evaluate all of their operands unconditionally.
-> However, the `?:` operator do perform short-circuiting if the condition is a scalar. Use of `?:` where the condition is a vector is deprecated in Slang. The vector version of `?:` operator does *not* perform short-circuiting, and the user is advised to call `select` instead.
+> However, the `?:` operator does perform short-circuiting if the condition is a scalar. Use of `?:` where the condition is a vector is deprecated in Slang. The vector version of `?:` operator does *not* perform short-circuiting, and the user is advised to call `select` instead.
 > The default behavior of these operators is likely to change in a future Slang release.
 
 Additional expression forms specific to shading languages follow.
@@ -329,6 +454,14 @@ float addSomeThings(int x, float y)
 }
 ```
 
+In addition to the traditional C syntax, you can use the modern syntax to define functions with the `func` keyword:
+```swift
+func addSomeThings(x : int, y : float) -> float
+{
+    return x + y;
+}
+```
+
 Slang supports overloading of functions based on parameter types.
 
 Function parameters may be marked with a _direction_ qualifier:
@@ -358,6 +491,11 @@ Slang supports a C-style preprocessor with the following directives;
 * `#pragma`, including `#pragma once`
 
 Variadic macros are supported by the Slang preprocessor.
+
+> #### Note ####
+> The use of `#include` in new code is discouraged as this functionality has
+> been superseded by the module system, please refer to
+> [./04-modules-and-access-control.md](./04-modules-and-access-control.md)
 
 Attributes
 ----------
@@ -484,7 +622,7 @@ A single parameter may use both the D3D-style and Vulkan-style markup, but in ea
 > #### Note ####
 > Explicit binding markup is tedious to write and error-prone to maintain.
 > It is almost never required in Slang codebases.
-> The Slang compiler can automatically synthesize bindings in a completely deterministic fashion and in most cases the bindings it generates are the as what a programmer would have written manually.
+> The Slang compiler can automatically synthesize bindings in a completely deterministic fashion and in most cases the bindings it generates are what a programmer would have written manually.
 
 Shader Entry Points
 -------------------
@@ -550,7 +688,7 @@ Some system-defined binding semantics may only be available on specific targets 
 
 > #### Note ####
 > Instead of using ordinary function parameters with system-defined binding semantics, GLSL uses special system-defined global variables with the `gl_` name prefix.
-> Some recent HLSL features has introduced special globally-defined functions that behave similarly to these `gl_` globals.
+> Some recent HLSL features have introduced special globally-defined functions that behave similarly to these `gl_` globals.
 
 #### User-Defined Binding Semantics
 
@@ -581,3 +719,76 @@ Entry-point uniform parameters are semantically similar to global-scope shader p
 > #### Note ####
 > GLSL does not support entry-point `uniform` parameters; all shader parameters must be declared at the global scope.
 > Historically, HLSL has supported entry-point `uniform` parameters, but this feature was dropped by recent compilers.
+
+Mixed Shader Entry Points
+--------------------------
+
+Through the `[shader(...)]` syntax, users of slang can freely combine multiple entry points into the same file. This can be especially convenient for reuse between entry points which have a logical connection.
+
+For example, mixed entry points offer a convenient way for ray tracing applications to concisely define a complete pipeline in one source file, while also providing users with additional opportunities to improve type safety of 
+shared structure definitions:
+
+```hlsl
+struct Payload { float3 color; };
+
+[shader("raygeneration")]
+void rayGenerationProgram() {
+    Payload payload;
+    TraceRay(/*...*/, payload);
+    /* ... */ 
+}
+
+[shader("closesthit")]
+void closestHitProgram(out Payload payload) { 
+    payload.color = {1.0};
+}
+
+[shader("miss")]
+void missProgram(out Payload payload) { 
+    payload.color = {1.0};
+}
+```
+
+> #### Note ####
+> GLSL does not support multiple entry-points; however, SPIR-V does. Vulkan users wanting to take advantage of Slang mixed entry points must pass `-fvk-use-entrypoint-name` and `-emit-spirv-directly` as compiler arguments.
+
+### Mixed Entry-Point Uniform Parameters
+
+Like with the previous `vertexMain` example, mixed entry point setups also support _entry-point uniform parameters_.
+
+However, because of certain systematic differences between entry point types, a uniform being _global_ or _local_ will have very important consequences on the underlying layout and behavior.
+
+For most all entry point types, D3D12 will use one common root signature to define both global and local uniform parameters. 
+Likewise, Vulkan descriptors will bind to a common pipeline layout. For both of these cases, Slang maps uniforms to the common root signature / pipeline layout. 
+
+However, for ray tracing entry points and D3D12, these parameters map to either _global_ root signatures or to _local_ root signatures, with the latter being stored in the shader binding table.
+In Vulkan, D3D12's global root signatures translate to a shared ray tracing pipeline layout, while local root signatures map again to shader binding table records. 
+
+When entry points match a "ray tracing" type, we bind uniforms which are in the _global_ scope to the _global_ root signature (or ray tracing pipeline layout), while uniforms which are _local_ are bound to shader binding table records, which depend on the underlying runtime record indexing. 
+
+Consider the following:
+
+```hlsl
+uniform float3 globalUniform;
+
+[shader("compute")][numThreads(1,2,3)]
+void computeMain1(uniform float3 localUniform1) 
+{ /* ... */ }
+
+[shader("compute")][numThreads(1,2,3)]
+void computeMain2(uniform float3 localUniform2) 
+{ /* ... */ }
+
+[shader("raygeneration")]
+void rayGenerationMain(uniform float3 localUniform3) 
+{ /* ... */ }
+
+[shader("closesthit")]
+void closestHitMain(uniform float3 localUniform4) 
+{ /* ... */ }
+```
+
+In this example, `globalUniform` is appended to the global root signature / pipeline layouts for _both_ compute _and_ ray generation stages for all four entry points. 
+Compute entry points lack "local root signatures" in D3D12, and likewise Vulkan has no concept of "local" vs "global" compute pipeline layouts, so `localUniform1` is "pushed" to the stack of reserved global uniform parameters for use in `computeMain1`. 
+Leaving that entry point scope "pops" that global uniform parameter such that `localUniform2` can reuse the same binding location for `computeMain2`.
+However, local uniforms for ray tracing shaders map to the corresponding "local" hit records in the shader binding table, and so no "push" or "pop" to the global root signature / pipeline layouts occurs for these parameters. 

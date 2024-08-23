@@ -222,7 +222,12 @@ namespace Slang
         {
             return kConversionCost_IntegerToFloatConversion;
         }
-
+        else if (toInfo.conversionKind == kBaseTypeConversionKind_Float
+            && toInfo.conversionRank >= kBaseTypeConversionRank_Int16
+            && fromInfo.conversionRank >= kBaseTypeConversionRank_Int8)
+        {
+            return kConversionCost_IntegerToHalfConversion;
+        }
         // All other cases are considered as "general" conversions,
         // where we don't consider any one conversion better than
         // any others.
@@ -257,12 +262,14 @@ namespace Slang
 
     struct IntrinsicOpInfo { IROp opCode; char const* funcName; char const* opName; char const* interface; unsigned flags; };
 
+    [[maybe_unused]]
     static const IntrinsicOpInfo intrinsicUnaryOps[] = {
         { kIROp_Neg,    "neg",              "-",    "__BuiltinArithmeticType",  ARITHMETIC_MASK },
         { kIROp_Not,    "logicalNot",       "!",    nullptr,                    BOOL_MASK | BOOL_RESULT },
         { kIROp_BitNot, "not",              "~",    "__BuiltinLogicalType",     INT_MASK        },
     };
 
+    [[maybe_unused]]
     static const IntrinsicOpInfo intrinsicBinaryOps[] = {
         {kIROp_Add, "add", "+", "__BuiltinArithmeticType", ARITHMETIC_MASK},
         {kIROp_Sub, "sub", "-", "__BuiltinArithmeticType", ARITHMETIC_MASK},
@@ -284,6 +291,7 @@ namespace Slang
     };
 
     // Integer types that can be used in atomic operations in CUDA.
+    [[maybe_unused]]
     static const char* kCudaAtomicIntegerTypes[] = { "int", "uint", "uint64_t", "int64_t" };
 
     // Both the following functions use these macros.
@@ -315,7 +323,6 @@ namespace Slang
             const String path = getStdlibPath();
             StringBuilder sb;
             #include "hlsl.meta.slang.h"
-            File::writeAllText("d:\\stdlib1.txt", sb.toString());
             hlslLibraryCode = StringBlob::moveCreate(sb);
         }
 #endif
@@ -342,7 +349,7 @@ namespace Slang
         {
             const String path = getStdlibPath();
             StringBuilder sb;
-#include "glsl.meta.slang.h"
+            #include "glsl.meta.slang.h"
             glslLibraryCode = StringBlob::moveCreate(sb);
         }
         return glslLibraryCode;

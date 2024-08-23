@@ -11,9 +11,11 @@
 *.slang-module
 *.zip
 *.ini
+*.DS_store
 .clang-format
 .gdb_history
 .vimspector
+.vimspector.json
 
 bin/
 intermediate/
@@ -51,6 +53,7 @@ tools/gfx-unit-test/test-tmp-*
 
 # Intermediate source files generated during build process
 /source/slang/slang-generated-*.h
+/source/slang/slang-lookup-*.cpp
 /source/slang/*.meta.slang.h
 prelude/*.h.cpp
 /source/slang/cpp.hint
@@ -80,5 +83,6 @@ build/**/*.log
 
 .cache
 vkd3d-proton.cache
+vkd3d-proton.cache.write
 *_d3d11.log
 *_dxgi.log

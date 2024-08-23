@@ -498,9 +498,22 @@ InstPair ForwardDiffTranscriber::transcribeMakeStruct(IRBuilder* builder, IRInst
             {
                 auto operandDataType = origMakeStruct->getOperand(ii)->getDataType();
                 auto diffOperandType = differentiateType(builder, operandDataType);
-                SLANG_RELEASE_ASSERT(diffOperandType);
-                operandDataType = (IRType*)findOrTranscribePrimalInst(builder, operandDataType);
-                diffOperands.add(getDifferentialZeroOfType(builder, operandDataType));
+
+                if (diffOperandType)
+                {
+                    operandDataType = (IRType*)findOrTranscribePrimalInst(builder, operandDataType);
+                    diffOperands.add(getDifferentialZeroOfType(builder, operandDataType));
+                }
+                else
+                {
+                    // This case is only hit if the field is of a differentiable type but the operand is of
+                    // a non-differentiable type. This can happen if the operand is wrapped in no_diff.
+                    // In this case, we use the derivative of the field type to synthesize the 0.
+                    // 
+                    auto diffFieldOperandType = differentiateType(builder, field->getFieldType());
+                    SLANG_RELEASE_ASSERT(diffFieldOperandType);
+                    diffOperands.add(getDifferentialZeroOfType(builder, (IRType*)diffFieldOperandType));
+                }
             }
             ii++;
         }
@@ -1642,7 +1655,9 @@ SlangResult ForwardDiffTranscriber::prepareFuncForForwardDiff(IRFunc* func)
     if (SLANG_SUCCEEDED(result))
     {
         disableIRValidationAtInsert();
-        simplifyFunc(func, IRSimplificationOptions::getDefault());
+        auto simplifyOptions = IRSimplificationOptions::getDefault(nullptr);
+        simplifyOptions.removeRedundancy = true;
+        simplifyFunc(autoDiffSharedContext->targetProgram, func, simplifyOptions);
         enableIRValidationAtInsert();
     }
     return result;
@@ -1895,7 +1910,9 @@ InstPair ForwardDiffTranscriber::transcribeInstImpl(IRBuilder* builder, IRInst* 
     case kIROp_RWStructuredBufferLoadStatus:
     case kIROp_RWStructuredBufferStore:
     case kIROp_RWStructuredBufferGetElementPtr:
+    case kIROp_NonUniformResourceIndex:
     case kIROp_IsType:
+    case kIROp_StaticAssert:
     case kIROp_ImageSubscript:
     case kIROp_ImageLoad:
     case kIROp_ImageStore:
@@ -1906,6 +1923,30 @@ InstPair ForwardDiffTranscriber::transcribeInstImpl(IRBuilder* builder, IRInst* 
     case kIROp_DetachDerivative:
     case kIROp_GetSequentialID:
     case kIROp_GetStringHash:
+    case kIROp_SPIRVAsm:
+    case kIROp_SPIRVAsmOperandLiteral:
+    case kIROp_SPIRVAsmOperandInst:
+    case kIROp_SPIRVAsmOperandRayPayloadFromLocation:
+    case kIROp_SPIRVAsmOperandRayAttributeFromLocation:
+    case kIROp_SPIRVAsmOperandRayCallableFromLocation:
+    case kIROp_SPIRVAsmOperandEnum:
+    case kIROp_SPIRVAsmOperandBuiltinVar:
+    case kIROp_SPIRVAsmOperandGLSL450Set:
+    case kIROp_SPIRVAsmOperandDebugPrintfSet:
+    case kIROp_SPIRVAsmOperandConvertTexel:
+    case kIROp_SPIRVAsmOperandId:
+    case kIROp_SPIRVAsmOperandResult:
+    case kIROp_SPIRVAsmOperandTruncate:
+    case kIROp_SPIRVAsmOperandEntryPoint:
+    case kIROp_SPIRVAsmOperandSampledType:
+    case kIROp_SPIRVAsmOperandImageType:
+    case kIROp_SPIRVAsmOperandSampledImageType:
+    case kIROp_DebugLine:
+    case kIROp_DebugVar:
+    case kIROp_DebugValue:
+    case kIROp_GetArrayLength:
+    case kIROp_SizeOf:
+    case kIROp_AlignOf:
         return transcribeNonDiffInst(builder, origInst);
 
         // A call to createDynamicObject<T>(arbitraryData) cannot provide a diff value,

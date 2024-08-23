@@ -4,6 +4,7 @@
 #include "slang-ir.h"
 #include "slang-ir-insts.h"
 #include "slang-ir-dominators.h"
+#include "slang-ir-util.h"
 
 namespace Slang
 {
@@ -65,6 +66,7 @@ namespace Slang
         State state = kState_Initial;
 
         IRInst* prevChild = nullptr;
+        bool hasSeenTerminatorInst = false;
         for(auto child : parent->getDecorationsAndChildren() )
         {
             // We need to check the integrity of the parent/next/prev links of
@@ -104,7 +106,11 @@ namespace Slang
                 validate(context, !as<IRTerminatorInst>(child), child, "terminator must be last instruction in a block");
             }
 
-
+            if (as<IRTerminatorInst>(child))
+            {
+                validate(context, !hasSeenTerminatorInst, child, "block must not contain more than one terminator");
+                hasSeenTerminatorInst = true;
+            }
             prevChild = child;
         }
     }
@@ -144,13 +150,7 @@ namespace Slang
 
         auto operandParent = operandValue->getParent();
 
-        auto instParentBlock = as<IRBlock>(instParent);
-        if (!instParentBlock && as<IRDecoration>(inst))
-        {
-            instParent = instParent->getParent();
-            instParentBlock = as<IRBlock>(instParent);
-        }
-
+        auto instParentBlock = getBlock(inst);
         if (instParentBlock)
         {
             if (auto operandParentBlock = as<IRBlock>(operandParent))
@@ -383,7 +383,7 @@ namespace Slang
         CompileRequestBase*  compileRequest,
         IRModule*               module)
     {
-        if (!compileRequest->shouldValidateIR)
+        if (!compileRequest->getLinkage()->m_optionSet.getBoolOption(CompilerOptionName::ValidateIr))
             return;
 
         auto sink = compileRequest->getSink();

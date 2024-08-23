@@ -31,6 +31,7 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
     case RenderApiType::D3D12:  return gfx::DeviceType::DirectX12;
     case RenderApiType::OpenGl: return gfx::DeviceType::OpenGl;
     case RenderApiType::Vulkan: return gfx::DeviceType::Vulkan;
+    case RenderApiType::Metal:  return gfx::DeviceType::Metal;
     case RenderApiType::CPU:    return gfx::DeviceType::CPU;
     case RenderApiType::CUDA:   return gfx::DeviceType::CUDA;
     default:
@@ -62,7 +63,6 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
     {
         args.setArgs(argv, argc);
     }
-
     SLANG_RETURN_ON_FAIL(outOptions.downstreamArgs.stripDownstreamArgs(args, 0, &sink));
 
     CommandLineReader reader(&args, &sink);
@@ -222,6 +222,18 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
             // Note: We ignore this option because it is always enabled now.
             //
             // TODO: At some point we could warn/error and deprecate this option.
+        }
+        else if (argValue == "-g0")
+        {
+            outOptions.disableDebugInfo = true;
+        }
+        else if (argValue == "-allow-glsl")
+        {
+            outOptions.allowGLSL = true;
+        }
+        else if (argValue == "-entry")
+        {
+            SLANG_RETURN_ON_FAIL(reader.expectArg(outOptions.entryPointName));
         }
         else
         {

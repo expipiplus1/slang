@@ -236,67 +236,73 @@ namespace Slang
         DiagnosticSink*         sink)
     {
         auto translationUnitSyntax = translationUnit->getModuleDecl();
-
-        // We will look up any global-scope declarations in the translation
-        // unit that match the name of our entry point.
-        Decl* firstDeclWithName = nullptr;
-        if (!translationUnitSyntax->getMemberDictionary().tryGetValue(name, firstDeclWithName))
-        {
-            // If there doesn't appear to be any such declaration, then we are done.
-
-            sink->diagnose(translationUnitSyntax, Diagnostics::entryPointFunctionNotFound, name);
-
-            return nullptr;
-        }
-
-        // We found at least one global-scope declaration with the right name,
-        // but (1) it might not be a function, and (2) there might be
-        // more than one function.
-        //
-        // We'll walk the linked list of declarations with the same name,
-        // to see what we find. Along the way we'll keep track of the
-        // first function declaration we find, if any:
         FuncDecl* entryPointFuncDecl = nullptr;
-        for (auto ee = firstDeclWithName; ee; ee = ee->nextInContainerWithSameName)
+
+        for (auto globalScope = translationUnit->getModuleDecl()->ownedScope; globalScope; globalScope = globalScope->nextSibling)
         {
-            // Is this declaration a function?
-            if (auto funcDecl = as<FuncDecl>(ee))
+            if (globalScope->containerDecl != translationUnitSyntax && globalScope->containerDecl->parentDecl != translationUnitSyntax)
+                continue; // Skip scopes that aren't part of the current module.
+
+            // We will look up any global-scope declarations in the translation
+            // unit that match the name of our entry point.
+            Decl* firstDeclWithName = nullptr;
+            if (!globalScope->containerDecl->getMemberDictionary().tryGetValue(name, firstDeclWithName))
             {
-                // Skip non-primary declarations, so that
-                // we don't give an error when an entry
-                // point is forward-declared.
-                if (!isPrimaryDecl(funcDecl))
-                    continue;
+                // If there doesn't appear to be any such declaration, then we are done with this scope.
+                continue;
+            }
 
-                // is this the first one we've seen?
-                if (!entryPointFuncDecl)
+            // We found at least one global-scope declaration with the right name,
+            // but (1) it might not be a function, and (2) there might be
+            // more than one function.
+            //
+            // We'll walk the linked list of declarations with the same name,
+            // to see what we find. Along the way we'll keep track of the
+            // first function declaration we find, if any:
+            for (auto ee = firstDeclWithName; ee; ee = ee->nextInContainerWithSameName)
+            {
+                // Is this declaration a function?
+                if (auto funcDecl = as<FuncDecl>(ee))
                 {
-                    // If so, this is a candidate to be
-                    // the entry point function.
-                    entryPointFuncDecl = funcDecl;
-                }
-                else
-                {
-                    // Uh-oh! We've already seen a function declaration with this
-                    // name before, so the whole thing is ambiguous. We need
-                    // to diagnose and bail out.
+                    // Skip non-primary declarations, so that
+                    // we don't give an error when an entry
+                    // point is forward-declared.
+                    if (!isPrimaryDecl(funcDecl))
+                        continue;
 
-                    sink->diagnose(translationUnitSyntax, Diagnostics::ambiguousEntryPoint, name);
-
-                    // List all of the declarations that the user *might* mean
-                    for (auto ff = firstDeclWithName; ff; ff = ff->nextInContainerWithSameName)
+                    // is this the first one we've seen?
+                    if (!entryPointFuncDecl)
                     {
-                        if (auto candidate = as<FuncDecl>(ff))
-                        {
-                            sink->diagnose(candidate, Diagnostics::entryPointCandidate, candidate->getName());
-                        }
+                        // If so, this is a candidate to be
+                        // the entry point function.
+                        entryPointFuncDecl = funcDecl;
                     }
+                    else
+                    {
+                        // Uh-oh! We've already seen a function declaration with this
+                        // name before, so the whole thing is ambiguous. We need
+                        // to diagnose and bail out.
 
-                    // Bail out.
-                    return nullptr;
+                        sink->diagnose(translationUnitSyntax, Diagnostics::ambiguousEntryPoint, name);
+
+                        // List all of the declarations that the user *might* mean
+                        for (auto ff = firstDeclWithName; ff; ff = ff->nextInContainerWithSameName)
+                        {
+                            if (auto candidate = as<FuncDecl>(ff))
+                            {
+                                sink->diagnose(candidate, Diagnostics::entryPointCandidate, candidate->getName());
+                            }
+                        }
+
+                        // Bail out.
+                        return nullptr;
+                    }
                 }
             }
         }
+
+        if (!entryPointFuncDecl)
+            sink->diagnose(translationUnitSyntax, Diagnostics::entryPointFunctionNotFound, name);
 
         return entryPointFuncDecl;
     }
@@ -306,20 +312,38 @@ namespace Slang
     {
         if (as<ResourceType>(type))
             return true;
+        if (as<SubpassInputType>(type))
+            return true;
         if (as<HLSLStructuredBufferTypeBase>(type))
             return true;
         if (as<UntypedBufferResourceType>(type))
             return true;
         if (as<UniformParameterGroupType>(type))
             return true;
+        if (as< GLSLShaderStorageBufferType>(type))
+            return true;
         if (as<SamplerStateType>(type))
             return true;
+        if (auto arrayType = as<ArrayExpressionType>(type))
+            return isUniformParameterType(arrayType->getElementType());
+        if (auto modType = as<ModifiedType>(type))
+            return isUniformParameterType(modType->getBase());
         return false;
     }
 
     bool isBuiltinParameterType(Type* type)
     {
-        return as<BuiltinType>(type) != nullptr;
+        if (!as<BuiltinType>(type))
+            return false;
+        if (as<BasicExpressionType>(type))
+            return false;
+        if (as<VectorExpressionType>(type))
+            return false;
+        if (as<MatrixExpressionType>(type))
+            return false;
+        if (auto arrayType = as<ArrayExpressionType>(type))
+            return isBuiltinParameterType(arrayType->getElementType());
+        return true;
     }
 
     bool doStructFieldsHaveSemanticImpl(Type* type, HashSet<Type*>& seenTypes)
@@ -331,18 +355,20 @@ namespace Slang
         if (!structDecl)
             return false;
         seenTypes.add(type);
+        bool hasFields = false;
         for (auto field : structDecl->getFields())
         {
+            hasFields = true;
             if (!field->findModifier<HLSLSemantic>())
             {
-                if (!seenTypes.contains(type))
+                if (!seenTypes.contains(field->getType()))
                 {
                     if (!doStructFieldsHaveSemanticImpl(field->getType(), seenTypes))
                         return false;
                 }
             }
         }
-        return true;
+        return hasFields;
     }
 
     bool doStructFieldsHaveSemantic(Type* type)
@@ -389,7 +415,6 @@ namespace Slang
 
         auto module = getModule(entryPointFuncDecl);
         auto linkage = module->getLinkage();
-
 
         // Every entry point needs to have a stage specified either via
         // command-line/API options, or via an explicit `[shader("...")]` attribute.
@@ -475,31 +500,136 @@ namespace Slang
             }
         }
 
+        bool canHaveVaryingInput = false;
+        switch (stage)
+        {
+        case Stage::Vertex:
+        case Stage::Fragment:
+        case Stage::Miss:
+        case Stage::AnyHit:
+        case Stage::ClosestHit:
+        case Stage::Callable:
+        case Stage::Geometry:
+        case Stage::Mesh:
+        case Stage::Hull:
+        case Stage::Domain:
+            canHaveVaryingInput = true;
+            break;
+        default:
+            break;
+        }
+
         for (const auto& param : entryPointFuncDecl->getParameters())
         {
             if (isUniformParameterType(param->getType()))
             {
                 // Automatically add `uniform` modifier to entry point parameters.
                 if (!param->hasModifier<HLSLUniformModifier>())
+                {
                     addModifier(param, getCurrentASTBuilder()->create<HLSLUniformModifier>());
+                    continue;
+                }
             }
-            else if (isBuiltinParameterType(param->getType()))
+
+            if (canHaveVaryingInput)
+                continue;
+
+            // If the stage doesn't allow varying input/output, 
+            // we require the parameter to be associated with a system value semantic.
+            if (param->hasModifier<HLSLUniformModifier>())
+                continue;
+            if (param->findModifier<HLSLSemantic>())
+                continue;
+
+            bool isBuiltinType = isBuiltinParameterType(param->getType());
+            if (isBuiltinType)
+                continue;
+
+            if (doStructFieldsHaveSemantic(param->getType()))
+                continue;
+
+            // The user is defining a parameter with no 'uniform' modifier for a stage that doesn't support
+            // varying input/output. We will automatically convert it to a 'uniform' parameter, and diagnose a warning.
+            addModifier(param, getCurrentASTBuilder()->create<HLSLUniformModifier>());
+            sink->diagnose(param, Diagnostics::nonUniformEntryPointParameterTreatedAsUniform, param->getName());
+        }
+        
+        for (auto target : linkage->targets)
+        {
+            auto targetCaps = target->getTargetCaps();
+            auto stageCapabilitySet = CapabilitySet(entryPoint->getProfile().getCapabilityName());
+            targetCaps.join(stageCapabilitySet);
+            if (targetCaps.isIncompatibleWith(entryPointFuncDecl->inferredCapabilityRequirements))
             {
+                // Incompatable means we don't support a set of abstract atoms.
+                // Diagnose that we lack support for 'stage' and 'target' atoms with our provided entry-point
+                auto compileTarget = target->getTargetCaps().getCompileTarget();
+                auto stageTarget = stageCapabilitySet.getTargetStage();
+                maybeDiagnose(sink, linkage->m_optionSet, DiagnosticCategory::Capability, entryPointFuncDecl, Diagnostics::entryPointUsesUnavailableCapability, entryPointFuncDecl, compileTarget, stageTarget);
+                
+                // Find out what is incompatible (ancestor missing a super set of 'target+stage')
+                CapabilitySet failedSet({ (CapabilityName)compileTarget, (CapabilityName)stageTarget });
+                diagnoseMissingCapabilityProvenance(linkage->m_optionSet, sink, entryPointFuncDecl, failedSet);
             }
             else
             {
-                // For all non-uniform parameters of a general type, we require the parameter be associated with
-                // a system value semantic.
-                if (!param->hasModifier<HLSLUniformModifier>())
+                // Only attempt to error if a user adds to slangc either `-profile` or `-capability`
+                if (
+                    (
+                        target->getOptionSet().hasOption(CompilerOptionName::Capability)
+                        ||
+                        target->getOptionSet().hasOption(CompilerOptionName::Profile)
+                        )
+                    && targetCaps.atLeastOneSetImpliedInOther(entryPointFuncDecl->inferredCapabilityRequirements) == CapabilitySet::ImpliesReturnFlags::NotImplied
+                    )
                 {
-                    if (!param->findModifier<HLSLSemantic>())
+                    CapabilitySet combinedSets = targetCaps;
+                    combinedSets.join(entryPointFuncDecl->inferredCapabilityRequirements);
+                    CapabilityAtomSet addedAtoms{};
+                    if (auto targetCapSet = targetCaps.getAtomSets())
                     {
-                        if (!doStructFieldsHaveSemantic(param->getType()))
-                            sink->diagnose(param, Diagnostics::nonUniformEntryPointParameterMustHaveSemantic, param->getName());
+                        if (auto combinedSet = combinedSets.getAtomSets())
+                        {
+                            CapabilityAtomSet::calcSubtract(addedAtoms, (*combinedSet), (*targetCapSet));
+                        }
                     }
+                    maybeDiagnoseWarningOrError(
+                        sink,
+                        target->getOptionSet(),
+                        DiagnosticCategory::Capability,
+                        entryPointFuncDecl->loc,
+                        Diagnostics::profileImplicitlyUpgraded,
+                        Diagnostics::profileImplicitlyUpgradedRestrictive,
+                        entryPointFuncDecl,
+                        target->getOptionSet().getProfile().getName(),
+                        addedAtoms.getElements<CapabilityAtom>());
                 }
             }
         }
+    }
+
+    bool resolveStageOfProfileWithEntryPoint(Profile& entryPointProfile, CompilerOptionSet& optionSet, const List<RefPtr<TargetRequest>>& targets, FuncDecl* entryPointFuncDecl, DiagnosticSink* sink)
+    {
+        if (auto entryPointAttr = entryPointFuncDecl->findModifier<EntryPointAttribute>())
+        {
+            auto entryPointProfileStage = entryPointProfile.getStage();
+            // Ensure every target is specifying the same stage as an entry` point
+            // if a profile+stage was set, else user will not be aware that their
+            // code is requiring `fragment` on a `vertex` shader
+            for (auto target : targets)
+            {
+                auto targetProfile = target->getOptionSet().getProfile();
+                auto profileStage = targetProfile.getStage();
+                if (profileStage != Stage::Unknown && profileStage != entryPointAttr->stage)
+                    maybeDiagnose(sink, optionSet, DiagnosticCategory::Capability, entryPointAttr, Diagnostics::entryPointAndProfileAreIncompatible, entryPointFuncDecl, entryPointAttr->stage, targetProfile.getName());
+            }
+            if (entryPointProfileStage == Stage::Unknown)
+                entryPointProfile.setStage(entryPointAttr->stage);
+            else if (entryPointProfileStage != Stage::Unknown && entryPointProfileStage != entryPointAttr->stage)
+                maybeDiagnose(sink, optionSet, DiagnosticCategory::Capability, entryPointFuncDecl, Diagnostics::specifiedStageDoesntMatchAttribute, entryPointFuncDecl->getName(), entryPointProfileStage, entryPointAttr->stage);
+            return true;
+        }
+        return false;
     }
 
     // Given an entry point specified via API or command line options,
@@ -524,86 +654,13 @@ namespace Slang
         auto translationUnit = entryPointReq->getTranslationUnit();
         auto linkage = compileRequest->getLinkage();
         auto sink = compileRequest->getSink();
-        auto translationUnitSyntax = translationUnit->getModuleDecl();
 
         auto entryPointName = entryPointReq->getName();
-
-        // We will look up any global-scope declarations in the translation
-        // unit that match the name of our entry point.
-        Decl* firstDeclWithName = nullptr;
-        if( !translationUnitSyntax->getMemberDictionary().tryGetValue(entryPointName, firstDeclWithName))
-        {
-            // If there doesn't appear to be any such declaration, then
-            // we need to diagnose it as an error, and then bail out.
-            sink->diagnose(translationUnitSyntax, Diagnostics::entryPointFunctionNotFound, entryPointName);
-            return nullptr;
-        }
-
-        // We found at least one global-scope declaration with the right name,
-        // but (1) it might not be a function, and (2) there might be
-        // more than one function.
-        //
-        // We'll walk the linked list of declarations with the same name,
-        // to see what we find. Along the way we'll keep track of the
-        // first function declaration we find, if any:
-        //
-        FuncDecl* entryPointFuncDecl = nullptr;
-        for(auto ee = firstDeclWithName; ee; ee = ee->nextInContainerWithSameName)
-        {
-            // We want to support the case where the declaration is
-            // a generic function, so we will automatically
-            // unwrap any outer `GenericDecl` we find here.
-            //
-            auto decl = ee;
-            if(auto genericDecl = as<GenericDecl>(decl))
-                decl = genericDecl->inner;
-
-            // Is this declaration a function?
-            if (auto funcDecl = as<FuncDecl>(decl))
-            {
-                // Skip non-primary declarations, so that
-                // we don't give an error when an entry
-                // point is forward-declared.
-                if (!isPrimaryDecl(funcDecl))
-                    continue;
-
-                // is this the first one we've seen?
-                if (!entryPointFuncDecl)
-                {
-                    // If so, this is a candidate to be
-                    // the entry point function.
-                    entryPointFuncDecl = funcDecl;
-                }
-                else
-                {
-                    // Uh-oh! We've already seen a function declaration with this
-                    // name before, so the whole thing is ambiguous. We need
-                    // to diagnose and bail out.
-
-                    sink->diagnose(translationUnitSyntax, Diagnostics::ambiguousEntryPoint, entryPointName);
-
-                    // List all of the declarations that the user *might* mean
-                    for (auto ff = firstDeclWithName; ff; ff = ff->nextInContainerWithSameName)
-                    {
-                        if (auto candidate = as<FuncDecl>(ff))
-                        {
-                            sink->diagnose(candidate, Diagnostics::entryPointCandidate, candidate->getName());
-                        }
-                    }
-
-                    // Bail out.
-                    return nullptr;
-                }
-            }
-        }
-
+        FuncDecl* entryPointFuncDecl = findFunctionDeclByName(translationUnit->getModule(), entryPointName, sink);
+        
         // Did we find a function declaration in our search?
         if(!entryPointFuncDecl)
         {
-            // If not, then we need to diagnose the error.
-            // For convenience, we will point to the first
-            // declaration with the right name, that wasn't a function.
-            sink->diagnose(firstDeclWithName, Diagnostics::entryPointSymbolNotAFunction, entryPointName);
             return nullptr;
         }
 
@@ -616,27 +673,13 @@ namespace Slang
         //
         // If the entry point specifies a stage via a `[shader("...")]` attribute,
         // then we might be able to infer a stage for the entry point request if
-        // it didn't have one, *or* issue a diagnostic if there is a mismatch.
-        //
+        // it didn't have one, *or* issue a diagnostic if there is a mismatch with the profile.
+
         auto entryPointProfile = entryPointReq->getProfile();
-        if( auto entryPointAttribute = entryPointFuncDecl->findModifier<EntryPointAttribute>() )
-        {
-            auto entryPointStage = entryPointProfile.getStage();
-            if( entryPointStage == Stage::Unknown )
-            {
-                entryPointProfile.setStage(entryPointAttribute->stage);
-            }
-            else if( entryPointAttribute->stage != entryPointStage )
-            {
-                sink->diagnose(entryPointFuncDecl, Diagnostics::specifiedStageDoesntMatchAttribute, entryPointName, entryPointStage, entryPointAttribute->stage);
-            }
-        }
-        else
-        {
-            // TODO: Should we attach a `[shader(...)]` attribute to an
-            // entry point that didn't have one, so that we can have
-            // a more uniform representation in the AST?
-        }
+        resolveStageOfProfileWithEntryPoint(entryPointProfile, linkage->m_optionSet, linkage->targets, entryPointFuncDecl, sink);
+        // TODO: Should we attach a `[shader(...)]` attribute to an
+        // entry point that didn't have one, so that we can have
+        // a more uniform representation in the AST?
 
         RefPtr<EntryPoint> entryPoint = EntryPoint::create(
             linkage,
@@ -673,8 +716,6 @@ namespace Slang
 
     void Module::_collectShaderParams()
     {
-        auto moduleDecl = m_moduleDecl;
-
         // We are going to walk the global declarations in the body of the
         // module, and use those to build up our lists of:
         //
@@ -688,70 +729,90 @@ namespace Slang
         // will keep a set of the modules we've already
         // seen and processed.
         //
+
+        // We need to use a work list to traverse through all global scopes,
+        // including the top level `moduleDecl` and all the included `FileDecl`s.
+
+        List<ContainerDecl*> workList;
+        workList.add(m_moduleDecl);
+
         HashSet<Module*> requiredModuleSet;
-
-        for( auto globalDecl : moduleDecl->members )
+        for (Index i = 0; i < workList.getCount(); i++)
         {
-            if(auto globalVar = as<VarDecl>(globalDecl))
+            auto moduleDecl = workList[i];
+            for (auto globalDecl : moduleDecl->members)
             {
-                // We do not want to consider global variable declarations
-                // that don't represents shader parameters. This includes
-                // things like `static` globals and `groupshared` variables.
-                //
-                if(!isGlobalShaderParameter(globalVar))
-                    continue;
-
-                // At this point we know we have a global shader parameter.
-
-                ShaderParamInfo shaderParamInfo;
-                shaderParamInfo.paramDeclRef = makeDeclRef(globalVar);
-
-                // We need to consider what specialization parameters
-                // are introduced by this shader parameter. This step
-                // fills in fields on `shaderParamInfo` so that we
-                // can assocaite specialization arguments supplied later
-                // with the correct parameter.
-                //
-                _collectExistentialSpecializationParamsForShaderParam(
-                    getLinkage()->getASTBuilder(),
-                    shaderParamInfo,
-                    m_specializationParams,
-                    makeDeclRef(globalVar));
-
-                m_shaderParams.add(shaderParamInfo);
-            }
-            else if( auto globalGenericParam = as<GlobalGenericParamDecl>(globalDecl) )
-            {
-                // A global generic type parameter declaration introduces
-                // a suitable specialization parameter.
-                //
-                SpecializationParam specializationParam;
-                specializationParam.flavor = SpecializationParam::Flavor::GenericType;
-                specializationParam.loc = globalGenericParam->loc;
-                specializationParam.object = globalGenericParam;
-                m_specializationParams.add(specializationParam);
-            }
-            else if( auto globalGenericValueParam = as<GlobalGenericValueParamDecl>(globalDecl) )
-            {
-                // A global generic type parameter declaration introduces
-                // a suitable specialization parameter.
-                //
-                SpecializationParam specializationParam;
-                specializationParam.flavor = SpecializationParam::Flavor::GenericValue;
-                specializationParam.loc = globalGenericValueParam->loc;
-                specializationParam.object = globalGenericValueParam;
-                m_specializationParams.add(specializationParam);
-            }
-            else if( auto importDecl = as<ImportDecl>(globalDecl) )
-            {
-                // An `import` declaration creates a requirement dependency
-                // from this module to another module.
-                //
-                auto importedModule = getModule(importDecl->importedModuleDecl);
-                if(!requiredModuleSet.contains(importedModule))
+                if (auto globalVar = as<VarDecl>(globalDecl))
                 {
-                    requiredModuleSet.add(importedModule);
-                    m_requirements.add(importedModule);
+                    // We do not want to consider global variable declarations
+                    // that don't represents shader parameters. This includes
+                    // things like `static` globals and `groupshared` variables.
+                    //
+                    if (!isGlobalShaderParameter(globalVar))
+                        continue;
+
+                    // At this point we know we have a global shader parameter.
+
+                    ShaderParamInfo shaderParamInfo;
+                    shaderParamInfo.paramDeclRef = makeDeclRef(globalVar);
+
+                    // We need to consider what specialization parameters
+                    // are introduced by this shader parameter. This step
+                    // fills in fields on `shaderParamInfo` so that we
+                    // can assocaite specialization arguments supplied later
+                    // with the correct parameter.
+                    //
+                    _collectExistentialSpecializationParamsForShaderParam(
+                        getLinkage()->getASTBuilder(),
+                        shaderParamInfo,
+                        m_specializationParams,
+                        makeDeclRef(globalVar));
+
+                    m_shaderParams.add(shaderParamInfo);
+                }
+                else if (auto globalGenericParam = as<GlobalGenericParamDecl>(globalDecl))
+                {
+                    // A global generic type parameter declaration introduces
+                    // a suitable specialization parameter.
+                    //
+                    SpecializationParam specializationParam;
+                    specializationParam.flavor = SpecializationParam::Flavor::GenericType;
+                    specializationParam.loc = globalGenericParam->loc;
+                    specializationParam.object = globalGenericParam;
+                    m_specializationParams.add(specializationParam);
+                }
+                else if (auto globalGenericValueParam = as<GlobalGenericValueParamDecl>(globalDecl))
+                {
+                    // A global generic type parameter declaration introduces
+                    // a suitable specialization parameter.
+                    //
+                    SpecializationParam specializationParam;
+                    specializationParam.flavor = SpecializationParam::Flavor::GenericValue;
+                    specializationParam.loc = globalGenericValueParam->loc;
+                    specializationParam.object = globalGenericValueParam;
+                    m_specializationParams.add(specializationParam);
+                }
+                else if (auto importDecl = as<ImportDecl>(globalDecl))
+                {
+                    // An `import` declaration creates a requirement dependency
+                    // from this module to another module.
+                    //
+                    auto importedModule = getModule(importDecl->importedModuleDecl);
+                    if (!requiredModuleSet.contains(importedModule))
+                    {
+                        requiredModuleSet.add(importedModule);
+                        m_requirements.add(importedModule);
+                    }
+                }
+                else if (auto fileDecl = as<FileDecl>(globalDecl))
+                {
+                    // If we see a `FileDecl`, we need to recursively look into its
+                    // scope.
+                    workList.add(fileDecl);
+                }
+                else if (auto namespaceDecl = as<NamespaceDecl>(globalDecl))
+                {
+                    workList.add(namespaceDecl);
                 }
             }
         }
@@ -927,58 +988,10 @@ namespace Slang
             // should work for typical HLSL code.
             //
             Index translationUnitCount = translationUnits.getCount();
-            for(Index tt = 0; tt < translationUnitCount; ++tt)
+            for (Index tt = 0; tt < translationUnitCount; ++tt)
             {
                 auto translationUnit = translationUnits[tt];
-                for( auto globalDecl : translationUnit->getModuleDecl()->members )
-                {
-                    auto maybeFuncDecl = globalDecl;
-                    if( auto genericDecl = as<GenericDecl>(maybeFuncDecl) )
-                    {
-                        maybeFuncDecl = genericDecl->inner;
-                    }
-
-                    auto funcDecl = as<FuncDecl>(maybeFuncDecl);
-                    if(!funcDecl)
-                        continue;
-
-                    auto entryPointAttr = funcDecl->findModifier<EntryPointAttribute>();
-                    if(!entryPointAttr)
-                        continue;
-
-                    // We've discovered a valid entry point. It is a function (possibly
-                    // generic) that has a `[shader(...)]` attribute to mark it as an
-                    // entry point.
-                    //
-                    // We will now register that entry point as an `EntryPoint`
-                    // with an appropriately chosen profile.
-                    //
-                    // The profile will only include a stage, so that the profile "family"
-                    // and "version" are left unspecified. Downstream code will need
-                    // to be able to handle this case.
-                    //
-                    Profile profile;
-                    profile.setStage(entryPointAttr->stage);
-
-                    RefPtr<EntryPoint> entryPoint = EntryPoint::create(
-                        linkage,
-                        makeDeclRef(funcDecl),
-                        profile);
-
-                    validateEntryPoint(entryPoint, sink);
-
-                    // Note: in the case that the user didn't explicitly
-                    // specify entry points and we are instead compiling
-                    // a shader "library," then we do not want to automatically
-                    // combine the entry points into groups in the generated
-                    // `Program`, since that would be slightly too magical.
-                    //
-                    // Instead, each entry point will end up in a singleton
-                    // group, so that its entry-point parameters lay out
-                    // independent of the others.
-                    //
-                    translationUnit->module->_addEntryPoint(entryPoint);
-                }
+                translationUnit->getModule()->_discoverEntryPoints(sink, this->getLinkage()->targets);
             }
         }
     }
@@ -1141,7 +1154,7 @@ namespace Slang
                         auto interfaceType = getSup(getLinkage()->getASTBuilder(), DeclRef<GenericTypeConstraintDecl>(constraintDecl));
 
                         // Use our semantic-checking logic to search for a witness to the required conformance
-                        auto witness = visitor.isSubtype(argType, interfaceType);
+                        auto witness = visitor.isSubtype(argType, interfaceType, IsSubTypeOptions::None);
                         if(!witness)
                         {
                             // If no witness was found, then we will be unable to satisfy
@@ -1173,7 +1186,7 @@ namespace Slang
                         argType = getLinkage()->getASTBuilder()->getErrorType();
                     }
 
-                    auto witness = visitor.isSubtype(argType, interfaceType);
+                    auto witness = visitor.isSubtype(argType, interfaceType, IsSubTypeOptions::None);
                     if (!witness)
                     {
                             // If no witness was found, then we will be unable to satisfy
@@ -1282,17 +1295,49 @@ namespace Slang
                 auto specializationArg = args[ii];
                 genericArgs.add(specializationArg.val);
             }
-            ASTBuilder* astBuilder = getLinkage()->getASTBuilder();
-
+            auto astBuilder = getLinkage()->getASTBuilder();
             for (auto constraintDecl : getMembersOfType<GenericTypeConstraintDecl>(
                      getLinkage()->getASTBuilder(), DeclRef<ContainerDecl>(genericDeclRef)))
             {
                 DeclRef<GenericTypeConstraintDecl> constraintDeclRef = astBuilder->getDirectDeclRef(constraintDecl.getDecl());
+                int argIndex = -1;
+                int ii = 0;
 
-                auto sub = getSub(astBuilder, constraintDeclRef);
+                // Find the generic parameter type (T) that this constraint (T:IFoo) is applying to.
+                auto genericParamType = getSub(astBuilder, constraintDeclRef);
+                auto genParamDeclRefType = as<DeclRefType>(genericParamType);
+                if (!genParamDeclRefType)
+                {
+                    continue;
+                }
+                auto genParamDeclRef = genParamDeclRefType->getDeclRef();
+
+                // Find the generic argument index of the corresponding generic parameter type in the
+                // generic parameter set.
+                //
+                for (auto member : genericDeclRef.getDecl()->getMembersOfType<GenericTypeParamDecl>())
+                {
+                    if (member == genParamDeclRef.getDecl())
+                    {
+                        argIndex = ii;
+                        break;
+                    }
+                    ii++;
+                }
+                if (argIndex == -1)
+                {
+                    SLANG_ASSERT(!"generic parameter not found in generic decl");
+                    continue;
+                }
+                auto sub = as<Type>(args[argIndex].val);
+                if (!sub)
+                {
+                    sink->diagnose(constraintDecl, Diagnostics::expectedTypeForSpecializationArg, argIndex);
+                    continue;
+                }
+
                 auto sup = getSup(astBuilder, constraintDeclRef);
-
-                auto subTypeWitness = visitor.isSubtype(sub, sup);
+                auto subTypeWitness = visitor.isSubtype(sub, sup, IsSubTypeOptions::None);
                 if(subTypeWitness)
                 {
                     genericArgs.add(subTypeWitness);
@@ -1332,7 +1377,7 @@ namespace Slang
             auto paramType = as<Type>(param.object);
             auto argType = as<Type>(specializationArg.val);
 
-            auto witness = visitor.isSubtype(argType, paramType);
+            auto witness = visitor.isSubtype(argType, paramType, IsSubTypeOptions::None);
             if (!witness)
             {
                 // If no witness was found, then we will be unable to satisfy
@@ -1371,7 +1416,7 @@ namespace Slang
             sink);
     }
 
-    Scope* ComponentType::_createScopeForLegacyLookup(ASTBuilder* astBuilder)
+    Scope* ComponentType::_getOrCreateScopeForLegacyLookup(ASTBuilder* astBuilder)
     {
         // The shape of this logic is dictated by the legacy
         // behavior for name-based lookup/parsing of types
@@ -1382,6 +1427,8 @@ namespace Slang
         // definitions (that scope is necessary because
         // it defines keywords like `true` and `false`).
         //
+        if (m_lookupScope)
+            return m_lookupScope;
 
         Scope* scope = astBuilder->create<Scope>();
         scope->parent = getLinkage()->getSessionImpl()->slangLanguageScope;
@@ -1392,13 +1439,19 @@ namespace Slang
         //
         for( auto module : getModuleDependencies() )
         {
-            Scope* moduleScope = astBuilder->create<Scope>();
-            moduleScope->containerDecl = module->getModuleDecl();
+            for (auto srcScope = module->getModuleDecl()->ownedScope; srcScope; srcScope = srcScope->nextSibling)
+            {
+                if (srcScope->containerDecl != module->getModuleDecl() && srcScope->containerDecl->parentDecl != module->getModuleDecl())
+                    continue; // Skip scopes that is not part of current module.
 
-            moduleScope->nextSibling = scope->nextSibling;
-            scope->nextSibling = moduleScope;
+                Scope* moduleScope = astBuilder->create<Scope>();
+                moduleScope->containerDecl = srcScope->containerDecl;
+
+                moduleScope->nextSibling = scope->nextSibling;
+                scope->nextSibling = moduleScope;
+            }
         }
-
+        m_lookupScope = scope;
         return scope;
     }
 
@@ -1419,7 +1472,7 @@ namespace Slang
         // We create the scopes on the linkages ASTBuilder. We might want to create a temporary ASTBuilder,
         // and let that memory get freed, but is like this because it's not clear if the scopes in ASTNode members
         // will dangle if we do.
-        Scope* scope = unspecialiedProgram->_createScopeForLegacyLookup(endToEndReq->getLinkage()->getASTBuilder());
+        Scope* scope = unspecialiedProgram->_getOrCreateScopeForLegacyLookup(endToEndReq->getLinkage()->getASTBuilder());
 
         // We are going to do some semantic checking, so we need to
         // set up a `SemanticsVistitor` that we can use.
@@ -1482,7 +1535,7 @@ namespace Slang
 
             ExpandedSpecializationArg arg;
             arg.val = argType;
-            arg.witness = visitor.isSubtype(argType, paramType);
+            arg.witness = visitor.isSubtype(argType, paramType, IsSubTypeOptions::None);
             specializationArgs.add(arg);
         }
 

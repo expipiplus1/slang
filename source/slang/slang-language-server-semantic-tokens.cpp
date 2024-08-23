@@ -40,6 +40,8 @@ SemanticToken _createSemanticToken(SourceManager* manager, SourceLoc loc, Name* 
 List<SemanticToken> getSemanticTokens(Linkage* linkage, Module* module, UnownedStringSlice fileName, DocumentVersion* doc)
 {
     auto manager = linkage->getSourceManager();
+    
+    auto cbufferName = linkage->getNamePool()->getName(toSlice("ConstantBuffer"));
 
     List<SemanticToken> result;
     auto maybeInsertToken = [&](const SemanticToken& token)
@@ -48,7 +50,83 @@ List<SemanticToken> getSemanticTokens(Linkage* linkage, Module* module, UnownedS
             token.type != SemanticTokenType::NormalText)
             result.add(token);
     };
-    iterateAST(
+    auto handleDeclRef = [&](DeclRef<Decl> declRef, Expr* originalExpr, SourceLoc loc)
+    {
+        if (!declRef)
+            return;
+        auto decl = declRef.getDecl();
+        if (auto genDecl = as<GenericDecl>(decl))
+            decl = genDecl->inner;
+        if (!decl)
+            return;
+        auto name = declRef.getDecl()->getName();
+        if (!name)
+            return;
+        // Don't look at the expr if it is defined in a different file.
+        if (!manager->getHumaneLoc(loc, SourceLocType::Actual)
+            .pathInfo.foundPath.getUnownedSlice()
+            .endsWithCaseInsensitive(fileName))
+            return;
+        SemanticToken token =
+            _createSemanticToken(manager, loc, name);
+        auto target = decl;
+        if (as<AggTypeDecl>(target))
+        {
+            if (target->hasModifier<BuiltinTypeModifier>())
+                return;
+            token.type = SemanticTokenType::Type;
+            if (name == cbufferName)
+            {
+                token.length = doc->getTokenLength(token.line, token.col);
+            }
+        }
+        else if (as<ConstructorDecl>(target))
+        {
+            token.type = SemanticTokenType::Type;
+            token.length = doc->getTokenLength(token.line, token.col);
+        }
+        else if (as<SimpleTypeDecl>(target))
+        {
+            token.type = SemanticTokenType::Type;
+        }
+        else if (as<PropertyDecl>(target))
+        {
+            token.type = SemanticTokenType::Property;
+        }
+        else if (as<ParamDecl>(target))
+        {
+            token.type = SemanticTokenType::Parameter;
+        }
+        else if (as<VarDecl>(target))
+        {
+            if (as<MemberExpr>(originalExpr) ||
+                as<StaticMemberExpr>(originalExpr))
+            {
+                return;
+            }
+            token.type = SemanticTokenType::Variable;
+        }
+        else if (as<FunctionDeclBase>(target))
+        {
+            token.type = SemanticTokenType::Function;
+        }
+        else if (as<EnumCaseDecl>(target))
+        {
+            token.type = SemanticTokenType::EnumMember;
+        }
+        else if (as<NamespaceDecl>(target))
+        {
+            token.type = SemanticTokenType::Namespace;
+        }
+
+        if (as<CallableDecl>(target))
+        {
+            if (target->hasModifier<ImplicitConversionModifier>())
+                return;
+        }
+        maybeInsertToken(token);
+    };
+    iterateASTWithLanguageServerFilter(
         fileName,
         manager,
         module->getModuleDecl(),
@@ -56,77 +134,14 @@ List<SemanticToken> getSemanticTokens(Linkage* linkage, Module* module, UnownedS
         {
             if (auto declRefExpr = as<DeclRefExpr>(node))
             {
-                auto declRef = declRefExpr->declRef;
-                auto loc = declRefExpr->loc;
-                if (!declRef)
-                    return;
-                auto decl = declRef.getDecl();
-                if (auto genDecl = as<GenericDecl>(decl))
-                    decl = genDecl->inner;
-                if (!decl)
-                    return;
-                auto name = declRef.getDecl()->getName();
-                if (!name)
-                    return;
-                // Don't look at the expr if it is defined in a different file.
-                if (!manager->getHumaneLoc(loc, SourceLocType::Actual)
-                    .pathInfo.foundPath.getUnownedSlice()
-                    .endsWithCaseInsensitive(fileName))
-                    return;
-                SemanticToken token =
-                    _createSemanticToken(manager, loc, name);
-                auto target = decl;
-                if (as<AggTypeDecl>(target))
+                handleDeclRef(declRefExpr->declRef, declRefExpr->originalExpr, declRefExpr->loc);
+            }
+            else if (auto overloadedExpr = as<OverloadedExpr>(node))
+            {
+                if (overloadedExpr->lookupResult2.items.getCount())
                 {
-                    if (target->hasModifier<BuiltinTypeModifier>())
-                        return;
-                    token.type = SemanticTokenType::Type;
+                    handleDeclRef(overloadedExpr->lookupResult2.items[0].declRef, overloadedExpr->originalExpr, overloadedExpr->loc);
                 }
-                else if (as<ConstructorDecl>(target))
-                {
-                    token.type = SemanticTokenType::Type;
-                    token.length = doc->getTokenLength(token.line, token.col);
-                }
-                else if (as<SimpleTypeDecl>(target))
-                {
-                    token.type = SemanticTokenType::Type;
-                }
-                else if (as<PropertyDecl>(target))
-                {
-                    token.type = SemanticTokenType::Property;
-                }
-                else if (as<ParamDecl>(target))
-                {
-                    token.type = SemanticTokenType::Parameter;
-                }
-                else if (as<VarDecl>(target))
-                {
-                    if (as<MemberExpr>(declRefExpr->originalExpr) ||
-                        as<StaticMemberExpr>(declRefExpr->originalExpr))
-                    {
-                        return;
-                    }
-                    token.type = SemanticTokenType::Variable;
-                }
-                else if (as<FunctionDeclBase>(target))
-                {
-                    token.type = SemanticTokenType::Function;
-                }
-                else if (as<EnumCaseDecl>(target))
-                {
-                    token.type = SemanticTokenType::EnumMember;
-                }
-                else if (as<NamespaceDecl>(target))
-                {
-                    token.type = SemanticTokenType::Namespace;
-                }
-
-                if (as<CallableDecl>(target))
-                {
-                    if (target->hasModifier<ImplicitConversionModifier>())
-                        return;
-                }
-                maybeInsertToken(token);
             }
             else if (auto accessorDecl = as<AccessorDecl>(node))
             {
@@ -147,7 +162,7 @@ List<SemanticToken> getSemanticTokens(Linkage* linkage, Module* module, UnownedS
             }
             else if (auto aggTypeDecl = as<AggTypeDeclBase>(node))
             {
-                if (aggTypeDecl->getName())
+                if (aggTypeDecl->getName() && aggTypeDecl->findModifier<ImplicitParameterGroupElementTypeModifier>() == nullptr)
                 {
                     SemanticToken token = _createSemanticToken(
                         manager, aggTypeDecl->getNameLoc(), aggTypeDecl->getName());
@@ -225,7 +240,33 @@ List<SemanticToken> getSemanticTokens(Linkage* linkage, Module* module, UnownedS
                     token.length = (int)attr->originalIdentifierToken.getContentLength();
                     token.type = SemanticTokenType::Type;
                     maybeInsertToken(token);
+
+                    // Insert capability names as enum cases.
+                    if (as<RequireCapabilityAttribute>(attr))
+                    {
+                        for (auto arg : attr->args)
+                        {
+                            if (auto varExpr = as<VarExpr>(arg))
+                            {
+                                if (varExpr->name)
+                                {
+                                    SemanticToken capToken = _createSemanticToken(
+                                        manager, varExpr->loc, nullptr);
+                                    capToken.length = (int)varExpr->name->text.getLength();
+                                    capToken.type = SemanticTokenType::EnumMember;
+                                    maybeInsertToken(capToken);
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            else if (auto targetCase = as<TargetCaseStmt>(node))
+            {
+                SemanticToken token = _createSemanticToken(
+                    manager, targetCase->capabilityToken.loc, targetCase->capabilityToken.getName());
+                token.type = SemanticTokenType::EnumMember;
+                maybeInsertToken(token);
             }
             else if (auto spirvAsmExpr = as<SPIRVAsmExpr>(node))
             {

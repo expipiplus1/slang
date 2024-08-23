@@ -7,6 +7,7 @@
 #include "slang-ir-legalize-mesh-outputs.h"
 #include "slang-ir.h"
 #include "slang-ir-insts.h"
+#include "slang-ir-call-graph.h"
 #include "slang-emit-base.h"
 #include "slang-glsl-extension-tracker.h"
 #include "slang-ir-lower-buffer-element-type.h"
@@ -19,6 +20,9 @@
 #include "slang-ir-simplify-cfg.h"
 #include "slang-ir-peephole.h"
 #include "slang-ir-redundancy-removal.h"
+#include "slang-ir-loop-unroll.h"
+#include "slang-ir-lower-buffer-element-type.h"
+#include "slang-ir-specialize-address-space.h"
 
 namespace Slang
 {
@@ -96,14 +100,14 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         if (m_loweredStructuredBufferTypes.tryGetValue(inst, result))
             return result;
 
-        auto layoutRules = getTypeLayoutRuleForBuffer(m_sharedContext->m_targetRequest, inst);
+        auto layoutRules = getTypeLayoutRuleForBuffer(m_sharedContext->m_targetProgram, inst);
 
         IRBuilder builder(m_sharedContext->m_irModule);
 
         builder.setInsertBefore(inst);
         auto elementType = inst->getElementType();
         IRSizeAndAlignment elementSize;
-        getSizeAndAlignment(m_sharedContext->m_targetRequest, layoutRules, elementType, &elementSize);
+        getSizeAndAlignment(m_sharedContext->m_targetProgram->getOptionSet(), layoutRules, elementType, &elementSize);
         elementSize = layoutRules->alignCompositeElement(elementSize);
 
         const auto arrayType = builder.getUnsizedArrayType(inst->getElementType(), builder.getIntValue(builder.getIntType(), elementSize.getStride()));
@@ -111,7 +115,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         const auto arrayKey = builder.createStructKey();
         builder.createStructField(structType, arrayKey, arrayType);
         IRSizeAndAlignment structSize;
-        getSizeAndAlignment(m_sharedContext->m_targetRequest, layoutRules, structType, &structSize);
+        getSizeAndAlignment(m_sharedContext->m_targetProgram->getOptionSet(), layoutRules, structType, &structSize);
 
         StringBuilder nameSb;
         switch (inst->getOp())
@@ -133,7 +137,10 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             break;
         }
         builder.addNameHintDecoration(structType, nameSb.getUnownedSlice());
-        builder.addDecoration(structType, kIROp_SPIRVBlockDecoration);
+        if (m_sharedContext->isSpirv14OrLater())
+            builder.addDecorationIfNotExist(structType, kIROp_SPIRVBlockDecoration);
+        else
+            builder.addDecorationIfNotExist(structType, kIROp_SPIRVBufferBlockDecoration);
 
         result.structType = structType;
         result.arrayKey = arrayKey;
@@ -179,6 +186,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         IRBuilder builder(cbParamInst);
         builder.setInsertBefore(cbParamInst);
         auto structType = builder.createStructType();
+        addToWorkList(structType);
         StringBuilder sb;
         sb << "cbuffer_";
         getTypeNameHint(sb, innerType);
@@ -189,19 +197,19 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         builder.setInsertBefore(cbParamInst);
         auto newCbType = builder.getType(cbParamInst->getDataType()->getOp(), structType);
         cbParamInst->setFullType(newCbType);
-        auto rules = getTypeLayoutRuleForBuffer(m_sharedContext->m_targetRequest, cbParamInst->getDataType());
+        auto rules = getTypeLayoutRuleForBuffer(m_sharedContext->m_targetProgram, cbParamInst->getDataType());
         IRSizeAndAlignment sizeAlignment;
-        getSizeAndAlignment(m_sharedContext->m_targetRequest, rules, structType, &sizeAlignment);
+        getSizeAndAlignment(m_sharedContext->m_targetProgram->getOptionSet(), rules, structType, &sizeAlignment);
         traverseUses(cbParamInst, [&](IRUse* use)
         {
             builder.setInsertBefore(use->getUser());
-            auto addr = builder.emitFieldAddress(builder.getPtrType(kIROp_PtrType, innerType, SpvStorageClassUniform), cbParamInst, key);
+            auto addr = builder.emitFieldAddress(builder.getPtrType(kIROp_PtrType, innerType, AddressSpace::Uniform), cbParamInst, key);
             use->set(addr);
         });
         return structType;
     }
 
-    static void insertLoadAtLatestLocation(IRInst* addrInst, IRUse* inUse)
+    static void insertLoadAtLatestLocation(IRInst* addrInst, IRUse* inUse, AddressSpace addressSpace)
     {
         struct WorkItem { IRInst* addr; IRUse* use; };
         List<WorkItem> workList;
@@ -214,8 +222,17 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             auto user = use->getUser();
             IRBuilder builder(user);
             builder.setInsertBefore(user);
-            if(as<IRGetElement>(user) || as<IRFieldExtract>(user))
+
+            if(user->getOp() == kIROp_GetLegalizedSPIRVGlobalParamAddr)
             {
+                user->replaceUsesWith(addr);
+                user->removeAndDeallocate();
+            }
+            else if((as<IRGetElement>(user) || as<IRFieldExtract>(user)) &&
+                use == user->getOperands())
+            {
+                // If the use is the address operand of a getElement or FieldExtract,
+                // replace the inst with the updated address and continue to follow the use chain.
                 auto basePtrType = as<IRPtrTypeBase>(addr->getDataType());
                 IRType* ptrType = nullptr;
                 if (basePtrType->hasAddressSpace())
@@ -236,6 +253,15 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             }
             else if(const auto spirvAsmOperand = as<IRSPIRVAsmOperandInst>(user))
             {
+                // Skip load's for referenced `Input` variables since a ref implies
+                // passing as is, which needs to be a pointer (pass as is).
+                if (user->getDataType()
+                    && user->getDataType()->getOp() == kIROp_RefType
+                    && addressSpace == AddressSpace::Input)
+                {
+                    builder.replaceOperand(use, addr);
+                    continue;
+                }
                 // If this is being used in an asm block, insert the load to
                 // just prior to the block.
                 const auto asmBlock = spirvAsmOperand->getAsmBlock();
@@ -257,8 +283,9 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         }
 
         for (auto i : instsToRemove)
-            if (!i->hasUses())
-                i->removeAndDeallocate();
+        {
+            i->removeAndDeallocate();
+        }
     }
 
     // Returns true if the given type that should be decorated as in `UniformConstant` address space.
@@ -267,6 +294,8 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
     {
         if (as<IRTextureTypeBase>(type))
             return true;
+        if (as<IRSubpassInputType>(type))
+            return true;
         if (as<IRSamplerStateTypeBase>(type))
             return true;
         if (const auto arr = as<IRArrayTypeBase>(type))
@@ -274,6 +303,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         switch (type->getOp())
         {
         case kIROp_RaytracingAccelerationStructureType:
+        case kIROp_GLSLAtomicUintType:
         case kIROp_RayQueryType:
             return true;
         default:
@@ -352,9 +382,10 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         {
             format = decor->getFormat();
         }
+
+        // If the texture has no format decoration, try to infer it from the type.
         if (format == ImageFormat::unknown)
         {
-            // If the texture has no format decoration, try to infer it from the type.
             auto elementType = textureType->getElementType();
             Int vectorWidth = 1;
             if (auto elementVecType = as<IRVectorType>(elementType))
@@ -521,19 +552,19 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 innerType = arrayType->getElementType();
             }
 
-            SpvStorageClass storageClass = SpvStorageClassPrivate;
+            AddressSpace addressSpace = AddressSpace::ThreadLocal;
             // Figure out storage class based on var layout.
             if (auto layout = getVarLayout(inst))
             {
-                auto cls = getGlobalParamStorageClass(layout);
-                if (cls != SpvStorageClassMax)
-                    storageClass = cls;
+                auto cls = getGlobalParamAddressSpace(layout);
+                if (cls != AddressSpace::Generic)
+                    addressSpace = cls;
                 else if (auto systemValueAttr = layout->findAttr<IRSystemValueSemanticAttr>())
                 {
                     String semanticName = systemValueAttr->getName();
                     semanticName = semanticName.toLower();
                     if (semanticName == "sv_pointsize")
-                        storageClass = SpvStorageClassInput;
+                        addressSpace = AddressSpace::Input;
                 }
             }
 
@@ -541,7 +572,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             // placed here then put them in UniformConstant instead
             if (isSpirvUniformConstantType(inst->getDataType()))
             {
-                storageClass = SpvStorageClassUniformConstant;
+                addressSpace = AddressSpace::UniformConstant;
             }
 
             // Strip any HLSL wrappers
@@ -551,8 +582,8 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             if (cbufferType || paramBlockType)
             {
                 innerType = as<IRUniformParameterGroupType>(innerType)->getElementType();
-                if (storageClass == SpvStorageClassPrivate)
-                    storageClass = SpvStorageClassUniform;
+                if (addressSpace == AddressSpace::ThreadLocal)
+                    addressSpace = AddressSpace::Uniform;
                 // Constant buffer is already treated like a pointer type, and
                 // we are not adding another layer of indirection when replacing it
                 // with a pointer type. Therefore we don't need to insert a load at
@@ -564,7 +595,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 {
                     innerType = wrapConstantBufferElement(inst);
                 }
-                builder.addDecoration(innerType, kIROp_SPIRVBlockDecoration);
+                builder.addDecorationIfNotExist(innerType, kIROp_SPIRVBlockDecoration);
                 
                 auto varLayoutInst = inst->findDecoration<IRLayoutDecoration>();
                 if (paramBlockType)
@@ -592,30 +623,49 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                         }
                     }
                 }
-                else if (storageClass == SpvStorageClassPushConstant)
+                else if (addressSpace == AddressSpace::PushConstant)
                 {
                     // Push constant params does not need a VarLayout.
                     varLayoutInst->removeAndDeallocate();
                 }
             }
-            else
+            else if (auto structuredBufferType = as<IRHLSLStructuredBufferTypeBase>(innerType))
             {
-                if (auto structuredBufferType = as<IRHLSLStructuredBufferTypeBase>(innerType))
+                innerType = lowerStructuredBufferType(structuredBufferType).structType;
+                addressSpace = getStorageBufferAddressSpace();
+                needLoad = false;
+
+                auto memoryFlags = MemoryQualifierSetModifier::Flags::kNone;
+
+                // structured buffers in GLSL should be annotated as ReadOnly
+                if (as<IRHLSLStructuredBufferType>(structuredBufferType))
+                    memoryFlags = MemoryQualifierSetModifier::Flags::kReadOnly;
+                if (as<IRHLSLRasterizerOrderedStructuredBufferType>(structuredBufferType))
+                    memoryFlags = MemoryQualifierSetModifier::Flags::kRasterizerOrdered;
+
+                if (memoryFlags != MemoryQualifierSetModifier::Flags::kNone)
+                    builder.addMemoryQualifierSetDecoration(inst, memoryFlags);
+            }
+            else if (auto glslShaderStorageBufferType = as<IRGLSLShaderStorageBufferType>(innerType))
+            {
+                innerType = glslShaderStorageBufferType->getElementType();
+                if (m_sharedContext->isSpirv14OrLater())
                 {
-                    innerType = lowerStructuredBufferType(structuredBufferType).structType;
-                    storageClass = SpvStorageClassStorageBuffer;
-                    needLoad = false;
+                    builder.addDecorationIfNotExist(innerType, kIROp_SPIRVBlockDecoration);
+                    addressSpace = AddressSpace::StorageBuffer;
                 }
+                else
+                {
+                    builder.addDecorationIfNotExist(innerType, kIROp_SPIRVBufferBlockDecoration);
+                    addressSpace = AddressSpace::Uniform;
+                }
+                needLoad = false;
             }
 
             auto innerElementType = innerType;
             if (arrayType)
             {
-                Array<IRInst*, 2> arrayTypeArgs;
-                arrayTypeArgs.add(innerType);
-                if (arraySize)
-                    arrayTypeArgs.add(arraySize);
-                innerType = (IRType*)builder.emitIntrinsicInst(builder.getTypeKind(), arrayType->getOp(), (UInt)arrayTypeArgs.getCount(), arrayTypeArgs.getBuffer());
+                innerType = (IRType*)builder.getArrayTypeBase(arrayType->getOp(), innerType, arraySize);
                 if (!arraySize)
                 {
                     builder.addRequireSPIRVDescriptorIndexingExtensionDecoration(inst);
@@ -624,14 +674,14 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
 
             // Make a pointer type of storageClass.
             builder.setInsertBefore(inst);
-            ptrType = builder.getPtrType(kIROp_PtrType, innerType, storageClass);
+            ptrType = builder.getPtrType(kIROp_PtrType, innerType, addressSpace);
             inst->setFullType(ptrType);
             if (needLoad)
             {
                 // Insert an explicit load at each use site.
                 traverseUses(inst, [&](IRUse* use)
                     {
-                        insertLoadAtLatestLocation(inst, use);
+                        insertLoadAtLatestLocation(inst, use, addressSpace);
                     });
             }
             else if (arrayType)
@@ -644,7 +694,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                             // For array resources, getElement(r, index) ==> getElementPtr(r, index).
                             IRBuilder builder(getElement);
                             builder.setInsertBefore(user);
-                            auto newAddr = builder.emitElementAddress(builder.getPtrType(kIROp_PtrType, innerElementType, storageClass), inst, getElement->getIndex());
+                            auto newAddr = builder.emitElementAddress(builder.getPtrType(kIROp_PtrType, innerElementType, addressSpace), inst, getElement->getIndex());
                             user->replaceUsesWith(newAddr);
                             user->removeAndDeallocate();
                             return;
@@ -655,48 +705,48 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         processGlobalVar(inst);
     }
 
-    SpvStorageClass getStorageClassFromGlobalParamResourceKind(LayoutResourceKind kind)
+    AddressSpace getAddressSpaceFromGlobalParamResourceKind(LayoutResourceKind kind)
     {
-        SpvStorageClass storageClass = SpvStorageClassMax;
+        AddressSpace addressSpace = AddressSpace::Generic;
         switch (kind)
         {
         case LayoutResourceKind::Uniform:
         case LayoutResourceKind::DescriptorTableSlot:
         case LayoutResourceKind::ConstantBuffer:
-            storageClass = SpvStorageClassUniform;
+            addressSpace = AddressSpace::Uniform;
             break;
         case LayoutResourceKind::VaryingInput:
-            storageClass = SpvStorageClassInput;
+            addressSpace = AddressSpace::Input;
             break;
         case LayoutResourceKind::VaryingOutput:
-            storageClass = SpvStorageClassOutput;
+            addressSpace = AddressSpace::Output;
             break;
         case LayoutResourceKind::ShaderResource:
         case LayoutResourceKind::UnorderedAccess:
-            storageClass = SpvStorageClassStorageBuffer;
+            addressSpace = getStorageBufferAddressSpace();
             break;
         case LayoutResourceKind::PushConstantBuffer:
-            storageClass = SpvStorageClassPushConstant;
+            addressSpace = AddressSpace::PushConstant;
             break;
         case LayoutResourceKind::RayPayload:
-            storageClass = SpvStorageClassIncomingRayPayloadKHR;
+            addressSpace = AddressSpace::IncomingRayPayload;
             break;
         case LayoutResourceKind::CallablePayload:
-            storageClass = SpvStorageClassIncomingCallableDataKHR;
+            addressSpace = AddressSpace::IncomingCallableData;
             break;
         case LayoutResourceKind::HitAttributes:
-            storageClass = SpvStorageClassHitAttributeKHR;
+            addressSpace = AddressSpace::HitAttribute;
             break;
         case LayoutResourceKind::ShaderRecord:
-            storageClass = SpvStorageClassShaderRecordBufferKHR;
+            addressSpace = AddressSpace::ShaderRecordBuffer;
             break;
         default:
             break;
         }
-        return storageClass;
+        return addressSpace;
     }
 
-    SpvStorageClass getGlobalParamStorageClass(IRVarLayout* varLayout)
+    AddressSpace getGlobalParamAddressSpace(IRVarLayout* varLayout)
     {
         auto typeLayout = varLayout->getTypeLayout()->unwrapArray();
         if (auto parameterGroupTypeLayout = as<IRParameterGroupTypeLayout>(typeLayout))
@@ -704,25 +754,85 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             varLayout = parameterGroupTypeLayout->getContainerVarLayout();
         }
 
-        SpvStorageClass result = SpvStorageClassMax;
+        auto result = AddressSpace::Generic;
         for (auto rr : varLayout->getOffsetAttrs())
         {
-            auto storageClass = getStorageClassFromGlobalParamResourceKind(rr->getResourceKind());
+            auto addressSpace = getAddressSpaceFromGlobalParamResourceKind(rr->getResourceKind());
             // If we haven't inferred a storage class yet, use the one we just found.
-            if (result == SpvStorageClassMax)
-                result = storageClass;
-            else if (result != storageClass)
+            if (result == AddressSpace::Generic)
+                result = addressSpace;
+            else if (result != addressSpace)
             {
-                // If we have inferred a storage class, and it is different from the one we just found,
-                // then we have conflicting uses of the resource, and we cannot infer a storage class.
+                // If we have inferred an address space, and it is different from the one we just found,
+                // then we have conflicting uses of the resource, and we cannot infer an address space.
                 // An exception is that a uniform storage class can be further specialized by PushConstants.
-                if (result == SpvStorageClassUniform)
-                    result = storageClass;
+                if (result == AddressSpace::Uniform)
+                    result = addressSpace;
                 else
-                    SLANG_UNEXPECTED("Var layout contains conflicting resource uses, cannot resolve a storage class.");
+                    SLANG_UNEXPECTED("Var layout contains conflicting resource uses, cannot resolve a storage class address space.");
             }
         }
         return result;
+    }
+
+    void processVar(IRInst* inst)
+    {
+        auto oldPtrType = as<IRPtrType>(inst->getDataType());
+        if (!oldPtrType->hasAddressSpace())
+        {
+            IRBuilder builder(inst);
+            builder.setInsertBefore(inst);
+            auto newPtrType = builder.getPtrType(
+                oldPtrType->getOp(), oldPtrType->getValueType(), AddressSpace::Function);
+            inst->setFullType(newPtrType);
+            addUsersToWorkList(inst);
+        }
+    }
+
+    void processParam(IRInst* inst)
+    {
+        auto block = getBlock(inst);
+        auto func = getParentFunc(block);
+        if (!block || !func)
+            return;
+        auto oldPtrType = as<IRPtrType>(inst->getDataType());
+        if (!oldPtrType)
+            return;
+        if (!oldPtrType->hasAddressSpace())
+        {
+            AddressSpace addressSpace = AddressSpace::Generic;
+
+            if (block == func->getFirstBlock())
+            {
+                // A pointer typed function parameter should always be in the storage buffer address space.
+                addressSpace = AddressSpace::UserPointer;
+            }
+            else
+            {
+                // The address space of a phi inst should always be the same as arguments.
+                auto args = getPhiArgs(inst);
+                for (auto arg : args)
+                {
+                    auto argPtrType = as<IRPtrType>(arg->getDataType());
+                    if (argPtrType->hasAddressSpace())
+                    {
+                        if (addressSpace == AddressSpace::Generic)
+                            addressSpace = argPtrType->getAddressSpace();
+                        else if (addressSpace != argPtrType->getAddressSpace())
+                            m_sharedContext->m_sink->diagnose(inst, Diagnostics::inconsistentPointerAddressSpace, inst);
+                    }
+                }
+            }
+            if (addressSpace != AddressSpace::Generic)
+            {
+                IRBuilder builder(inst);
+                builder.setInsertBefore(inst);
+                auto newPtrType = builder.getPtrType(
+                    oldPtrType->getOp(), oldPtrType->getValueType(), AddressSpace::UserPointer);
+                inst->setFullType(newPtrType);
+                addUsersToWorkList(inst);
+            }
+        }
     }
 
     void processGlobalVar(IRInst* inst)
@@ -730,6 +840,18 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         auto oldPtrType = as<IRPtrTypeBase>(inst->getDataType());
         if (!oldPtrType)
             return;
+
+        // Update the pointer value type with storage-buffer-address-space-decorated types.
+        auto newPtrValueType = oldPtrType->getValueType();
+        if (newPtrValueType != oldPtrType->getValueType())
+        {
+            IRBuilder builder(inst);
+            builder.setInsertBefore(inst);
+            IRType* newPtrType = oldPtrType->hasAddressSpace()
+                ? builder.getPtrType(oldPtrType->getOp(), newPtrValueType, oldPtrType->getAddressSpace())
+                : builder.getPtrType(oldPtrType->getOp(), newPtrValueType);
+            inst->setFullType(newPtrType);
+        }
 
         // If the pointer type is already qualified with address spaces (such as
         // lowered pointer type from a `HLSLStructuredBufferType`), make no
@@ -740,39 +862,45 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             return;
         }
 
-        SpvStorageClass storageClass = SpvStorageClassPrivate;
+        auto addressSpace = AddressSpace::ThreadLocal;
         if (as<IRGroupSharedRate>(inst->getRate()))
         {
-            storageClass = SpvStorageClassWorkgroup;
+            addressSpace = AddressSpace::GroupShared;
         }
         else if (const auto varLayout = getVarLayout(inst))
         {
-            auto cls = getGlobalParamStorageClass(varLayout);
-            if (cls != SpvStorageClassMax)
-                storageClass = cls;
+            auto cls = getGlobalParamAddressSpace(varLayout);
+            if (cls != AddressSpace::Generic)
+                addressSpace = cls;
         }
         for (auto decor : inst->getDecorations())
         {
             switch (decor->getOp())
             {
             case kIROp_VulkanRayPayloadDecoration:
-                storageClass = SpvStorageClassRayPayloadKHR;
+                addressSpace = AddressSpace::RayPayloadKHR;
+                break;
+            case kIROp_VulkanRayPayloadInDecoration:
+                addressSpace = AddressSpace::IncomingRayPayload;
                 break;
             case kIROp_VulkanCallablePayloadDecoration:
-                storageClass = SpvStorageClassCallableDataKHR;
+                addressSpace = AddressSpace::CallableDataKHR;
+                break;
+            case kIROp_VulkanCallablePayloadInDecoration:
+                addressSpace = AddressSpace::IncomingCallableData;
                 break;
             case kIROp_VulkanHitObjectAttributesDecoration:
-                storageClass = SpvStorageClassHitObjectAttributeNV;
+                addressSpace = AddressSpace::HitObjectAttribute;
                 break;
             case kIROp_VulkanHitAttributesDecoration:
-                storageClass = SpvStorageClassHitAttributeKHR;
+                addressSpace = AddressSpace::HitAttribute;
                 break;
             }
         }
         IRBuilder builder(m_sharedContext->m_irModule);
         builder.setInsertBefore(inst);
         auto newPtrType =
-            builder.getPtrType(oldPtrType->getOp(), oldPtrType->getValueType(), storageClass);
+            builder.getPtrType(oldPtrType->getOp(), oldPtrType->getValueType(), addressSpace);
         inst->setFullType(newPtrType);
         addUsersToWorkList(inst);
         return;
@@ -788,22 +916,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             if (!snippet)
                 return;
             if (snippet->resultStorageClass != SpvStorageClassMax)
-            {
-                auto ptrType = as<IRPtrTypeBase>(inst->getDataType());
-                if (!ptrType)
-                    return;
-                IRBuilder builder(m_sharedContext->m_irModule);
-                builder.setInsertBefore(inst);
-                auto qualPtrType = builder.getPtrType(
-                    ptrType->getOp(), ptrType->getValueType(), snippet->resultStorageClass);
-                List<IRInst*> args;
-                for (UInt i = 0; i < inst->getArgCount(); i++)
-                    args.add(inst->getArg(i));
-                auto newCall = builder.emitCallInst(qualPtrType, funcValue, args);
-                inst->replaceUsesWith(newCall);
-                inst->removeAndDeallocate();
-                addUsersToWorkList(newCall);
-            }
+                SLANG_UNIMPLEMENTED_X("Specifying storage classes in spirv __target_intrinsic snippets");
             return;
         }
 
@@ -828,6 +941,16 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         for (UInt i = 0; i < inst->getArgCount(); i++)
         {
             auto arg = inst->getArg(i);
+            auto paramType = funcType->getParamType(i);
+            if (as<IRPtrType>(paramType))
+            {
+                // If the parameter has an explicit pointer type,
+                // then we know the user is using the variable pointer
+                // capability to pass a true pointer.
+                // In this case we should not rewrite the call.
+                newArgs.add(arg);
+                continue;
+            }
             auto ptrType = as<IRPtrTypeBase>(arg->getDataType());
             if (!as<IRPtrTypeBase>(arg->getDataType()))
             {
@@ -882,7 +1005,10 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         SLANG_ASSERT((UInt)newArgs.getCount() == inst->getArgCount());
         if (writeBacks.getCount())
         {
-            auto newCall = builder.emitCallInst(inst->getFullType(), inst->getCallee(), newArgs);
+            auto newCall = builder.emitCallInst(
+                inst->getFullType(),
+                inst->getCallee(),
+                newArgs);
             for (auto wb : writeBacks)
             {
                 auto newVal = builder.emitLoad(wb.tempVar);
@@ -924,7 +1050,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 builder.setInsertBefore(inst);
             else
                 setInsertAfterOrdinaryInst(&builder, x);
-            y = builder.emitVar(x->getDataType(), SpvStorageClassFunction);
+            y = builder.emitVar(x->getDataType(), AddressSpace::Function);
             builder.emitStore(y, x);
             if (x->getParent()->getOp() != kIROp_Module)
                 m_mapArrayValueToVar.set(x, y);
@@ -973,6 +1099,49 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         processGetElementPtrImpl(gepInst, gepInst->getBase(), gepInst->getIndex());
     }
 
+    void processMeshOutputGetElementPtr(IRMeshOutputRef* gepInst)
+    {
+        processGetElementPtrImpl(gepInst, gepInst->getBase(), gepInst->getIndex());
+    }
+
+    void processMeshOutputSet(IRMeshOutputSet* setInst)
+    {
+        IRBuilder builder(m_sharedContext->m_irModule);
+        builder.setInsertBefore(setInst);
+        const auto p = builder.emitElementAddress(setInst->getBase(), setInst->getIndex());
+        const auto s = builder.emitStore(p, setInst->getElementValue());
+        setInst->removeAndDeallocate();
+        addToWorkList(p);
+        addToWorkList(s);
+    }
+
+    void processGetOffsetPtr(IRInst* offsetPtrInst)
+    {
+        auto ptrOperandType = as<IRPtrType>(offsetPtrInst->getOperand(0)->getDataType());
+        if (!ptrOperandType)
+            return;
+        if (!ptrOperandType->hasAddressSpace())
+            return;
+        auto resultPtrType = as<IRPtrType>(offsetPtrInst->getDataType());
+        if (!resultPtrType)
+            return;
+        if (resultPtrType->getAddressSpace() != ptrOperandType->getAddressSpace())
+        {
+            IRBuilder builder(offsetPtrInst);
+            builder.setInsertBefore(offsetPtrInst);
+            auto newResultType = builder.getPtrType(resultPtrType->getOp(),
+                resultPtrType->getValueType(),
+                ptrOperandType->getAddressSpace());
+            auto newInst = builder.replaceOperand(&offsetPtrInst->typeUse, newResultType);
+            addUsersToWorkList(newInst);
+        }
+    }
+
+    AddressSpace getStorageBufferAddressSpace()
+    {
+        return m_sharedContext->isSpirv14OrLater() ? AddressSpace::StorageBuffer : AddressSpace::Uniform;
+    }
+
     void processStructuredBufferLoad(IRInst* loadInst)
     {
         auto sb = loadInst->getOperand(0);
@@ -981,7 +1150,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         builder.setInsertBefore(loadInst);
         IRInst* args[] = { sb, index };
         auto addrInst = builder.emitIntrinsicInst(
-            builder.getPtrType(kIROp_PtrType, loadInst->getFullType(), SpvStorageClassStorageBuffer),
+            builder.getPtrType(kIROp_PtrType, loadInst->getFullType(), getStorageBufferAddressSpace()),
             kIROp_RWStructuredBufferGetElementPtr,
             2,
             args);
@@ -1000,7 +1169,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         builder.setInsertBefore(storeInst);
         IRInst* args[] = { sb, index };
         auto addrInst = builder.emitIntrinsicInst(
-            builder.getPtrType(kIROp_PtrType, value->getFullType(), SpvStorageClassStorageBuffer),
+            builder.getPtrType(kIROp_PtrType, value->getFullType(), getStorageBufferAddressSpace()),
             kIROp_RWStructuredBufferGetElementPtr,
             2,
             args);
@@ -1008,6 +1177,125 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         storeInst->replaceUsesWith(newStore);
         storeInst->removeAndDeallocate();
         addUsersToWorkList(newStore);
+    }
+
+    void processNonUniformResourceIndex(IRInst* nonUniformResourceIndexInst)
+    {
+        // implement the translation to spirv by walking up the use-def chain
+        // from nonUniformResource inst of an index to an array of buffer or
+        // texture def all the way to the leaf operations. To be precise:
+        // - go through GEP and see if it calls an intrinsic function,
+        //   then decorate the address itself (GetElementPtr)
+        // - go through GEP to identify the pointer access and the Loads that it
+        //   accesses (GetElementPtr -> Load), then decorate the load instruction.
+        // - go through IntCasts to deal with u32 -> i32 / vice-versa (IntCast)
+        List<IRInst*> resWorkList;
+
+        // Handle cases when `nonUniformResourceIndexInst` inst is wrapped around
+        // an index in a nested fashion, i.e. nonUniform(nonUniform(index)) by
+        // only adding the inner-most inst in the worklist, and work our way out.
+        auto insti = nonUniformResourceIndexInst;
+        while (insti->getOp() == kIROp_NonUniformResourceIndex)
+        {
+            if (resWorkList.getCount() != 0)
+                resWorkList.removeLast();
+            resWorkList.add(insti);
+            insti = insti->getOperand(0);
+        }
+
+        // For all the users of a `nonUniformResourceIndexInst`, make them directly
+        // use the underlying base inst that is wrapped by `nonUniformResourceIndex`
+        // and finally wrap them with a `nonUniformResourceIndex`, and add back to the
+        // worklist, and keep bubbling them up until it can.
+        for (Index i = 0; i < resWorkList.getCount(); i++)
+        {
+            auto inst = resWorkList[i];
+            traverseUses(inst, [&](IRUse* use)
+            {
+                auto user = use->getUser();
+                IRBuilder builder(user);
+                builder.setInsertBefore(user);
+
+                IRInst* newUser = nullptr;
+                switch (user->getOp())
+                {
+                case kIROp_IntCast:
+                    // Replace intCast(nonUniformRes(x)), into nonUniformRes(intCast(x))
+                    newUser = builder.emitCast(user->getFullType(), inst->getOperand(0));
+                    break;
+                case kIROp_GetElementPtr:
+                    // Ignore when `NonUniformResourceIndex` is not on the index
+                    if (user->getOperand(1) == inst)
+                    {
+                        // Replace gep(pArray, nonUniformRes(x)), into nonUniformRes(gep(pArray, x))
+                        newUser = builder.emitElementAddress(user->getFullType(), user->getOperand(0), inst->getOperand(0));
+                    }
+                    break;
+                case kIROp_NonUniformResourceIndex:
+                    // Replace nonUniformRes(nonUniformRes(x)), into nonUniformRes(x)
+                    newUser = inst->getOperand(0);
+                    break;
+                case kIROp_Load:
+                    // Replace load(nonUniformRes(x)), into nonUniformRes(load(x))
+                    newUser = builder.emitLoad(user->getFullType(), inst->getOperand(0));
+                    break;
+                default:
+                    // Ignore for all other unknown insts.
+                    break;
+                };
+
+                // Early exit when we could not process the `NonUniformResourceIndex` inst.
+                if (!newUser)
+                    return;
+
+                auto nonuniformUser = builder.emitNonUniformResourceIndexInst(newUser);
+                user->replaceUsesWith(nonuniformUser);
+
+                // Update the worklist with the newly added `NonUniformResourceIndex` inst, based on
+                // the base inst it was constructed around, in case we need to further bubble up
+                // the `NonUniformResourceIndex` inst.
+                switch (user->getOp())
+                {
+                case kIROp_IntCast:
+                case kIROp_GetElementPtr:
+                case kIROp_Load:
+                case kIROp_NonUniformResourceIndex:
+                    resWorkList.add(nonuniformUser);
+                    break;
+                };
+
+                // Clean up the base inst from the IR module, to avoid duplicate decorations.
+                user->removeAndDeallocate();
+            });
+        }
+
+        // Once all the `NonUniformResourceIndex` insts are visited, and the inst type is bubbled up
+        // to the parent, a decoration is added to the operands of the insts.
+        for (int i = 0; i < resWorkList.getCount(); ++i)
+        {
+            // It is only required to decorate the base inst, if the `NonUniformResourceIndex` inst
+            // around it has any active uses.
+            auto inst = resWorkList[i];
+            if (!inst->hasUses())
+            {
+                inst->removeAndDeallocate();
+                continue;
+            }
+            // For each of the `NonUniformResourceIndex` inst that remain, decorate the base inst
+            // with a [NonUniformResource] decoration, which is the operand0 of the inst, only
+            // when the type is a resource type, or a pointer to a resource type, or a pointer
+            // in the Physical Storage buffer address space.
+            auto operand = inst->getOperand(0);
+            auto type = operand->getDataType();
+            if (isResourceType(type) ||
+                isPointerToResourceType(type))
+            {
+                IRBuilder builder(operand);
+                builder.addSPIRVNonUniformResourceDecoration(operand);
+            }
+            inst->replaceUsesWith(operand);
+            inst->removeAndDeallocate();
+        }
     }
 
     void processImageSubscript(IRImageSubscript* subscript)
@@ -1021,7 +1309,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             auto newPtrType = builder.getPtrType(
                 ptrType->getOp(),
                 ptrType->getValueType(),
-                SpvStorageClassImage);
+                AddressSpace::Image);
             subscript->setFullType(newPtrType);
 
             // HACK: assumes the image operand is a load and replace it with
@@ -1044,13 +1332,16 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             if (!ptrType->hasAddressSpace())
                 return;
             auto oldResultType = as<IRPtrTypeBase>(inst->getDataType());
-            if (oldResultType->getAddressSpace() != ptrType->getAddressSpace())
+            auto oldValueType = oldResultType->getValueType();
+            auto newValueType = oldValueType;
+            
+            if (oldValueType != newValueType || oldResultType->getAddressSpace() != ptrType->getAddressSpace())
             {
                 IRBuilder builder(m_sharedContext->m_irModule);
                 builder.setInsertBefore(inst);
                 auto newPtrType = builder.getPtrType(
                     oldResultType->getOp(),
-                    oldResultType->getValueType(),
+                    newValueType,
                     ptrType->getAddressSpace());
                 auto newInst =
                     builder.emitFieldAddress(newPtrType, inst->getBase(), inst->getField());
@@ -1059,6 +1350,19 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 addUsersToWorkList(newInst);
             }
         }
+    }
+
+    void processFieldExtract(IRFieldExtract* inst)
+    {
+        auto ptrType = as<IRPtrType>(inst->getDataType());
+        if (!ptrType)
+            return;
+        auto newPtrType = ptrType;
+        if (newPtrType == ptrType)
+            return;
+        IRBuilder builder(inst);
+        auto newInst = builder.replaceOperand(&inst->typeUse, newPtrType);
+        addUsersToWorkList(newInst);
     }
 
     void duplicateMergeBlockIfNeeded(IRUse* breakBlockUse)
@@ -1090,7 +1394,6 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
 
     void processLoop(IRLoop* loop)
     {
-
         // 2.11.1. Rules for Structured Control-flow Declarations
         // Structured control flow declarations must satisfy the following
         // rules:
@@ -1110,23 +1413,11 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         //       - the back-edge block must structurally post dominate the
         //         Continue Target
 
-        // If the continue block has only a single predecessor, pretend like it
-        // is just ordinary control flow
-        //
-        // TODO: could this fail in cases like this, where it had a single
-        // predecessor, but it's still nested inside a region?
-        // do{
-        //   if(x)
-        //     continue;
-        //   unreachable
-        // } while(foo)
+        // By this point, we should have already eliminated all continue jumps and
+        // turned them into a break jump. So all loop insts should satisfy
+        // continueBlock == targetBlock.
         const auto t = loop->getTargetBlock();
         auto c = loop->getContinueBlock();
-        if(c->getPredecessors().getCount() <= 1)
-        {
-            c = t;
-            loop->continueBlock.set(c);
-        }
 
         // Our IR allows multiple back-edges to a loop header if this is also
         // the loop continue block. SPIR-V does not so replace them with a
@@ -1182,6 +1473,8 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
 
                 // Insert a new continue block at the end of the loop
                 const auto newContinueBlock = builder.emitBlock();
+                addToWorkList(newContinueBlock);
+
                 newContinueBlock->insertBefore(loop->getBreakBlock());
 
                 // This block simply branches to the loop header, forwarding
@@ -1200,10 +1493,12 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 loop->block.set(t);
 
                 // Branch to the target in our new continue block
-                builder.emitBranch(t, ps.getCount(), ps.getBuffer());
+                auto branch = builder.emitBranch(t, ps.getCount(), ps.getBuffer());
+                addToWorkList(branch);
             }
         }
         duplicateMergeBlockIfNeeded(&loop->breakBlock);
+        addToWorkList(loop->getTargetBlock());
     }
 
     void processIfElse(IRIfElse* inst)
@@ -1219,6 +1514,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             auto newBlock = builder.emitBlock();
             builder.emitBranch(inst->getAfterBlock());
             inst->trueBlock.set(newBlock);
+            addToWorkList(newBlock);
         }
         if (inst->getFalseBlock() == inst->getAfterBlock())
         {
@@ -1226,6 +1522,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             auto newBlock = builder.emitBlock();
             builder.emitBranch(inst->getAfterBlock());
             inst->falseBlock.set(newBlock);
+            addToWorkList(newBlock);
         }
     }
 
@@ -1242,6 +1539,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             auto newBlock = builder.emitBlock();
             builder.emitBranch(inst->getBreakLabel());
             inst->defaultLabel.set(newBlock);
+            addToWorkList(newBlock);
         }
         for (UInt i = 0; i < inst->getCaseCount(); i++)
         {
@@ -1251,6 +1549,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 auto newBlock = builder.emitBlock();
                 builder.emitBranch(inst->getBreakLabel());
                 inst->getCaseLabelUse(i)->set(newBlock);
+                addToWorkList(newBlock);
             }
         }
     }
@@ -1309,6 +1608,33 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         return (as<IRSPIRVAsmInst>(inst) || as<IRSPIRVAsmOperand>(inst));
     }
 
+    void processConvertTexel(IRInst* asmBlockInst, IRInst* inst)
+    {
+        // If we see `__convertTexel(x)`, we need to return a vector<__sampledElementType(x), 4>.
+        IRInst* operand = inst->getOperand(0);
+        auto elementType = getSPIRVSampledElementType(operand->getDataType());
+        auto valueElementType = getVectorElementType(operand->getDataType());
+        IRBuilder builder(inst);
+        builder.setInsertBefore(asmBlockInst);
+        if (elementType != valueElementType)
+        {
+            auto floatCastType = replaceVectorElementType(operand->getDataType(), elementType);
+            operand = builder.emitCast(floatCastType, operand);
+        }
+        auto vecType = builder.getVectorType(elementType, 4);
+        if (vecType != operand->getDataType())
+        {
+            if (!as<IRVectorType>(operand->getDataType()))
+                operand = builder.emitMakeVectorFromScalar(vecType, operand);
+            else
+                operand = builder.emitVectorReshape(vecType, operand);
+        }
+        builder.setInsertBefore(inst);
+        auto spvAsmOperand = builder.emitSPIRVAsmOperandInst(operand);
+        inst->replaceUsesWith(spvAsmOperand);
+        inst->removeAndDeallocate();
+    }
+
     void processSPIRVAsm(IRSPIRVAsm* inst)
     {
         // Move anything that is not an spirv instruction to the outer parent.
@@ -1316,6 +1642,8 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         {
             if (!isAsmInst(child))
                 child->insertBefore(inst);
+            else if (child->getOp() == kIROp_SPIRVAsmOperandConvertTexel)
+                processConvertTexel(inst, child);
         }
     }
 
@@ -1344,154 +1672,268 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
 
     }
 
-    // Opcodes that can exist in global scope, as long as the operands are.
-    bool isLegalGlobalInst(IRInst* inst)
+    struct GlobalInstInliningContext
     {
-        switch (inst->getOp())
-        {
-        case kIROp_MakeStruct:
-        case kIROp_MakeArray:
-        case kIROp_MakeArrayFromElement:
-        case kIROp_MakeVector:
-        case kIROp_MakeMatrix:
-        case kIROp_MakeMatrixFromScalar:
-        case kIROp_MakeVectorFromScalar:
-            return true;
-        default:
-            return false;
-        }
-    }
+        Dictionary<IRInst*, bool> m_mapGlobalInstToShouldInline;
 
-    // Opcodes that can be inlined into function bodies.
-    bool isInlinableGlobalInst(IRInst* inst)
-    {
-        switch (inst->getOp())
-        {
-        case kIROp_Add:
-        case kIROp_Sub:
-        case kIROp_Mul:
-        case kIROp_FRem:
-        case kIROp_IRem:
-        case kIROp_Lsh:
-        case kIROp_Rsh:
-        case kIROp_And:
-        case kIROp_Or:
-        case kIROp_Not:
-        case kIROp_Neg:
-        case kIROp_FieldExtract:
-        case kIROp_FieldAddress:
-        case kIROp_GetElement:
-        case kIROp_GetElementPtr:
-        case kIROp_UpdateElement:
-        case kIROp_MakeTuple:
-        case kIROp_GetTupleElement:
-        case kIROp_MakeStruct:
-        case kIROp_MakeArray:
-        case kIROp_MakeArrayFromElement:
-        case kIROp_MakeVector:
-        case kIROp_MakeMatrix:
-        case kIROp_MakeMatrixFromScalar:
-        case kIROp_MakeVectorFromScalar:
-        case kIROp_swizzle:
-        case kIROp_swizzleSet:
-        case kIROp_MatrixReshape:
-        case kIROp_MakeString:
-        case kIROp_MakeResultError:
-        case kIROp_MakeResultValue:
-        case kIROp_GetResultError:
-        case kIROp_GetResultValue:
-        case kIROp_CastFloatToInt:
-        case kIROp_CastIntToFloat:
-        case kIROp_CastIntToPtr:
-        case kIROp_CastPtrToBool:
-        case kIROp_CastPtrToInt:
-        case kIROp_BitAnd:
-        case kIROp_BitNot:
-        case kIROp_BitOr:
-        case kIROp_BitXor:
-        case kIROp_BitCast:
-        case kIROp_IntCast:
-        case kIROp_FloatCast:
-        case kIROp_Greater:
-        case kIROp_Less:
-        case kIROp_Geq:
-        case kIROp_Leq:
-        case kIROp_Neq:
-        case kIROp_Eql:
-        case kIROp_Call:
-            return true;
-        default:
-            return false;
-        }
-    }
-
-    bool shouldInlineInst(IRInst* inst)
-    {
-        if (!isInlinableGlobalInst(inst))
-            return false;
-        if (isLegalGlobalInst(inst))
-        {
-            for (UInt i = 0; i < inst->getOperandCount(); i++)
-                if (shouldInlineInst(inst->getOperand(i)))
-                    return true;
-            return false;
-        }
-        return true;
-    }
-
-    /// Inline `inst` in the local function body so they can be emitted as a local inst.
-    ///
-    IRInst* maybeInlineGlobalValue(IRBuilder& builder, IRInst* inst, IRCloneEnv& cloneEnv)
-    {
-        if (!shouldInlineInst(inst))
+        // Opcodes that can exist in global scope, as long as the operands are.
+        bool isLegalGlobalInst(IRInst* inst)
         {
             switch (inst->getOp())
             {
-            case kIROp_Func:
-            case kIROp_Specialize:
-            case kIROp_Generic:
-            case kIROp_LookupWitness:
-                return inst;
+            case kIROp_MakeStruct:
+            case kIROp_MakeArray:
+            case kIROp_MakeArrayFromElement:
+            case kIROp_MakeVector:
+            case kIROp_MakeMatrix:
+            case kIROp_MakeMatrixFromScalar:
+            case kIROp_MakeVectorFromScalar:
+                return true;
+            default:
+                if (as<IRConstant>(inst))
+                    return true;
+                if (as<IRSPIRVAsmOperand>(inst))
+                    return true;
+                return false;
             }
-            if (as<IRType>(inst))
-                return inst;
+        }
 
-            // If we encounter a global value that shouldn't be inlined, e.g. a const literal,
-            // we should insert a GlobalValueRef() inst to wrap around it, so all the dependent uses
-            // can be pinned to the function body.
-            auto result = builder.emitGlobalValueRef(inst);
-            cloneEnv.mapOldValToNew[inst] = result;
+        // Opcodes that can be inlined into function bodies.
+        bool isInlinableGlobalInst(IRInst* inst)
+        {
+            switch (inst->getOp())
+            {
+            case kIROp_Add:
+            case kIROp_Sub:
+            case kIROp_Mul:
+            case kIROp_FRem:
+            case kIROp_IRem:
+            case kIROp_Lsh:
+            case kIROp_Rsh:
+            case kIROp_And:
+            case kIROp_Or:
+            case kIROp_Not:
+            case kIROp_Neg:
+            case kIROp_Div:
+            case kIROp_FieldExtract:
+            case kIROp_FieldAddress:
+            case kIROp_GetElement:
+            case kIROp_GetElementPtr:
+            case kIROp_GetOffsetPtr:
+            case kIROp_UpdateElement:
+            case kIROp_MakeTuple:
+            case kIROp_GetTupleElement:
+            case kIROp_MakeStruct:
+            case kIROp_MakeArray:
+            case kIROp_MakeArrayFromElement:
+            case kIROp_MakeVector:
+            case kIROp_MakeMatrix:
+            case kIROp_MakeMatrixFromScalar:
+            case kIROp_MakeVectorFromScalar:
+            case kIROp_swizzle:
+            case kIROp_swizzleSet:
+            case kIROp_MatrixReshape:
+            case kIROp_MakeString:
+            case kIROp_MakeResultError:
+            case kIROp_MakeResultValue:
+            case kIROp_GetResultError:
+            case kIROp_GetResultValue:
+            case kIROp_CastFloatToInt:
+            case kIROp_CastIntToFloat:
+            case kIROp_CastIntToPtr:
+            case kIROp_PtrCast:
+            case kIROp_CastPtrToBool:
+            case kIROp_CastPtrToInt:
+            case kIROp_BitAnd:
+            case kIROp_BitNot:
+            case kIROp_BitOr:
+            case kIROp_BitXor:
+            case kIROp_BitCast:
+            case kIROp_IntCast:
+            case kIROp_FloatCast:
+            case kIROp_Greater:
+            case kIROp_Less:
+            case kIROp_Geq:
+            case kIROp_Leq:
+            case kIROp_Neq:
+            case kIROp_Eql:
+            case kIROp_Call:
+            case kIROp_SPIRVAsm:
+                return true;
+            default:
+                if (as<IRSPIRVAsmInst>(inst))
+                    return true;
+                if (as<IRSPIRVAsmOperand>(inst))
+                    return true;
+                return false;
+            }
+        }
+
+        bool shouldInlineInstImpl(IRInst* inst)
+        {
+            if (!isInlinableGlobalInst(inst))
+                return false;
+            if (isLegalGlobalInst(inst))
+            {
+                for (UInt i = 0; i < inst->getOperandCount(); i++)
+                    if (shouldInlineInst(inst->getOperand(i)))
+                        return true;
+                return false;
+            }
+            return true;
+        }
+
+        bool shouldInlineInst(IRInst* inst)
+        {
+            bool result = false;
+            if (m_mapGlobalInstToShouldInline.tryGetValue(inst, result))
+                return result;
+            result = shouldInlineInstImpl(inst);
+            m_mapGlobalInstToShouldInline[inst] = result;
             return result;
         }
-        
-        // If the global value is inlinable, we make all its operands avaialble locally, and then copy it
-        // to the local scope.
-        ShortList<IRInst*> args;
-        for (UInt i = 0; i < inst->getOperandCount(); i++)
+
+        IRInst* inlineInst(IRBuilder& builder, IRCloneEnv& cloneEnv, IRInst* inst)
         {
-            auto operand = inst->getOperand(i);
-            auto inlinedOperand = maybeInlineGlobalValue(builder, operand, cloneEnv);
-            args.add(inlinedOperand);
+            IRInst* result;
+            if (cloneEnv.mapOldValToNew.tryGetValue(inst, result))
+                return result;
+
+            for (UInt i = 0; i < inst->getOperandCount(); i++)
+            {
+                auto operand = inst->getOperand(i);
+                IRBuilder operandBuilder(builder);
+                setInsertBeforeOutsideASM(operandBuilder, builder.getInsertLoc().getInst());
+                maybeInlineGlobalValue(operandBuilder, inst, operand, cloneEnv);
+            }
+            result = cloneInstAndOperands(&cloneEnv, &builder, inst);
+            cloneEnv.mapOldValToNew[inst] = result;
+            IRBuilder subBuilder(builder);
+            subBuilder.setInsertInto(result);
+            for (auto child : inst->getDecorations())
+            {
+                cloneInst(&cloneEnv, &subBuilder, child);
+            }
+            for (auto child : inst->getChildren())
+            {
+                inlineInst(subBuilder, cloneEnv, child);
+            }
+            return result;
         }
-        auto result = cloneInst(&cloneEnv, &builder, inst);
-        cloneEnv.mapOldValToNew[inst] = result;
-        return result;
+
+        /// Inline `inst` in the local function body so they can be emitted as a local inst.
+        ///
+        IRInst* maybeInlineGlobalValue(IRBuilder& builder, IRInst* user, IRInst* inst, IRCloneEnv& cloneEnv)
+        {
+            if (!shouldInlineInst(inst))
+            {
+                switch (inst->getOp())
+                {
+                case kIROp_Func:
+                case kIROp_Specialize:
+                case kIROp_Generic:
+                case kIROp_LookupWitness:
+                    return inst;
+                }
+                if (as<IRType>(inst))
+                    return inst;
+
+                // If we encounter a global value that shouldn't be inlined, e.g. a const literal,
+                // we should insert a GlobalValueRef() inst to wrap around it, so all the dependent uses
+                // can be pinned to the function body.
+                auto result = inst;
+                bool shouldWrapGlobalRef = true;
+                if (!isLegalGlobalInst(user) && !getIROpInfo(user->getOp()).isHoistable())
+                    shouldWrapGlobalRef = false;
+                else if (as<IRSPIRVAsmOperand>(user) && as<IRSPIRVAsmOperandInst>(user))
+                    shouldWrapGlobalRef = false;
+                else if (as<IRSPIRVAsmInst>(user))
+                    shouldWrapGlobalRef = false;
+                if (shouldWrapGlobalRef)
+                    result = builder.emitGlobalValueRef(inst);
+                cloneEnv.mapOldValToNew[inst] = result;
+                return result;
+            }
+
+            // If the global value is inlinable, we make all its operands avaialble locally, and then copy it
+            // to the local scope.
+            return inlineInst(builder, cloneEnv, inst);
+        }
+    };
+
+    void processBranch(IRInst* branch)
+    {
+        addToWorkList(branch->getOperand(0));
     }
 
+    void processPtrLit(IRInst* inst)
+    {
+        IRBuilder builder(inst);
+        builder.setInsertBefore(inst);
+        auto newPtrType = as<IRPtrType>(inst->getFullType());
+        auto newInst = builder.emitCastIntToPtr(newPtrType, builder.getIntValue(builder.getUInt64Type(), 0));
+        inst->replaceUsesWith(newInst);
+        addUsersToWorkList(newInst);
+    }
+
+    void processStructField(IRStructField* field)
+    {
+        auto newFieldType = field->getFieldType();
+        if (newFieldType != field->getFieldType())
+            field->setFieldType(newFieldType);
+    }
+
+    void processComparison(IRInst* inst)
+    {
+        auto operand0 = inst->getOperand(0);
+        if (as<IRPtrType>(operand0->getDataType()))
+        {
+            // If we are doing pointer comparison, convert the operands into uints first.
+            IRBuilder builder(inst);
+            builder.setInsertBefore(inst);
+            auto castToUInt = [&](IRInst* operand)
+                {
+                    if (as<IRPtrLit>(operand))
+                        return builder.getIntValue(builder.getUInt64Type(), 0);
+                    else
+                        return builder.emitCastPtrToInt(operand);
+                };
+            auto newOperand0 = castToUInt(operand0);
+            SLANG_ASSERT(as<IRPtrType>(inst->getOperand(1)->getDataType()));
+            auto newOperand1 = castToUInt(inst->getOperand(1));
+            inst = builder.replaceOperand(inst->getOperands(), newOperand0);
+            inst = builder.replaceOperand(inst->getOperands() + 1, newOperand1);
+        }
+    }
+
+    List<IRInst*> m_instsToRemove;
     void processWorkList()
     {
-
         while (workList.getCount() != 0)
         {
             IRInst* inst = workList.getLast();
             workList.removeLast();
+
+            // Skip if inst has already been removed.
+            if (!inst->parent)
+                continue;
+
             switch (inst->getOp())
             {
+            case kIROp_StructField:
+                processStructField(as<IRStructField>(inst));
+                break;
             case kIROp_GlobalParam:
                 processGlobalParam(as<IRGlobalParam>(inst));
                 break;
             case kIROp_GlobalVar:
                 processGlobalVar(as<IRGlobalVar>(inst));
+                break;
+            case kIROp_Var:
+                processVar(as<IRVar>(inst));
+                break;
+            case kIROp_Param:
+                processParam(as<IRParam>(inst));
                 break;
             case kIROp_Call:
                 processCall(as<IRCall>(inst));
@@ -1502,14 +1944,26 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             case kIROp_GetElementPtr:
                 processGetElementPtr(as<IRGetElementPtr>(inst));
                 break;
+            case kIROp_GetOffsetPtr:
+                processGetOffsetPtr(inst);
+                break;
             case kIROp_FieldAddress:
                 processFieldAddress(as<IRFieldAddress>(inst));
+                break;
+            case kIROp_FieldExtract:
+                processFieldExtract(as<IRFieldExtract>(inst));
                 break;
             case kIROp_ImageSubscript:
                 processImageSubscript(as<IRImageSubscript>(inst));
                 break;
             case kIROp_RWStructuredBufferGetElementPtr:
-                processRWStructuredBufferGetElementPtr(as<IRRWStructuredBufferGetElementPtr>(inst));
+                processRWStructuredBufferGetElementPtr(cast<IRRWStructuredBufferGetElementPtr>(inst));
+                break;
+            case kIROp_MeshOutputRef:
+                processMeshOutputGetElementPtr(cast<IRMeshOutputRef>(inst));
+                break;
+            case kIROp_MeshOutputSet:
+                processMeshOutputSet(cast<IRMeshOutputSet>(inst));
                 break;
             case kIROp_RWStructuredBufferLoad:
             case kIROp_StructuredBufferLoad:
@@ -1520,6 +1974,9 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             case kIROp_RWStructuredBufferStore:
                 processRWStructuredBufferStore(inst);
                 break;
+            case kIROp_NonUniformResourceIndex:
+                processNonUniformResourceIndex(inst);
+                break;
             case kIROp_loop:
                 processLoop(as<IRLoop>(inst));
                 break;
@@ -1529,7 +1986,14 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             case kIROp_Switch:
                 processSwitch(as<IRSwitch>(inst));
                 break;
-
+            case kIROp_Less:
+            case kIROp_Leq:
+            case kIROp_Eql:
+            case kIROp_Geq:
+            case kIROp_Greater:
+            case kIROp_Neq:
+                processComparison(inst);
+                break;
             case kIROp_MakeVectorFromScalar:
             case kIROp_MakeUInt64:
             case kIROp_MakeVector:
@@ -1547,9 +2011,29 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             case kIROp_MakeOptionalNone:
                 processConstructor(inst);
                 break;
+            case kIROp_PtrLit:
+                processPtrLit(inst);
+                break;
+            case kIROp_unconditionalBranch:
+                processBranch(inst);
+                break;
             case kIROp_SPIRVAsm:
                 processSPIRVAsm(as<IRSPIRVAsm>(inst));
                 break;
+            case kIROp_DebugValue:
+                if (!isSimpleDataType(as<IRDebugValue>(inst)->getDebugVar()->getDataType()))
+                    inst->removeAndDeallocate();
+                break;
+            case kIROp_DebugVar:
+                if (!isSimpleDataType(as<IRDebugVar>(inst)->getDataType()))
+                {
+                    inst->removeFromParent();
+                    m_instsToRemove.add(inst);
+                }
+                break;
+            case kIROp_Func:
+                eliminateContinueBlocksInFunc(m_module, as<IRFunc>(inst));
+                [[fallthrough]];
             default:
                 for (auto child = inst->getLastChild(); child; child = child->getPrevInst())
                 {
@@ -1560,7 +2044,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         }
     }
 
-    void setInsertBeforeOutsideASM(IRBuilder& builder, IRInst* beforeInst)
+    static void setInsertBeforeOutsideASM(IRBuilder& builder, IRInst* beforeInst)
     {
         auto parent = beforeInst->getParent();
         while (parent)
@@ -1575,9 +2059,133 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
         builder.setInsertBefore(beforeInst);
     }
 
+    void determineSpirvVersion()
+    {
+        // Determine minimum spirv version from target request.
+        auto targetCaps = m_sharedContext->m_targetProgram->getTargetReq()->getTargetCaps();
+        for (auto targetAtomSet : targetCaps.getAtomSets())
+        {
+            for (auto atom : targetAtomSet)
+            {
+                auto spirvAtom = ((CapabilityName)atom);
+                switch (spirvAtom)
+                {
+                case CapabilityName::_spirv_1_0:
+                    m_sharedContext->requireSpirvVersion(0x10000);
+                    break;
+                case CapabilityName::_spirv_1_1:
+                    m_sharedContext->requireSpirvVersion(0x10100);
+                    break;
+                case CapabilityName::_spirv_1_2:
+                    m_sharedContext->requireSpirvVersion(0x10200);
+                    break;
+                case CapabilityName::_spirv_1_3:
+                    m_sharedContext->requireSpirvVersion(0x10300);
+                    break;
+                case CapabilityName::_spirv_1_4:
+                    m_sharedContext->requireSpirvVersion(0x10400);
+                    break;
+                case CapabilityName::_spirv_1_5:
+                    m_sharedContext->requireSpirvVersion(0x10500);
+                    break;
+                case CapabilityName::_spirv_1_6:
+                    m_sharedContext->requireSpirvVersion(0x10600);
+                    break;
+                case CapabilityName::SPV_EXT_demote_to_helper_invocation:
+                    m_sharedContext->m_useDemoteToHelperInvocationExtension = true;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+        // Scan through the entry points and find the max version required.
+        auto processInst = [&](IRInst* globalInst)
+        {
+            for (auto decor : globalInst->getDecorations())
+            {
+                switch (decor->getOp())
+                {
+                case kIROp_RequireCapabilityAtomDecoration:
+                    {
+                        auto atomDecor = as<IRRequireCapabilityAtomDecoration>(decor);
+                        switch (atomDecor->getAtom())
+                        {
+                        case CapabilityName::spirv_1_3:
+                            m_sharedContext->requireSpirvVersion(0X10300);
+                            break;
+                        case CapabilityName::spirv_1_4:
+                            m_sharedContext->requireSpirvVersion(0X10400);
+                            break;
+                        case CapabilityName::spirv_1_5:
+                            m_sharedContext->requireSpirvVersion(0X10500);
+                            break;
+                        case CapabilityName::spirv_1_6:
+                            m_sharedContext->requireSpirvVersion(0X10600);
+                            break;
+                        }
+                        break;
+                    }
+                }
+            }
+        };
+
+        processInst(m_module->getModuleInst());
+        for (auto globalInst : m_module->getGlobalInsts())
+        {
+            processInst(globalInst);
+        }
+
+        if (m_sharedContext->m_spvVersion < 0x10300)
+        {
+            // Direct SPIRV backend does not support generating SPIRV before 1.3,
+            // we will issue an error message here.
+            m_sharedContext->m_sink->diagnose(SourceLoc(), Diagnostics::spirvVersionNotSupported);
+        }
+    }
+
+    struct SpirvAddressSpaceAssigner : InitialAddressSpaceAssigner
+    {
+        virtual bool tryAssignAddressSpace(IRInst* inst, AddressSpace& outAddressSpace) override
+        {
+            SLANG_UNUSED(inst);
+            // Don't assign address space to additional insts, since we should have
+            // already assigned address space to them in earlier stages of legalization.
+            outAddressSpace = AddressSpace::Generic;
+            return false;
+        }
+
+        virtual AddressSpace getAddressSpaceFromVarType(IRInst* type) override
+        {
+            if (auto ptrType = as<IRPtrTypeBase>(type))
+            {
+                if (ptrType->hasAddressSpace())
+                    return ptrType->getAddressSpace();
+            }
+            return AddressSpace::Generic;
+        }
+
+        virtual AddressSpace getLeafInstAddressSpace(IRInst* inst) override
+        {
+            // Don't assign address space to additional insts, since we should have
+            // already assigned address space to them in earlier stages of legalization.
+            auto type = inst->getDataType();
+            for (;;)
+            {
+                auto newType = (IRType*)unwrapAttributedType(type);
+                newType = unwrapArray(newType);
+                if (newType == type) break;
+                type = newType;
+            }
+            if (!type)
+                return AddressSpace::Generic;
+            return getAddressSpaceFromVarType(type);
+        }
+    };
+
     void processModule()
     {
-        convertCompositeTypeParametersToPointers(m_module);
+        determineSpirvVersion();
 
         // Process global params before anything else, so we don't generate inefficient
         // array marhalling code for array-typed global params.
@@ -1593,6 +2201,9 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             }
         }
         processWorkList();
+
+        for (auto inst : m_instsToRemove)
+            inst->removeAndDeallocate();
 
         // Translate types.
         List<IRHLSLStructuredBufferTypeBase*> instsToProcess;
@@ -1614,7 +2225,7 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             auto lowered = lowerStructuredBufferType(t);
             IRBuilder builder(t);
             builder.setInsertBefore(t);
-            t->replaceUsesWith(builder.getPtrType(kIROp_PtrType, lowered.structType, SpvStorageClassStorageBuffer));
+            t->replaceUsesWith(builder.getPtrType(kIROp_PtrType, lowered.structType, getStorageBufferAddressSpace()));
         }
         for (auto t : textureFootprintTypes)
         {
@@ -1624,7 +2235,10 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             t->replaceUsesWith(lowered);
         }
 
+        // Inline global values that can't represented by SPIRV constant inst
+        // to their use sites.
         List<IRUse*> globalInstUsesToInline;
+        GlobalInstInliningContext globalInstInliningContext;
 
         for (auto globalInst : m_module->getGlobalInsts())
         {
@@ -1638,8 +2252,8 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
                 // After legalizing the control flow, we need to sort our blocks to ensure this is true.
                 sortBlocksInFunc(func);
             }
-
-            if (isInlinableGlobalInst(globalInst))
+            
+            if (globalInstInliningContext.isInlinableGlobalInst(globalInst))
             {
                 for (auto use = globalInst->firstUse; use; use = use->nextUse)
                 {
@@ -1655,9 +2269,78 @@ struct SPIRVLegalizationContext : public SourceEmitterBase
             IRBuilder builder(user);
             setInsertBeforeOutsideASM(builder, user);
             IRCloneEnv cloneEnv;
-            auto val = maybeInlineGlobalValue(builder, use->get(), cloneEnv);
+            auto val = globalInstInliningContext.maybeInlineGlobalValue(builder, use->getUser(), use->get(), cloneEnv);
             if (val != use->get())
                 builder.replaceOperand(use, val);
+        }
+
+        // Some legalization processing may change the function parameter types,
+        // so we need to update the function types to match that.
+        updateFunctionTypes();
+
+        // Lower all loads/stores from buffer pointers to use correct storage types.
+        // We didn't do the lowering for buffer pointers because we don't know which pointer
+        // types are actual storage buffer pointers until we propagated the address space of
+        // pointers in this pass. In the future we should consider separate out IRAddress as
+        // the type for IRVar, and use IRPtrType to dedicate pointers in user code, so we can
+        // safely lower the pointer load stores early together with other buffer types.
+        lowerBufferElementTypeToStorageType(m_sharedContext->m_targetProgram, m_module, true);
+
+        // Specalize address space for all pointers.
+        SpirvAddressSpaceAssigner addressSpaceAssigner;
+        specializeAddressSpace(m_module, &addressSpaceAssigner);
+    }
+
+    void updateFunctionTypes()
+    {
+        IRBuilder builder(m_module);
+        for (auto globalInst : m_module->getGlobalInsts())
+        {
+            auto func = as<IRFunc>(globalInst);
+            if (!func)
+                continue;
+            auto firstBlock = func->getFirstBlock();
+            if (!firstBlock)
+                continue;
+
+            builder.setInsertBefore(func);
+            auto type = func->getDataType();
+            auto oldFuncType = as<IRFuncType>(type);
+            auto resultType = oldFuncType->getResultType();
+            List<IRType*> newOperands;
+            for (auto block : func->getBlocks())
+            {
+                for (auto inst : block->getChildren())
+                {
+                    if (auto retInst = as<IRReturn>(inst))
+                    {
+                        resultType = retInst->getVal()->getFullType();
+                        break;
+                    }
+                }
+            }
+            for (auto param : firstBlock->getParams())
+            {
+                newOperands.add(param->getDataType());
+            }
+            bool changed = resultType != oldFuncType->getResultType();
+            if (!changed)
+            {
+                for (UInt i = 0; i < oldFuncType->getParamCount(); i++)
+                {
+                    if (oldFuncType->getParamType(i) != newOperands[i])
+                    {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if (changed)
+            {
+                builder.setInsertBefore(func);
+                auto newFuncType = builder.getFuncType(newOperands, resultType);
+                func->setFullType(newFuncType);
+            }
         }
     }
 };
@@ -1685,103 +2368,7 @@ void legalizeSPIRV(SPIRVEmitSharedContext* sharedContext, IRModule* module)
     context.processModule();
 }
 
-void buildEntryPointReferenceGraph(SPIRVEmitSharedContext* context, IRModule* module)
-{
-    struct WorkItem
-    {
-        IRFunc* entryPoint; IRInst* inst; 
-    
-        HashCode getHashCode() const
-        {
-            return combineHash(Slang::getHashCode(entryPoint), Slang::getHashCode(inst));
-        }
-        bool operator == (const WorkItem& other) const
-        {
-            return entryPoint == other.entryPoint && inst == other.inst;
-        }
-    };
-    HashSet<WorkItem> workListSet;
-    List<WorkItem> workList;
-    auto addToWorkList = [&](WorkItem item)
-    {
-        if (workListSet.add(item))
-            workList.add(item);
-    };
-
-    auto registerEntryPointReference = [&](IRFunc* entryPoint, IRInst* inst)
-        {
-            if (auto set = context->m_referencingEntryPoints.tryGetValue(inst))
-                set->add(entryPoint);
-            else
-            {
-                HashSet<IRFunc*> newSet;
-                newSet.add(entryPoint);
-                context->m_referencingEntryPoints.add(inst, _Move(newSet));
-            }
-        };
-    auto visit = [&](IRFunc* entryPoint, IRInst* inst)
-        {
-            if (auto code = as<IRGlobalValueWithCode>(inst))
-            {
-                registerEntryPointReference(entryPoint, inst);
-                for (auto child : code->getChildren())
-                {
-                    addToWorkList({ entryPoint, child });
-                }
-                return;
-            }
-            switch (inst->getOp())
-            {
-            case kIROp_GlobalParam:
-            case kIROp_SPIRVAsmOperandBuiltinVar:
-                registerEntryPointReference(entryPoint, inst);
-                break;
-            case kIROp_Block:
-            case kIROp_SPIRVAsm:
-                for (auto child : inst->getChildren())
-                {
-                    addToWorkList({ entryPoint, child });
-                }
-                break;
-            case kIROp_Call:
-                {
-                    auto call = as<IRCall>(inst);
-                    addToWorkList({ entryPoint, call->getCallee() });
-                }
-                break;
-            case kIROp_SPIRVAsmOperandInst:
-                {
-                    auto operand = as<IRSPIRVAsmOperandInst>(inst);
-                    addToWorkList({ entryPoint, operand->getValue() });
-                }
-                break;
-            }
-            for (UInt i = 0; i < inst->getOperandCount(); i++)
-            {
-                auto operand = inst->getOperand(i);
-                switch (operand->getOp())
-                {
-                case kIROp_GlobalParam:
-                case kIROp_GlobalVar:
-                case kIROp_SPIRVAsmOperandBuiltinVar:
-                    addToWorkList({ entryPoint, operand });
-                    break;
-                }
-            }
-        };
-
-    for (auto globalInst : module->getGlobalInsts())
-    {
-        if (globalInst->getOp() == kIROp_Func && globalInst->findDecoration<IREntryPointDecoration>())
-        {
-            visit(as<IRFunc>(globalInst), globalInst);
-        }
-    }
-    for (Index i = 0; i < workList.getCount(); i++)
-        visit(workList[i].entryPoint, workList[i].inst);
-}
-
-void simplifyIRForSpirvLegalization(DiagnosticSink* sink, IRModule* module)
+void simplifyIRForSpirvLegalization(TargetProgram* target, DiagnosticSink* sink, IRModule* module)
 {
     bool changed = true;
     const int kMaxIterations = 8;
@@ -1796,7 +2383,7 @@ void simplifyIRForSpirvLegalization(DiagnosticSink* sink, IRModule* module)
         changed = false;
 
         changed |= applySparseConditionalConstantPropagationForGlobalScope(module, sink);
-        changed |= peepholeOptimizeGlobalScope(module);
+        changed |= peepholeOptimizeGlobalScope(target, module);
 
         for (auto inst : module->getGlobalInsts())
         {
@@ -1809,10 +2396,102 @@ void simplifyIRForSpirvLegalization(DiagnosticSink* sink, IRModule* module)
             {
                 funcChanged = false;
                 funcChanged |= applySparseConditionalConstantPropagation(func, sink);
-                funcChanged |= peepholeOptimize(func);
+                funcChanged |= peepholeOptimize(target, func);
                 funcChanged |= removeRedundancyInFunc(func);
-                funcChanged |= simplifyCFG(func, CFGSimplificationOptions::getFast());
+                CFGSimplificationOptions options;
+                options.removeTrivialSingleIterationLoops = true;
+                options.removeSideEffectFreeLoops = false;
+                funcChanged |= simplifyCFG(func, options);
                 eliminateDeadCode(func);
+            }
+        }
+    }
+}
+
+static bool isRasterOrderedResource(IRInst* inst)
+{
+    if (auto memoryQualifierDecoration = inst->findDecoration<IRMemoryQualifierSetDecoration>())
+    {
+        if (memoryQualifierDecoration->getMemoryQualifierBit() & MemoryQualifierSetModifier::Flags::kRasterizerOrdered)
+            return true;
+    }
+    auto type = inst->getDataType();
+    for (;;)
+    {
+        if (auto ptrType = as<IRPtrTypeBase>(type))
+        {
+            type = ptrType->getValueType();
+            continue;
+        }
+        if (auto arrayType = as<IRArrayTypeBase>(type))
+        {
+            type = arrayType->getElementType();
+            continue;
+        }
+        break;
+    }
+    if (auto textureType = as<IRTextureTypeBase>(type))
+    {
+        if (textureType->getAccess() == SLANG_RESOURCE_ACCESS_RASTER_ORDERED)
+            return true;
+    }
+    return false;
+}
+
+static bool hasExplicitInterlockInst(IRFunc* func)
+{
+    for (auto block : func->getBlocks())
+    {
+        for (auto inst : block->getChildren())
+        {
+            if (inst->getOp() == kIROp_BeginFragmentShaderInterlock)
+                return true;
+        }
+    }
+    return false;
+}
+
+void insertFragmentShaderInterlock(SPIRVEmitSharedContext* context, IRModule* module)
+{
+    HashSet<IRFunc*> fragmentShaders;
+    for (auto& [inst, entryPoints] : context->m_referencingEntryPoints)
+    {
+        if (isRasterOrderedResource(inst))
+        {
+            for (auto entryPoint : entryPoints)
+            {
+                auto entryPointDecor = entryPoint->findDecoration<IREntryPointDecoration>();
+                if (!entryPointDecor)
+                    continue;
+
+                if (entryPointDecor->getProfile().getStage() == Stage::Fragment)
+                {
+                    fragmentShaders.add(entryPoint);
+                }
+            }
+        }
+    }
+
+    IRBuilder builder(module);
+    for (auto entryPoint : fragmentShaders)
+    {
+        if (hasExplicitInterlockInst(entryPoint))
+            continue;
+        auto firstBlock = entryPoint->getFirstBlock();
+        if (!firstBlock)
+            continue;
+        builder.setInsertBefore(firstBlock->getFirstOrdinaryInst());
+        builder.emitBeginFragmentShaderInterlock();
+        for (auto block : entryPoint->getBlocks())
+        {
+            if (auto inst = block->getTerminator())
+            {
+                if (inst->getOp() == kIROp_Return || 
+                    !context->isSpirv16OrLater() && inst->getOp() == kIROp_discard)
+                {
+                    builder.setInsertBefore(inst);
+                    builder.emitEndFragmentShaderInterlock();
+                }
             }
         }
     }
@@ -1826,8 +2505,9 @@ void legalizeIRForSPIRV(
 {
     SLANG_UNUSED(entryPoints);
     legalizeSPIRV(context, module);
-    simplifyIRForSpirvLegalization(codeGenContext->getSink(), module);
-    buildEntryPointReferenceGraph(context, module);
+    simplifyIRForSpirvLegalization(context->m_targetProgram, codeGenContext->getSink(), module);
+    buildEntryPointReferenceGraph(context->m_referencingEntryPoints, module);
+    insertFragmentShaderInterlock(context, module);
 }
 
 } // namespace Slang

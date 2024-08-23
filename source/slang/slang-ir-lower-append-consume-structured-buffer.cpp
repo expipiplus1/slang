@@ -7,7 +7,7 @@
 
 namespace Slang
 {
-    static void lowerStructuredBufferType(TargetRequest* target, IRHLSLStructuredBufferTypeBase* type)
+    static void lowerStructuredBufferType(TargetProgram* target, IRHLSLStructuredBufferTypeBase* type)
     {
         IRBuilder builder(type);
         builder.setInsertBefore(type);
@@ -18,11 +18,11 @@ namespace Slang
         auto structType = builder.createStructType();
         StringBuilder nameSb;
         if (type->getOp() == kIROp_HLSLAppendStructuredBufferType)
-            nameSb << "AppendStructuredBuffer_";
+            nameSb << "AppendStructuredBuffer<";
         else
-            nameSb << "ConsumeStructuredBuffer_";
+            nameSb << "ConsumeStructuredBuffer<";
         getTypeNameHint(nameSb, elementType);
-        nameSb << "_t";
+        nameSb << ">";
         builder.addNameHintDecoration(structType, nameSb.produceString().getUnownedSlice());
 
         auto elementBufferKey = builder.createStructKey();
@@ -31,8 +31,14 @@ namespace Slang
         auto counterBufferKey = builder.createStructKey();
         builder.addNameHintDecoration(counterBufferKey, UnownedStringSlice("counter"));
 
-        auto elementBufferType = builder.getType(kIROp_HLSLRWStructuredBufferType, elementType);
-        auto counterBufferType = builder.getType(kIROp_HLSLRWStructuredBufferType, builder.getIntType());
+        builder.addDecoration(elementBufferKey, kIROp_CounterBufferDecoration, counterBufferKey);
+
+        IRInst* operands[2] = { elementType, type->getDataLayout() };
+        auto elementBufferType = builder.getType(kIROp_HLSLRWStructuredBufferType, 2, operands);
+
+        operands[0] = builder.getIntType();
+        operands[1] = builder.getType(kIROp_DefaultBufferLayoutType);
+        auto counterBufferType = builder.getType(kIROp_HLSLRWStructuredBufferType, 2, operands);
 
         builder.createStructField(structType, elementBufferKey, elementBufferType);
         builder.createStructField(structType, counterBufferKey, counterBufferType);
@@ -42,7 +48,7 @@ namespace Slang
 
         IRTypeLayout::Builder elementTypeLayoutBuilder(&builder);
         IRSizeAndAlignment elementSize;
-        getSizeAndAlignment(target, layoutRules, elementType, &elementSize);
+        getSizeAndAlignment(target->getOptionSet(), layoutRules, elementType, &elementSize);
         elementTypeLayoutBuilder.addResourceUsage(LayoutResourceKind::Uniform, LayoutSize((LayoutSize::RawValue)elementSize.getStride()));
         auto elementTypeLayout = elementTypeLayoutBuilder.build();
 
@@ -247,7 +253,7 @@ namespace Slang
         type->replaceUsesWith(structType);
     }
 
-    void lowerAppendConsumeStructuredBuffers(TargetRequest* target, IRModule* module, DiagnosticSink* sink)
+    void lowerAppendConsumeStructuredBuffers(TargetProgram* target, IRModule* module, DiagnosticSink* sink)
     {
         SLANG_UNUSED(sink);
         for (auto globalInst : module->getGlobalInsts())

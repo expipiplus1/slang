@@ -98,6 +98,7 @@ class TargetCaseStmt : public Stmt
 {
     SLANG_AST_CLASS(TargetCaseStmt)
     int32_t capability;
+    Token capabilityToken;
     Stmt* body = nullptr;
 };
 
@@ -113,6 +114,8 @@ class IntrinsicAsmStmt : public Stmt
     SLANG_AST_CLASS(IntrinsicAsmStmt)
 
     String asmText;
+
+    List<Expr*> args;
 };
 
 // A statement that is expected to appear lexically nested inside
@@ -142,6 +145,8 @@ class CaseStmt : public CaseStmtBase
     SLANG_AST_CLASS(CaseStmt)
 
     Expr* expr = nullptr;
+
+    Val* exprVal = nullptr;
 };
 
 // a `default` statement inside a `switch`

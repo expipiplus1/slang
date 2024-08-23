@@ -66,7 +66,10 @@ void TextureTypeInfo::writeFuncBody(
     const char* funcName,
     const String& glsl,
     const String& cuda,
-    const String& spirv)
+    const String& spirvDefault,
+    const String& spirvRWDefault,
+    const String& spirvCombined,
+    const String& metal)
 {
     BraceScope funcScope{i, sb};
     {
@@ -88,12 +91,36 @@ void TextureTypeInfo::writeFuncBody(
             sb << i << "case cuda:\n";
             sb << i << "__intrinsic_asm \"" << cuda << "\";\n";
         }
-        if(spirv.getLength())
+        if (metal.getLength())
+        {
+            sb << i << "case metal:\n";
+            sb << i << "__intrinsic_asm \"" << metal << "\";\n";
+        }
+        if(spirvDefault.getLength() && spirvCombined.getLength())
         {
             sb << i << "case spirv:\n";
+            sb << i << "if (access == " << kStdlibResourceAccessReadWrite << ")\n";
             sb << i << "return spirv_asm\n";
-            BraceScope spirvScope{i, sb, ";\n"};
-            sb << spirv << "\n";
+            {
+                BraceScope spirvRWScope{ i, sb, ";\n" };
+                sb << spirvRWDefault << "\n";
+            }
+            sb << i << "else if (isCombined != 0)\n";
+            sb << i << "{\n";
+            {
+                sb << i << "return spirv_asm\n";
+                BraceScope spirvCombinedScope{i, sb, ";\n"};
+                sb << spirvCombined << "\n";
+            }
+            sb << i << "}\n";
+            sb << i << "else\n";
+            sb << i << "{\n";
+            {
+                sb << i << "return spirv_asm\n";
+                BraceScope spirvDefaultScope{i, sb, ";\n"};
+                sb << spirvDefault << "\n";
+            }
+            sb << i << "}\n";
         }
     }
 }
@@ -102,16 +129,18 @@ void TextureTypeInfo::writeFuncWithSig(
     const char* funcName,
     const String& sig,
     const String& glsl,
-    const String& spirv,
+    const String& spirvDefault,
+    const String& spirvRWDefault,
+    const String& spirvCombined,
     const String& cuda,
+    const String& metal,
     const ReadNoneMode readNoneMode)
 {
     if (readNoneMode == ReadNoneMode::Always)
         sb << i << "[__readNone]\n";
-    sb << i << "[__readNone]\n";
     sb << i << "[ForceInline]\n";
     sb << i << sig << "\n";
-    writeFuncBody(funcName, glsl, cuda, spirv);
+    writeFuncBody(funcName, glsl, cuda, spirvDefault, spirvRWDefault, spirvCombined, metal);
     sb << "\n";
 }
 
@@ -120,16 +149,22 @@ void TextureTypeInfo::writeFunc(
     const char* funcName,
     const String& params,
     const String& glsl,
-    const String& spirv,
+    const String& spirvDefault,
+    const String& spirvRWDefault,
+    const String& spirvCombined,
     const String& cuda,
+    const String& metal,
     const ReadNoneMode readNoneMode)
 {
     writeFuncWithSig(
         funcName,
         cat(returnType, " ", funcName, "(", params, ")"),
         glsl,
-        spirv,
+        spirvDefault,
+        spirvRWDefault,
+        spirvCombined,
         cuda,
+        metal,
         readNoneMode
     );
 }
@@ -150,29 +185,63 @@ void TextureTypeInfo::writeGetDimensionFunctions()
 
         for (int includeMipInfo = 0; includeMipInfo < 2; ++includeMipInfo)
         {
+            if (includeMipInfo && isMultisample)
+            {
+                continue;
+            }
+
             int sizeDimCount = 0;
             StringBuilder params;
+            int paramCount = 0;
+
+            StringBuilder metal;
+            const char* metalMipLevel = "0";
+
             if (includeMipInfo)
-                params << "uint mipLevel, ";
+            {
+                ++paramCount;
+                params << "uint mipLevel,";
+
+                if (baseShape != SLANG_TEXTURE_1D)
+                    metalMipLevel = "$1";
+            }
 
             switch (baseShape)
             {
             case SLANG_TEXTURE_1D:
+                ++paramCount;
                 params << t << "width";
+                metal << "(*($" << String(paramCount) << ") = $0.get_width(" << String(metalMipLevel) << ")),";
+
                 sizeDimCount = 1;
                 break;
 
             case SLANG_TEXTURE_2D:
             case SLANG_TEXTURE_CUBE:
+                ++paramCount;
                 params << t << "width,";
+                metal << "(*($" << String(paramCount) << ") = $0.get_width(" << String(metalMipLevel) << ")),";
+
+                ++paramCount;
                 params << t << "height";
+                metal << "(*($" << String(paramCount) << ") = $0.get_height(" << String(metalMipLevel) << ")),";
+
                 sizeDimCount = 2;
                 break;
 
             case SLANG_TEXTURE_3D:
+                ++paramCount;
                 params << t << "width,";
+                metal << "(*($" << String(paramCount) << ") = $0.get_width(" << String(metalMipLevel) << ")),";
+
+                ++paramCount;
                 params << t << "height,";
+                metal << "(*($" << String(paramCount) << ") = $0.get_height(" << String(metalMipLevel) << ")),";
+
+                ++paramCount;
                 params << t << "depth";
+                metal << "(*($" << String(paramCount) << ") = $0.get_depth(" << String(metalMipLevel) << ")),";
+
                 sizeDimCount = 3;
                 break;
 
@@ -183,18 +252,27 @@ void TextureTypeInfo::writeGetDimensionFunctions()
 
             if (isArray)
             {
+                ++sizeDimCount;
+                ++paramCount;
                 params << ", " << t << "elements";
-                sizeDimCount++;
+                metal << "(*($" << String(paramCount) << ") = $0.get_array_size()),";
             }
 
             if (isMultisample)
             {
+                ++paramCount;
                 params << ", " << t << "sampleCount";
+                metal << "(*($" << String(paramCount) << ") = $0.get_num_samples()),";
             }
 
             if (includeMipInfo)
+            {
+                ++paramCount;
                 params << ", " << t << "numberOfLevels";
+                metal << "(*($" << String(paramCount) << ") = $0.get_num_mip_levels()),";
+            }
 
+            metal.reduceLength(metal.getLength() - 1); // drop the last comma
 
             StringBuilder glsl;
             {
@@ -264,23 +342,24 @@ void TextureTypeInfo::writeGetDimensionFunctions()
                         }
                     };
                 glsl << "if (access == " << kStdlibResourceAccessReadOnly << ") __intrinsic_asm \"";
-                emitIntrinsic(toSlice("textureSize"), true);
+                emitIntrinsic(toSlice("textureSize"), !isMultisample);
                 glsl << "\";\n";
                 glsl << "__intrinsic_asm \"";
                 emitIntrinsic(toSlice("imageSize"), false);
                 glsl << "\";\n";
             }
 
-            StringBuilder spirv;
+            // SPIRV ASM generation
+            auto generateSpirvAsm = [&](StringBuilder& spirv, bool isRW, UnownedStringSlice imageVar) 
             {
-                spirv << "OpCapability ImageQuery; ";
                 spirv << "%vecSize:$$uint";
                 if (sizeDimCount > 1) spirv << sizeDimCount;
                 spirv << " = ";
-                if (isMultisample)
-                    spirv << "OpImageQuerySize $this;";
+                if (isMultisample || isRW)
+                    spirv << "OpImageQuerySize " << imageVar << ";";
                 else
-                    spirv << "OpImageQuerySizeLod $this $0;";
+                    spirv << "OpImageQuerySizeLod " << imageVar <<" $0;";
+
                 auto convertAndStore = [&](UnownedStringSlice uintSourceVal, const char* destParam)
                     {
                         if (UnownedStringSlice(rawT) == "uint")
@@ -343,26 +422,48 @@ void TextureTypeInfo::writeGetDimensionFunctions()
 
                 if (isMultisample)
                 {
-                    spirv << "%_sampleCount : $$uint = OpImageQuerySamples $this;";
+                    spirv << "%_sampleCount : $$uint = OpImageQuerySamples" << imageVar << ";";
                     convertAndStore(UnownedStringSlice("_sampleCount"), "sampleCount");
                 }
 
                 if (includeMipInfo)
                 {
-                    spirv << "%_levelCount : $$uint = OpImageQueryLevels $this;";
+                    spirv << "%_levelCount : $$uint = OpImageQueryLevels" << imageVar << ";";
                     convertAndStore(UnownedStringSlice("_levelCount"), "numberOfLevels");
                 }
+            };
+            StringBuilder spirvCombined;
+            {
+                spirvCombined << "OpCapability ImageQuery; ";
+                spirvCombined << "%image:__imageType(this) = OpImage $this; ";
+                generateSpirvAsm(spirvCombined, false, toSlice("%image"));
+            }
+
+            StringBuilder spirvDefault;
+            {
+                spirvDefault << "OpCapability ImageQuery; ";
+                generateSpirvAsm(spirvDefault, false, toSlice("$this"));
+            }
+
+            StringBuilder spirvRWDefault;
+            {
+                spirvRWDefault << "OpCapability ImageQuery; ";
+                generateSpirvAsm(spirvRWDefault, true, toSlice("$this"));
             }
 
             sb << "    __glsl_version(450)\n";
             sb << "    __glsl_extension(GL_EXT_samplerless_texture_functions)\n";
+            sb << "    [require(cpp_glsl_hlsl_metal_spirv, texture_sm_4_1)]\n";
             writeFunc(
                 "void",
                 "GetDimensions",
                 params,
                 glsl,
-                spirv,
+                spirvDefault,
+                spirvRWDefault,
+                spirvCombined,
                 "",
+                metal,
                 ReadNoneMode::Always);
         }
     }

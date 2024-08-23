@@ -13,7 +13,7 @@
 #include "../core/slang-char-util.h"
 #include "../core/slang-string-util.h"
 
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 #include "../compiler-core/slang-json-native.h"
 #include "../compiler-core/slang-json-rpc-connection.h"
 #include "../compiler-core/slang-language-server-protocol.h"
@@ -106,42 +106,61 @@ SlangResult LanguageServer::parseNextMessage()
             {
                 InitializeParams args;
                 m_connection->toNativeArgsOrSendError(call.params, &args, call.id);
-
                 init(args);
+                auto fillCapability = [&](ServerCapabilities& caps)
+                {
+                    caps.positionEncoding = "utf-16";
+                    caps.textDocumentSync.openClose = true;
+                    caps.textDocumentSync.change = (int)TextDocumentSyncKind::Incremental;
+                    caps.workspace.workspaceFolders.supported = true;
+                    caps.workspace.workspaceFolders.changeNotifications = false;
+                    caps.hoverProvider = true;
+                    caps.definitionProvider = true;
+                    caps.documentSymbolProvider = true;
+                    caps.inlayHintProvider.resolveProvider = false;
+                    caps.documentFormattingProvider = true;
+                    caps.documentOnTypeFormattingProvider.firstTriggerCharacter = "}";
+                    caps.documentOnTypeFormattingProvider.moreTriggerCharacter.add(";");
+                    caps.documentOnTypeFormattingProvider.moreTriggerCharacter.add(":");
+                    caps.documentOnTypeFormattingProvider.moreTriggerCharacter.add("{");
+                    caps.documentRangeFormattingProvider = true;
+                    caps.completionProvider.triggerCharacters.add(".");
+                    caps.completionProvider.triggerCharacters.add(">");
+                    caps.completionProvider.triggerCharacters.add(":");
+                    caps.completionProvider.triggerCharacters.add("[");
+                    caps.completionProvider.triggerCharacters.add(" ");
+                    caps.completionProvider.triggerCharacters.add("(");
+                    caps.completionProvider.triggerCharacters.add("\"");
+                    caps.completionProvider.triggerCharacters.add("/");
+                    caps.completionProvider.resolveProvider = true;
+                    caps.completionProvider.workDoneToken = "";
+                    caps.semanticTokensProvider.full = true;
+                    caps.semanticTokensProvider.range = false;
+                    caps.signatureHelpProvider.triggerCharacters.add("(");
+                    caps.signatureHelpProvider.triggerCharacters.add(",");
+                    caps.signatureHelpProvider.retriggerCharacters.add(",");
+                    for (auto tokenType : kSemanticTokenTypes)
+                        caps.semanticTokensProvider.legend.tokenTypes.add(tokenType);
+                };
+                ServerInfo serverInfo;
+                serverInfo.name = "SlangLanguageServer";
+                serverInfo.version = "1.8";
 
-                InitializeResult result;
-                result.serverInfo.name = "SlangLanguageServer";
-                result.serverInfo.version = "1.3";
-                result.capabilities.positionEncoding = "utf-16";
-                result.capabilities.textDocumentSync.openClose = true;
-                result.capabilities.textDocumentSync.change = (int)TextDocumentSyncKind::Incremental;
-                result.capabilities.workspace.workspaceFolders.supported = true;
-                result.capabilities.workspace.workspaceFolders.changeNotifications = false;
-                result.capabilities.hoverProvider = true;
-                result.capabilities.definitionProvider = true;
-                result.capabilities.documentSymbolProvider = true;
-                result.capabilities.inlayHintProvider.resolveProvider = false;
-                result.capabilities.documentFormattingProvider = true;
-                result.capabilities.documentOnTypeFormattingProvider.firstTriggerCharacter = "}";
-                result.capabilities.documentOnTypeFormattingProvider.moreTriggerCharacter.add(";");
-                result.capabilities.documentOnTypeFormattingProvider.moreTriggerCharacter.add(":");
-                result.capabilities.documentOnTypeFormattingProvider.moreTriggerCharacter.add("{");
-                result.capabilities.documentRangeFormattingProvider = true;
-                result.capabilities.completionProvider.triggerCharacters.add(".");
-                result.capabilities.completionProvider.triggerCharacters.add(":");
-                result.capabilities.completionProvider.triggerCharacters.add("[");
-                result.capabilities.completionProvider.triggerCharacters.add("\"");
-                result.capabilities.completionProvider.triggerCharacters.add("/");
-                result.capabilities.completionProvider.resolveProvider = true;
-                result.capabilities.completionProvider.workDoneToken = "";
-                result.capabilities.semanticTokensProvider.full = true;
-                result.capabilities.semanticTokensProvider.range = false;
-                result.capabilities.signatureHelpProvider.triggerCharacters.add("(");
-                result.capabilities.signatureHelpProvider.triggerCharacters.add(",");
-                result.capabilities.signatureHelpProvider.retriggerCharacters.add(",");
-                for (auto tokenType : kSemanticTokenTypes)
-                    result.capabilities.semanticTokensProvider.legend.tokenTypes.add(tokenType);
-                m_connection->sendResult(&result, call.id);
+                if (m_options.isVisualStudio)
+                {
+                    VSInitializeResult vsResult;
+                    vsResult.serverInfo = serverInfo;
+                    fillCapability(vsResult.capabilities);
+                    vsResult.capabilities._vs_projectContextProvider = true;
+                    m_connection->sendResult(&vsResult, call.id);
+                }
+                else
+                {
+                    InitializeResult result;
+                    result.serverInfo = serverInfo;
+                    fillCapability(result.capabilities);
+                    m_connection->sendResult(&result, call.id);
+                }
                 return SLANG_OK;
             }
             else if (call.method == "initialized")
@@ -226,6 +245,10 @@ String getDeclKindString(DeclRef<Decl> declRef)
     {
         return "(generic type parameter) ";
     }
+    else if (declRef.as<GenericTypePackParamDecl>())
+    {
+        return "(generic type pack parameter) ";
+    }
     else if (declRef.as<GenericValueParamDecl>())
     {
         return "(generic value parameter) ";
@@ -272,51 +295,62 @@ String getDeclSignatureString(DeclRef<Decl> declRef, WorkspaceVersion* version)
                 ASTPrinter::OptionFlag::SimplifiedBuiltinType);
         printer.getStringBuilder() << getDeclKindString(declRef);
         printer.addDeclSignature(declRef);
-        if (auto varDecl = as<VarDeclBase>(declRef.getDecl()))
-        {
-            auto& sb = printer.getStringBuilder();
-            if (!varDecl->findModifier<ConstModifier>() && !as<LetDecl>(declRef.getDecl()))
-                return printer.getString();
+        auto printInitExpr = [&](Module* module, Type* declType, Expr* initExpr)
+            {
+                auto& sb = printer.getStringBuilder();
 
-            if (auto litExpr = as<LiteralExpr>(varDecl->initExpr))
-            {
-                sb << " = " << litExpr->token.getContent();
-            }
-            else if (auto isTypeDecl = as<IsTypeExpr>(varDecl->initExpr))
-            {
-                if (isTypeDecl->constantVal)
+                if (auto litExpr = as<LiteralExpr>(initExpr))
                 {
-                    sb << " = " << (isTypeDecl->constantVal->value ? "true" : "false");
+                    if (litExpr->token.type != TokenType::Unknown)
+                        sb << " = " << litExpr->token.getContent();
+                    else if (auto intLit = as<IntegerLiteralExpr>(litExpr))
+                        sb << " = " << intLit->value;
                 }
-            }
-            else if (varDecl->initExpr)
-            {
-                DiagnosticSink sink;
-                SharedSemanticsContext semanticContext(version->linkage, getModule(varDecl), &sink);
-                SemanticsVisitor semanticsVisitor(&semanticContext);
-                if (auto intVal = semanticsVisitor.tryFoldIntegerConstantExpression(
-                        declRef.substitute(version->linkage->getASTBuilder(), varDecl->initExpr),
-                        nullptr))
+                else if (auto isTypeDecl = as<IsTypeExpr>(initExpr))
                 {
-                    if (auto constantInt = as<ConstantIntVal>(intVal))
+                    if (isTypeDecl->constantVal)
                     {
-                        sb << " = ";
-                        if (isBoolType(varDecl->getType()))
+                        sb << " = " << (isTypeDecl->constantVal->value ? "true" : "false");
+                    }
+                }
+                else if (initExpr)
+                {
+                    DiagnosticSink sink;
+                    SharedSemanticsContext semanticContext(version->linkage, module, &sink);
+                    SemanticsVisitor semanticsVisitor(&semanticContext);
+                    if (auto intVal = semanticsVisitor.tryFoldIntegerConstantExpression(
+                        declRef.substitute(version->linkage->getASTBuilder(), initExpr),
+                        SemanticsVisitor::ConstantFoldingKind::LinkTime, nullptr))
+                    {
+                        if (auto constantInt = as<ConstantIntVal>(intVal))
                         {
-                            sb << (constantInt->getValue() ? "true" : "false");
+                            sb << " = ";
+                            if (isBoolType(declType))
+                            {
+                                sb << (constantInt->getValue() ? "true" : "false");
+                            }
+                            else
+                            {
+                                sb << constantInt->getValue();
+                            }
                         }
                         else
                         {
-                            sb << constantInt->getValue();
+                            sb << " = ";
+                            intVal->toText(sb);
                         }
                     }
-                    else
-                    {
-                        sb << " = ";
-                        intVal->toText(sb);
-                    }
                 }
-            }
+            };
+        if (auto varDecl = as<VarDeclBase>(declRef.getDecl()))
+        {
+            if (!varDecl->findModifier<ConstModifier>() && !as<LetDecl>(declRef.getDecl()))
+                return printer.getString();
+            printInitExpr(getModule(varDecl), varDecl->type, varDecl->initExpr);
+        }
+        else if (auto enumCase = as<EnumCaseDecl>(declRef.getDecl()))
+        {
+            printInitExpr(getModule(enumCase), nullptr, enumCase->tagExpr);
         }
         return printer.getString();
     }
@@ -624,9 +658,12 @@ SlangResult LanguageServer::hover(
             maybeAppendAdditionalOverloadsHint();
             auto nodeHumaneLoc =
                 version->linkage->getSourceManager()->getHumaneLoc(leafNode->loc);
-            hover.range.start.line = int(nodeHumaneLoc.line - 1);
-            hover.range.end.line = int(nodeHumaneLoc.line - 1);
-            hover.range.start.character = int(nodeHumaneLoc.column - 1);
+            doc->oneBasedUTF8LocToZeroBasedUTF16Loc(
+                nodeHumaneLoc.line,
+                nodeHumaneLoc.column,
+                hover.range.start.line,
+                hover.range.start.character);
+            hover.range.end = hover.range.start;
             auto name = declRef.getName();
             if (auto ctorDecl = declRef.as<ConstructorDecl>())
             {
@@ -638,17 +675,19 @@ SlangResult LanguageServer::hover(
             }
             if (name)
             {
-                hover.range.end.character = int(nodeHumaneLoc.column + name->text.getLength() - 1);
+                hover.range.end.character = hover.range.start.character + (int)UTF8Util::calcUTF16CharCount(name->text.getUnownedSlice());
             }
         }
     };
     auto fillLoc = [&](SourceLoc loc)
     {
         auto humaneLoc = version->linkage->getSourceManager()->getHumaneLoc(loc, SourceLocType::Actual);
-        hover.range.start.line = int(humaneLoc.line - 1);
-        hover.range.end.line = int(humaneLoc.line - 1);
-        hover.range.start.character = int(humaneLoc.column - 1);
-        hover.range.end.character = hover.range.start.character + int(doc->getTokenLength(humaneLoc.line, humaneLoc.column));
+        doc->oneBasedUTF8LocToZeroBasedUTF16Loc(humaneLoc.line, humaneLoc.column, hover.range.start.line, hover.range.start.character);
+        doc->oneBasedUTF8LocToZeroBasedUTF16Loc(
+            humaneLoc.line,
+            humaneLoc.column + doc->getTokenLength(humaneLoc.line, humaneLoc.column),
+            hover.range.end.line,
+            hover.range.end.character);
     };
     auto fillExprHoverInfo = [&](Expr* expr)
     {
@@ -661,6 +700,40 @@ SlangResult LanguageServer::hover(
                 sb << "```\n" << expr->type->toString() << " this" << "\n```\n";
             }
             fillLoc(expr->loc);
+        }
+        else if (auto swizzleExpr = as<SwizzleExpr>(expr))
+        {
+            if (expr->type && swizzleExpr->base && swizzleExpr->base->type)
+            {
+                bool isTupleType = as<TupleType>(swizzleExpr->base->type) != nullptr;
+                sb << "```\n";
+                swizzleExpr->type->toText(sb);
+                sb << " ";
+                swizzleExpr->base->type->toText(sb);
+                sb << ".";
+                for (auto index : swizzleExpr->elementIndices)
+                {
+                    if (isTupleType || index > 4)
+                        sb << "_" << index;
+                    else
+                        sb << "xyzw"[index];
+                }
+                sb << "\n```\n";
+                fillLoc(expr->loc);
+            }
+        }
+        else if (auto countOfExpr = as<CountOfExpr>(expr))
+        {
+            if (countOfExpr->sizedType)
+            {
+                if (auto foldedVal = as<ConstantIntVal>(CountOfIntVal::tryFoldOrNull(version->linkage->getASTBuilder(), expr->type.type, countOfExpr->sizedType)))
+                {
+                    sb << "```\n" << "countof(";
+                    countOfExpr->sizedType->toText(sb);
+                    sb << ") = " << foldedVal->getValue() << "\n```\n";
+                    fillLoc(expr->loc);
+                }
+            }
         }
         if (const auto higherOrderExpr = as<HigherOrderInvokeExpr>(expr))
         {
@@ -700,6 +773,14 @@ SlangResult LanguageServer::hover(
     else if (auto thisExprExpr = as<ThisExpr>(leafNode))
     {
         fillExprHoverInfo(thisExprExpr);
+    }
+    else if (auto countOfExpr = as<CountOfExpr>(leafNode))
+    {
+        fillExprHoverInfo(countOfExpr);
+    }
+    else if (auto swizzleExpr = as<SwizzleExpr>(leafNode))
+    {
+        fillExprHoverInfo(swizzleExpr);
     }
     else if (auto importDecl = as<ImportDecl>(leafNode))
     {
@@ -821,7 +902,7 @@ SlangResult LanguageServer::gotoDefinition(
                                                                 : declRefExpr->declRef.getLoc(),
                     SourceLocType::Actual);
             auto name = declRefExpr->declRef.getName();
-            locations.add(LocationResult{location, name ? (int)name->text.getLength() : 0});
+            locations.add(LocationResult{location, name ? (int)UTF8Util::calcUTF16CharCount(name->text.getUnownedSlice()) : 0});
         }
     }
     else if (auto overloadedExpr = as<OverloadedExpr>(leafNode))
@@ -833,7 +914,7 @@ SlangResult LanguageServer::gotoDefinition(
                 auto location = version->linkage->getSourceManager()->getHumaneLoc(
                     item.declRef.getNameLoc(), SourceLocType::Actual);
                 auto name = item.declRef.getName();
-                locations.add(LocationResult{location, name ? (int)name->text.getLength() : 0});
+                locations.add(LocationResult{location, name ? (int)UTF8Util::calcUTF16CharCount(name->text.getUnownedSlice()) : 0});
             }
         }
         else 
@@ -844,7 +925,7 @@ SlangResult LanguageServer::gotoDefinition(
                 auto location = version->linkage->getSourceManager()->getHumaneLoc(
                     item.declRef.getNameLoc(), SourceLocType::Actual);
                 auto name = item.declRef.getName();
-                locations.add(LocationResult{location, name ? (int)name->text.getLength() : 0});
+                locations.add(LocationResult{location, name ? (int)UTF8Util::calcUTF16CharCount(name->text.getUnownedSlice()) : 0});
             }
         }
     }
@@ -879,8 +960,11 @@ SlangResult LanguageServer::gotoDefinition(
             {
                 result.uri =
                     URI::fromLocalFilePath(loc.loc.pathInfo.foundPath.getUnownedSlice()).uri;
-                result.range.start.line = int(loc.loc.line - 1);
-                result.range.start.character = int(loc.loc.column - 1);
+                doc->oneBasedUTF8LocToZeroBasedUTF16Loc(
+                    loc.loc.line,
+                    loc.loc.column,
+                    result.range.start.line,
+                    result.range.start.character);
                 result.range.end = result.range.start;
                 result.range.end.character += loc.length;
                 results.add(result);
@@ -913,17 +997,25 @@ SlangResult LanguageServer::completion(
         return SLANG_OK;
     }
 
-    // Don't show completion at case label.
+    // Don't show completion at case label or after single '>' operator.
     if (args.context.triggerKind ==
-            LanguageServerProtocol::kCompletionTriggerKindTriggerCharacter &&
-        args.context.triggerCharacter == ":")
+            LanguageServerProtocol::kCompletionTriggerKindTriggerCharacter)
     {
-        auto line = doc->getLine((Int)args.position.line + 1);
-        auto prevCharPos = args.position.character - 2;
-        if (prevCharPos >= 0 && prevCharPos < line.getLength() && line[prevCharPos] != ':')
+        char requiredPrevChar = 0;
+        if (args.context.triggerCharacter == ":")
+            requiredPrevChar = ':';
+        else if (args.context.triggerCharacter == ">")
+            requiredPrevChar = '-';
+        if (requiredPrevChar != 0)
         {
-            m_connection->sendResult(NullResponse::get(), responseId);
-            return SLANG_OK;
+            // Check if the previous character is the required character (':' or '-'
+            auto line = doc->getLine((Int)args.position.line + 1);
+            auto prevCharPos = args.position.character - 2;
+            if (prevCharPos >= 0 && prevCharPos < line.getLength() && line[prevCharPos] != requiredPrevChar)
+            {
+                m_connection->sendResult(NullResponse::get(), responseId);
+                return SLANG_OK;
+            }
         }
     }
 
@@ -969,6 +1061,12 @@ SlangResult LanguageServer::completion(
     context.line = utf8Line;
     context.col = utf8Col;
     context.commitCharacterBehavior = m_commitCharacterBehavior;
+    if (args.context.triggerKind == kCompletionTriggerKindTriggerCharacter &&
+        (args.context.triggerCharacter == " " || args.context.triggerCharacter == "[" || args.context.triggerCharacter == "("))
+    {
+        // Never use commit character if completion request is triggerred by these characters to prevent annoyance.
+        context.commitCharacterBehavior = CommitCharacterBehavior::Disabled;
+    }
 
     if (SLANG_SUCCEEDED(context.tryCompleteInclude()))
     {
@@ -1719,11 +1817,16 @@ void LanguageServer::updateFormattingOptions(const JSONValue& clangFormatLoc, co
 {
     auto container = m_connection->getContainer();
     JSONToNativeConverter converter(container, &m_typeMap, m_connection->getSink());
-    converter.convert(clangFormatLoc, &m_formatOptions.clangFormatLocation);
-    converter.convert(clangFormatStyle, &m_formatOptions.style);
-    converter.convert(clangFormatFallbackStyle, &m_formatOptions.fallbackStyle);
-    converter.convert(allowLineBreakOnType, &m_formatOptions.allowLineBreakInOnTypeFormatting);
-    converter.convert(allowLineBreakInRange, &m_formatOptions.allowLineBreakInRangeFormatting);
+    if (clangFormatLoc.isValid())
+        converter.convert(clangFormatLoc, &m_formatOptions.clangFormatLocation);
+    if (clangFormatStyle.isValid())
+        converter.convert(clangFormatStyle, &m_formatOptions.style);
+    if (clangFormatFallbackStyle.isValid())
+        converter.convert(clangFormatFallbackStyle, &m_formatOptions.fallbackStyle);
+    if (allowLineBreakOnType.isValid())
+        converter.convert(allowLineBreakOnType, &m_formatOptions.allowLineBreakInOnTypeFormatting);
+    if (allowLineBreakInRange.isValid())
+        converter.convert(allowLineBreakInRange, &m_formatOptions.allowLineBreakInRangeFormatting);
     if (m_formatOptions.style.getLength() == 0)
         m_formatOptions.style = Slang::FormatOptions().style;
 }
@@ -1974,7 +2077,7 @@ SlangResult LanguageServer::queueJSONCall(JSONRPCCall call)
     else if (call.method == SemanticTokensParams::methodName)
     {
         SemanticTokensParams args;
-        SLANG_RETURN_ON_FAIL(m_connection->toNativeArgsOrSendError(call.params, &args, call.id));
+        SLANG_RETURN_ON_FAIL(m_connection->checkArrayObjectWrap( call.params, GetRttiInfo<SemanticTokensParams>::get(), &args, call.id ));
         cmd.semanticTokenArgs = args;
     }
     else if (call.method == SignatureHelpParams::methodName)
@@ -1995,7 +2098,7 @@ SlangResult LanguageServer::queueJSONCall(JSONRPCCall call)
     else if (call.method == DocumentSymbolParams::methodName)
     {
         DocumentSymbolParams args;
-        SLANG_RETURN_ON_FAIL(m_connection->toNativeArgsOrSendError(call.params, &args, call.id));
+        SLANG_RETURN_ON_FAIL(m_connection->checkArrayObjectWrap( call.params, GetRttiInfo<DocumentSymbolParams>::get(), &args, call.id ));
         cmd.documentSymbolArgs = args;
     }
     else if (call.method == DocumentFormattingParams::methodName)
@@ -2118,6 +2221,10 @@ SlangResult LanguageServer::runCommand(Command& call)
         {
             return formatting(call.formattingArgs.get(), call.id);
         }
+        else if (call.method == "NotificationReceived")
+        {
+            return SLANG_OK;
+        }
     }
     catch (...)
     {
@@ -2176,8 +2283,14 @@ SlangResult LanguageServer::didChangeTextDocument(const DidChangeTextDocumentPar
 SlangResult LanguageServer::didChangeConfiguration(
     const LanguageServerProtocol::DidChangeConfigurationParams& args)
 {
-    SLANG_UNUSED(args);
-    sendConfigRequest();
+    if (args.settings.isValid())
+    {
+        updateConfigFromJSON(args.settings);
+    }
+    else
+    {
+        sendConfigRequest();
+    }
     return SLANG_OK;
 }
 
@@ -2186,6 +2299,64 @@ void LanguageServer::update()
     if (!m_workspace)
         return;
     publishDiagnostics();
+}
+
+void LanguageServer::updateConfigFromJSON(const JSONValue& jsonVal)
+{
+    if (!jsonVal.isObjectLike())
+        return;
+    auto obj = m_connection->getContainer()->getObject(jsonVal);
+    if (obj.getCount() == 1 &&
+        (m_connection->getContainer()->getStringFromKey(obj[0].key) == "settings"
+            || m_connection->getContainer()->getStringFromKey(obj[0].key) == "RootElement"))
+    {
+        updateConfigFromJSON(obj[0].value);
+        return;
+    }
+    for (auto kv : obj)
+    {
+        auto key = m_connection->getContainer()->getStringFromKey(kv.key);
+        if (key == "slang.predefinedMacros")
+        {
+            updatePredefinedMacros(kv.value);
+        }
+        else if (key == "slang.additionalSearchPaths")
+        {
+            updateSearchPaths(kv.value);
+        }
+        else if (key == "slang.enableCommitCharactersInAutoCompletion")
+        {
+            updateCommitCharacters(kv.value);
+        }
+        else if (key == "slang.format.clangFormatLocation")
+        {
+            updateFormattingOptions(kv.value, JSONValue(), JSONValue(), JSONValue(), JSONValue());
+        }
+        else if (key == "slang.format.clangFormatStyle")
+        {
+            updateFormattingOptions(JSONValue(), kv.value, JSONValue(), JSONValue(), JSONValue());
+        }
+        else if (key == "slang.format.clangFormatFallbackStyle")
+        {
+            updateFormattingOptions(JSONValue(), JSONValue(), kv.value, JSONValue(), JSONValue());
+        }
+        else if (key == "slang.format.allowLineBreakChangesInOnTypeFormatting")
+        {
+            updateFormattingOptions(JSONValue(), JSONValue(),  JSONValue(), kv.value, JSONValue());
+        }
+        else if (key == "slang.format.allowLineBreakChangesInRangeFormatting")
+        {
+            updateFormattingOptions(JSONValue(), JSONValue(), JSONValue(), JSONValue(), kv.value);
+        }
+        else if (key == "slang.inlayHints.deducedTypes")
+        {
+            updateInlayHintOptions(kv.value, JSONValue());
+        }
+        else if (key == "slang.inlayHints.parameterNames")
+        {
+            updateInlayHintOptions(JSONValue(), kv.value);
+        }
+    }
 }
 
 SlangResult LanguageServer::execute()
@@ -2228,9 +2399,18 @@ SlangResult LanguageServer::execute()
     return SLANG_OK;
 }
 
-SLANG_API SlangResult runLanguageServer()
+SLANG_API void LanguageServerStartupOptions::parse(int argc, const char* const* argv)
 {
-    Slang::LanguageServer server;
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-vs") == 0)
+            isVisualStudio = true;
+    }
+}
+
+SLANG_API SlangResult runLanguageServer(Slang::LanguageServerStartupOptions options)
+{
+    Slang::LanguageServer server(options);
     SLANG_RETURN_ON_FAIL(server.execute());
     return SLANG_OK;
 }

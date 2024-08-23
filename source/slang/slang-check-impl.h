@@ -11,11 +11,28 @@
 
 namespace Slang
 {
+    template<typename P, typename... Args>
+    bool diagnoseCapabilityErrors(DiagnosticSink* sink, CompilerOptionSet& optionSet, P const& pos, DiagnosticInfo const& info, Args const&... args)
+    {
+        if (optionSet.getBoolOption(CompilerOptionName::IgnoreCapabilities))
+            return false;
+        return sink->diagnose(pos, info, args...);
+    }
+
+    enum class IsSubTypeOptions
+    {
+        None = 0,
+        /// Type may not be finished 'DeclCheckState::ReadyForLookup`
+        NotReadyForLookup = 1 << 0,
+    };
+
         /// Should the given `decl` be treated as a static rather than instance declaration?
     bool isEffectivelyStatic(
         Decl*           decl);
 
     bool isGlobalDecl(Decl* decl);
+
+    bool isUnsafeForceInlineFunc(FunctionDeclBase* funcDecl);
 
     bool isUniformParameterType(Type* type);
 
@@ -38,6 +55,8 @@ namespace Slang
         }
         return result;
     }
+
+    int getTypeBitSize(Type* t);
 
     // A flat representation of basic types (scalars, vectors and matrices)
     // that can be used as lookup key in caches
@@ -537,6 +556,45 @@ namespace Slang
         FacetList facets;
     };
 
+        /// Cached information about how to convert between two types.
+    struct ImplicitCastMethod
+    {
+        OverloadCandidate conversionFuncOverloadCandidate = OverloadCandidate();
+        ConversionCost cost = kConversionCost_Impossible;
+        bool isAmbiguous = false;
+    };
+
+    struct ImplicitCastMethodKey
+    {
+        Type* fromType; // nullptr means default construct.
+        bool isLValue;
+        Type* toType;
+        uint64_t constantVal;
+        bool isConstant;
+        HashCode getHashCode() const
+        {
+            return combineHash(Slang::getHashCode(fromType), Slang::getHashCode(toType), Slang::getHashCode(constantVal), (HashCode32)isConstant, (HashCode32)isLValue);
+        }
+        bool operator == (const ImplicitCastMethodKey& other) const
+        {
+            return fromType == other.fromType && toType == other.toType && isConstant == other.isConstant && constantVal == other.constantVal && isLValue == other.isLValue;
+        }
+        ImplicitCastMethodKey() = default;
+        ImplicitCastMethodKey(QualType fromType, Type* toType, Expr* fromExpr)
+            : fromType(fromType)
+            , toType(toType)
+            , constantVal(0)
+            , isConstant(false)
+            , isLValue(fromType.isLeftValue)
+        {
+            if (auto constInt = as<IntegerLiteralExpr>(fromExpr))
+            {
+                constantVal = constInt->value;
+                isConstant = true;
+            }
+        }
+    };
+
         /// Shared state for a semantics-checking session.
     struct SharedSemanticsContext
     {
@@ -559,6 +617,11 @@ namespace Slang
         DiagnosticSink* getSink()
         {
             return m_sink;
+        }
+
+        CompilerOptionSet& getOptionSet()
+        {
+            return m_linkage->m_optionSet;
         }
 
         // We need to track what has been `import`ed into
@@ -639,6 +702,14 @@ namespace Slang
         {
             auto pair = TypePair{ sub, sup };
             m_mapTypePairToSubtypeWitness[pair] = outWitness;
+        }
+        ImplicitCastMethod* tryGetImplicitCastMethod(ImplicitCastMethodKey key)
+        {
+            return m_mapTypePairToImplicitCastMethod.tryGetValue(key);
+        }
+        void cacheImplicitCastMethod(ImplicitCastMethodKey key, ImplicitCastMethod candidate)
+        {
+            m_mapTypePairToImplicitCastMethod[key] = candidate;
         }
 
     private:
@@ -759,6 +830,7 @@ namespace Slang
         Dictionary<Type*, InheritanceInfo> m_mapTypeToInheritanceInfo;
         Dictionary<DeclRef<Decl>, InheritanceInfo> m_mapDeclRefToInheritanceInfo;
         Dictionary<TypePair, SubtypeWitness*> m_mapTypePairToSubtypeWitness;
+        Dictionary<ImplicitCastMethodKey, ImplicitCastMethod> m_mapTypePairToImplicitCastMethod;
     };
 
         /// Local/scoped state of the semantic-checking system
@@ -781,9 +853,16 @@ namespace Slang
             : m_shared(shared)
             , m_sink(shared->getSink())
             , m_astBuilder(shared->getLinkage()->getASTBuilder())
-        {}
+        {
+            if (shared->getLinkage()->m_optionSet.hasOption(CompilerOptionName::DisableShortCircuit))
+            {
+                m_shouldShortCircuitLogicExpr =
+                    !shared->getLinkage()->m_optionSet.getBoolOption(CompilerOptionName::DisableShortCircuit);
+            }
+        }
 
         SharedSemanticsContext* getShared() { return m_shared; }
+        CompilerOptionSet& getOptionSet() { return getShared()->getOptionSet(); }
         ASTBuilder* getASTBuilder() { return m_astBuilder; }
 
         DiagnosticSink* getSink() { return m_sink; }
@@ -801,6 +880,9 @@ namespace Slang
             return result;
         }
 
+        FunctionDeclBase* getParentFuncOfVisitor() { return m_parentFunc; }
+        void setParentFuncOfVisitor(FunctionDeclBase* funcDecl) { m_parentFunc = funcDecl; }
+
         SemanticsContext withParentFunc(FunctionDeclBase* parentFunc)
         {
             SemanticsContext result(*this);
@@ -809,6 +891,14 @@ namespace Slang
             result.m_parentDifferentiableAttr = parentFunc->findModifier<DifferentiableAttribute>();
             if (parentFunc->ownedScope)
                 result.m_outerScope = parentFunc->ownedScope;
+            return result;
+        }
+
+        SemanticsContext withParentExpandExpr(ExpandExpr* expr, OrderedHashSet<Type*>* capturedTypes)
+        {
+            SemanticsContext result(*this);
+            result.m_parentExpandExpr = expr;
+            result.m_capturedTypePacks = capturedTypes;
             return result;
         }
 
@@ -836,6 +926,15 @@ namespace Slang
         {
             SemanticsContext result(*this);
             result.m_outerStmts = outerStmts;
+            return result;
+        }
+
+        // Setup the flag to indicate disabling the short-circuiting evaluation
+        // for the logical expressions associted with the subcontext
+        SemanticsContext disableShortCircuitLogicalExpr()
+        {
+            SemanticsContext result(*this);
+            result.m_shouldShortCircuitLogicExpr = false;
             return result;
         }
 
@@ -903,6 +1002,17 @@ namespace Slang
             return result;
         }
 
+        SemanticsContext withDeclToExcludeFromLookup(Decl* decl)
+        {
+            SemanticsContext result(*this);
+            result.m_declToExcludeFromLookup = decl;
+            return result;
+        }
+
+        Decl* getDeclToExcludeFromLookup() { return m_declToExcludeFromLookup; }
+
+        OrderedHashSet<Type*>* getCapturedTypePacks() { return m_capturedTypePacks; }
+
     private:
         SharedSemanticsContext* m_shared = nullptr;
 
@@ -910,6 +1020,7 @@ namespace Slang
 
         ExprLocalScope* m_exprLocalScope = nullptr;
 
+        Decl* m_declToExcludeFromLookup = nullptr;
 
     protected:
         // TODO: consider making more of this state `private`...
@@ -936,6 +1047,17 @@ namespace Slang
         ASTBuilder* m_astBuilder = nullptr;
 
         Scope* m_outerScope = nullptr;
+
+        // By default, we will support short-circuit evaluation for the logic expression.
+        // However, there are few exceptions where we will disable it:
+        // 1. the logic expression is inside the generic parameter list.
+        // 2. the logic expression is in the init expression of a static const variable.
+        // 3. the logic expression is in an array size declaration.
+        bool m_shouldShortCircuitLogicExpr = true;
+
+        ExpandExpr* m_parentExpandExpr = nullptr;
+
+        OrderedHashSet<Type*>* m_capturedTypePacks = nullptr;
     };
 
     struct OuterScopeContextRAII
@@ -973,7 +1095,10 @@ namespace Slang
             : Super(context)
         {}
 
-
+        CompilerOptionSet& getOptionSet()
+        {
+            return getShared()->getOptionSet();
+        }
     public:
         // Translate Types
 
@@ -1094,7 +1219,6 @@ namespace Slang
             SourceLoc loc,
             Expr*    originalExpr);
 
-        DeclVisibility getDeclVisibility(Decl* decl);
         DeclVisibility getTypeVisibility(Type* type);
         bool isDeclVisibleFromScope(DeclRef<Decl> declRef, Scope* scope);
         LookupResult filterLookupResultByVisibility(const LookupResult& lookupResult);
@@ -1181,6 +1305,10 @@ namespace Slang
             ensureDecl(declRef->getDecl(), state);
         }
 
+        void ensureAllDeclsRec(
+            Decl* decl,
+            DeclCheckState              state);
+
             /// Helper routine allowing `ensureDecl` to be used on a `DeclBase`
             ///
             /// `DeclBase` is the base clas of `Decl` and `DeclGroup`. When
@@ -1227,10 +1355,10 @@ namespace Slang
         // TODO(tfoley): consider just allowing `void` as a
         // simple example of a "unit" type, and get rid of
         // this check.
-        TypeExp CoerceToUsableType(TypeExp const& typeExp);
+        TypeExp CoerceToUsableType(TypeExp const& typeExp, Decl* decl);
 
         // Check a type, and coerce it to be usable
-        TypeExp CheckUsableType(TypeExp typeExp);
+        TypeExp CheckUsableType(TypeExp typeExp, Decl* decl);
 
         Expr* CheckTerm(Expr* term);
 
@@ -1276,6 +1404,12 @@ namespace Slang
         Type* getDifferentialType(ASTBuilder* builder, Type* type, SourceLoc loc);
         Type* tryGetDifferentialType(ASTBuilder* builder, Type* type);
 
+        // Helper function to check if a struct can be used as its own differential type.
+        bool canStructBeUsedAsSelfDifferentialType(AggTypeDecl *aggTypeDecl);
+        void markSelfDifferentialMembersOfType(AggTypeDecl *parent, Type* type);
+
+        void checkDerivativeMemberAttributeReferences(
+            VarDeclBase* varDecl, DerivativeMemberAttribute* derivativeMemberAttr);
         
     public:
 
@@ -1455,6 +1589,9 @@ namespace Slang
 
         void checkGenericDeclHeader(GenericDecl* genericDecl);
 
+        IntVal* checkLinkTimeConstantIntVal(
+            Expr* expr);
+
         ConstantIntVal* checkConstantIntVal(
             Expr*    expr);
 
@@ -1466,6 +1603,8 @@ namespace Slang
         bool checkLiteralStringVal(
             Expr*    expr,
             String*         outVal);
+
+        bool checkCapabilityName(Expr* expr, CapabilityName& outCapabilityName);
 
         void visitModifier(Modifier*);
 
@@ -1484,7 +1623,8 @@ namespace Slang
 
         Modifier* checkModifier(
             Modifier*        m,
-            ModifiableSyntaxNode*   syntaxNode);
+            ModifiableSyntaxNode*   syntaxNode,
+            bool ignoreUnallowedModifier);
 
         void checkModifiers(ModifiableSyntaxNode* syntaxNode);
         void checkVisibility(Decl* decl);
@@ -1554,9 +1694,20 @@ namespace Slang
             Dictionary<DeclRef<InterfaceDecl>, RefPtr<WitnessTable>>    mapInterfaceToWitnessTable;
         };
 
-        FuncDecl* synthesizeMethodSignatureForRequirementWitness(
+        void addModifiersToSynthesizedDecl(
             ConformanceCheckingContext* context,
-            DeclRef<FuncDecl> requiredMemberDeclRef,
+            DeclRef<Decl> requirement,
+            FunctionDeclBase* synthesized,
+            ThisExpr* &synThis);
+
+        void addRequiredParamsToSynthesizedDecl(
+            DeclRef<CallableDecl> requirement,
+            CallableDecl* synthesized,
+            List<Expr*>& synArgs);
+
+        FunctionDeclBase* synthesizeMethodSignatureForRequirementWitness(
+            ConformanceCheckingContext* context,
+            DeclRef<FunctionDeclBase> requiredMemberDeclRef,
             List<Expr*>& synArgs,
             ThisExpr*& synThis);
         
@@ -1582,6 +1733,12 @@ namespace Slang
             DeclRef<FuncDecl>           requiredMemberDeclRef,
             RefPtr<WitnessTable>        witnessTable);
 
+        bool trySynthesizeConstructorRequirementWitness(
+            ConformanceCheckingContext* context,
+            LookupResult const&         lookupResult,
+            DeclRef<ConstructorDecl>    requiredMemberDeclRef,
+            RefPtr<WitnessTable>        witnessTable);
+
             /// Attempt to synthesize a property that can satisfy `requiredMemberDeclRef` using `lookupResult`.
             ///
             /// On success, installs the syntethesized method in `witnessTable` and returns `true`.
@@ -1591,6 +1748,23 @@ namespace Slang
             ConformanceCheckingContext* context,
             LookupResult const&         lookupResult,
             DeclRef<PropertyDecl>       requiredMemberDeclRef,
+            RefPtr<WitnessTable>        witnessTable);
+
+        bool trySynthesizeWrapperTypePropertyRequirementWitness(
+            ConformanceCheckingContext* context,
+            DeclRef<PropertyDecl>       requiredMemberDeclRef,
+            RefPtr<WitnessTable>        witnessTable);
+
+        bool trySynthesizeAssociatedTypeRequirementWitness(
+            ConformanceCheckingContext* context,
+            LookupResult const& lookupResult,
+            DeclRef<AssocTypeDecl>       requiredMemberDeclRef,
+            RefPtr<WitnessTable>        witnessTable);
+
+        bool trySynthesizeAssociatedConstantRequirementWitness(
+            ConformanceCheckingContext* context,
+            LookupResult const& lookupResult,
+            DeclRef<VarDeclBase>        requiredMemberDeclRef,
             RefPtr<WitnessTable>        witnessTable);
 
             /// Attempt to synthesize a declartion that can satisfy `requiredMemberDeclRef` using `lookupResult`.
@@ -1647,6 +1821,16 @@ namespace Slang
             ConformanceCheckingContext* context,
             DeclRef<AssocTypeDecl> requirementDeclRef,
             RefPtr<WitnessTable> witnessTable);
+
+            /// Attempt to synthesize function requirements for enum types to make them conform to `ILogical`.
+        bool trySynthesizeEnumTypeMethodRequirementWitness(ConformanceCheckingContext* context,
+            DeclRef<FunctionDeclBase> requirementDeclRef,
+            RefPtr<WitnessTable> witnessTable,
+            BuiltinRequirementKind requirementKind);
+
+            /// Check references from`[DerivativeMember(...)]` attributes on members of the agg-decl.
+            /// this is typically deferred until after types are ready for reference.
+        void checkDifferentiableMembersInType(AggTypeDecl* decl);
 
         struct DifferentiableMemberInfo
         {
@@ -1729,6 +1913,9 @@ namespace Slang
             /// Is `type` a scalar integer type.
         bool isScalarIntegerType(Type* type);
 
+            /// Is `type` something we allow as compile time constants, i.e. scalar integer and enum types.
+        bool isValidCompileTimeConstantType(Type* type);
+
         bool isIntValueInRangeOfType(IntegerLiteralValue value, Type* type);
 
         // Validate that `type` is a suitable type to use
@@ -1762,7 +1949,12 @@ namespace Slang
 
         Expr* checkPredicateExpr(Expr* expr);
 
-        Expr* checkExpressionAndExpectIntegerConstant(Expr* expr, IntVal** outIntVal);
+        enum class ConstantFoldingKind
+        {
+            CompileTime,
+            LinkTime,
+        };
+        Expr* checkExpressionAndExpectIntegerConstant(Expr* expr, IntVal** outIntVal, ConstantFoldingKind kind);
 
         IntegerLiteralValue GetMinBound(IntVal* val);
 
@@ -1799,15 +1991,16 @@ namespace Slang
                 /// The rest of the links in the chain of declarations being folded
             ConstantFoldingCircularityInfo* next = nullptr;
         };
-
             /// Try to apply front-end constant folding to determine the value of `invokeExpr`.
         IntVal* tryConstantFoldExpr(
             SubstExpr<InvokeExpr>           invokeExpr,
+            ConstantFoldingKind             kind,
             ConstantFoldingCircularityInfo* circularityInfo);
 
             /// Try to apply front-end constant folding to determine the value of `expr`.
         IntVal* tryConstantFoldExpr(
             SubstExpr<Expr>                 expr,
+            ConstantFoldingKind             kind,
             ConstantFoldingCircularityInfo* circularityInfo);
 
         bool _checkForCircularityInConstantFolding(
@@ -1817,6 +2010,7 @@ namespace Slang
             /// Try to resolve a compile-time constant `IntVal` from the given `declRef`.
         IntVal* tryConstantFoldDeclRef(
             DeclRef<VarDeclBase> const&     declRef,
+            ConstantFoldingKind             kind,
             ConstantFoldingCircularityInfo* circularityInfo);
 
             /// Try to extract the value of an integer constant expression, either
@@ -1825,6 +2019,7 @@ namespace Slang
             ///
         IntVal* tryFoldIntegerConstantExpression(
             SubstExpr<Expr>                 expr,
+            ConstantFoldingKind             kind,
             ConstantFoldingCircularityInfo* circularityInfo);
 
         // Enforce that an expression resolves to an integer constant, and get its value
@@ -1833,10 +2028,10 @@ namespace Slang
             SpecificType,
             AnyInteger
         };
-        IntVal* CheckIntegerConstantExpression(Expr* inExpr, IntegerConstantExpressionCoercionType coercionType, Type* expectedType);
-        IntVal* CheckIntegerConstantExpression(Expr* inExpr, IntegerConstantExpressionCoercionType coercionType, Type* expectedType, DiagnosticSink* sink);
+        IntVal* CheckIntegerConstantExpression(Expr* inExpr, IntegerConstantExpressionCoercionType coercionType, Type* expectedType, ConstantFoldingKind kind);
+        IntVal* CheckIntegerConstantExpression(Expr* inExpr, IntegerConstantExpressionCoercionType coercionType, Type* expectedType, ConstantFoldingKind kind, DiagnosticSink* sink);
 
-        IntVal* CheckEnumConstantExpression(Expr* expr);
+        IntVal* CheckEnumConstantExpression(Expr* expr, ConstantFoldingKind kind);
 
 
         Expr* CheckSimpleSubscriptExpr(
@@ -1879,6 +2074,8 @@ namespace Slang
         struct Constraint
         {
             Decl*		decl = nullptr; // the declaration of the thing being constraints
+            Index indexInPack = 0; // If the constraint is for a type parameter pack, which index in the pack is this constraint for?
+
             Val*	val = nullptr; // the value to which we are constraining it
             bool isUsedAsLValue = false;   // If this constraint is for a type parameter, is the type used in an l-value parameter?
             bool satisfied = false; // Has this constraint been met?
@@ -1905,6 +2102,7 @@ namespace Slang
         };
 
         Type* TryJoinVectorAndScalarType(
+            ConstraintSystem* constraints,
             VectorExpressionType* vectorType,
             BasicExpressionType*  scalarType);
 
@@ -1938,13 +2136,25 @@ namespace Slang
             ///
         SubtypeWitness* isSubtype(
             Type*                   subType,
-            Type*                   superType);
+            Type*                   superType,
+            IsSubTypeOptions        isSubTypeOptions
+        );
 
-        SubtypeWitness* checkAndConstructSubtypeWitness(Type* subType, Type* superType);
+        SubtypeWitness* checkAndConstructSubtypeWitness(
+            Type* subType,
+            Type* superType,
+            IsSubTypeOptions isSubTypeOptions
+        );
 
-        bool isInterfaceType(Type* type);
+        bool isValidGenericConstraintType(Type* type);
 
         bool isTypeDifferentiable(Type* type);
+
+        bool doesTypeHaveTag(Type* type, TypeTag tag);
+
+        TypeTag getTypeTags(Type* type);
+
+        Type* getConstantBufferElementType(Type* type);
 
             /// Check whether `subType` is a sub-type of `superTypeDeclRef`,
             /// and return a witness to the sub-type relationship if it holds
@@ -1954,7 +2164,7 @@ namespace Slang
             Type* subType,
             Type* superType)
         {
-            return isSubtype(subType, superType);
+            return isSubtype(subType, superType, IsSubTypeOptions::None);
         }
 
             /// Check whether `type` conforms to `interfaceDeclRef`,
@@ -1981,14 +2191,19 @@ namespace Slang
             Type* toType,
             QualType fromType);
 
+        bool canConvertImplicitly(
+            ConversionCost cost);
+
         ConversionCost getConversionCost(Type* toType, QualType fromType);
 
         Type* _tryJoinTypeWithInterface(
+            ConstraintSystem* constraints,
             Type*                   type,
             Type*                   interfaceType);
 
         // Try to compute the "join" between two types
         Type* TryJoinTypes(
+            ConstraintSystem* constraints,
             QualType  left,
             QualType  right);
 
@@ -2034,11 +2249,11 @@ namespace Slang
 
             // The original arguments to the call
             Index argCount = 0;
-            Expr** args = nullptr;
+            List<Expr*>* args = nullptr;
             Type** argTypes = nullptr;
 
             Index getArgCount() { return argCount; }
-            Expr*& getArg(Index index) { return args[index]; }
+            Expr*& getArg(Index index) { return (*args)[index]; }
             Type* getArgType(Index index)
             {
                 if(argTypes)
@@ -2053,6 +2268,12 @@ namespace Slang
                 else
                     return semantics->maybeResolveOverloadedExpr(getArg(index), LookupMask::Default, nullptr)->type;
             }
+            struct MatchedArg
+            {
+                Expr* argExpr = nullptr;
+                Type* argType = nullptr;
+            };
+            bool matchArgumentsToParams(SemanticsVisitor* semantics, const List<QualType>& params, bool computeTypes, ShortList<MatchedArg>& outMatchedArgs);
 
             bool disallowNestedConversions = false;
 
@@ -2237,9 +2458,15 @@ namespace Slang
         // indirect parents.
         GenericDecl* findNextOuterGeneric(Decl* decl);
 
+        struct ValUnificationContext
+        {
+            Index indexInTypePack = 0;
+        };
+
         // Try to find a unification for two values
         bool TryUnifyVals(
             ConstraintSystem&	constraints,
+            ValUnificationContext unificationContext,
             Val*			fst,
             bool            fstLVal,
             Val*			snd,
@@ -2247,6 +2474,7 @@ namespace Slang
 
         bool tryUnifyDeclRef(
             ConstraintSystem&       constraints,
+            ValUnificationContext unificationContext,
             DeclRefBase*   fst,
             bool           fstLVal,
             DeclRefBase*   snd,
@@ -2254,6 +2482,7 @@ namespace Slang
 
         bool tryUnifyGenericAppDeclRef(
             ConstraintSystem& constraints,
+            ValUnificationContext unificationContext,
             GenericAppDeclRef* fst,
             bool            fstLVal,
             GenericAppDeclRef* snd,
@@ -2261,36 +2490,43 @@ namespace Slang
 
         bool TryUnifyTypeParam(
             ConstraintSystem&     constraints,
-            GenericTypeParamDecl* typeParamDecl,
+            ValUnificationContext unificationContext,
+            GenericTypeParamDeclBase* typeParamDecl,
             QualType              type);
 
         bool TryUnifyIntParam(
             ConstraintSystem&               constraints,
+            ValUnificationContext unificationContext,
             GenericValueParamDecl*	paramDecl,
             IntVal*                  val);
 
         bool TryUnifyIntParam(
             ConstraintSystem&       constraints,
+            ValUnificationContext unificationContext,
             DeclRef<VarDeclBase> const&   varRef,
             IntVal*          val);
 
         bool TryUnifyTypesByStructuralMatch(
             ConstraintSystem&       constraints,
+            ValUnificationContext unificationContext,
             QualType fst,
             QualType snd);
 
         bool TryUnifyTypes(
             ConstraintSystem&       constraints,
+            ValUnificationContext unificationContext,
             QualType fst,
             QualType snd);
 
         bool TryUnifyConjunctionType(
             ConstraintSystem&   constraints,
+            ValUnificationContext unificationContext,
             QualType            fst,
             QualType            snd);
 
         void maybeUnifyUnconstraintIntParam(
             ConstraintSystem& constraints,
+            ValUnificationContext unificationContext,
             IntVal* param,
             IntVal* arg,
             bool paramIsLVal);
@@ -2356,6 +2592,12 @@ namespace Slang
             Expr*	baseExpr,
             OverloadResolveContext&			context);
 
+        template<class T>
+        void trySetGenericToRayTracingWithParamAttribute(
+            LookupResultItem                genericItem,
+            DeclRef<GenericDecl>            genericDeclRef,
+            OverloadResolveContext&         context);
+
             // Add overload candidates based on use of `genericDeclRef`
             // in an ordinary function-call context (that is, where it
             // has been applied to arguments using `()` and not `<>`).
@@ -2375,6 +2617,7 @@ namespace Slang
         Expr* CheckExpr(Expr* expr);
 
 
+        void compareMemoryQualifierOfParamToArgument(ParamDecl* paramIn, Expr* argIn);
         Expr* CheckInvokeExprWithCheckedOperands(InvokeExpr *expr);
         // Get the type to use when referencing a declaration
         QualType GetTypeForDeclRef(DeclRef<Decl> declRef, SourceLoc loc);
@@ -2397,6 +2640,8 @@ namespace Slang
             IntVal*        baseElementRowCount,
             IntVal*        baseElementColCount);
 
+        Expr* checkTupleSwizzleExpr(MemberExpr* memberExpr, TupleType* baseTupleType);
+
         Expr* CheckSwizzleExpr(
             MemberExpr* memberRefExpr,
             Type*      baseElementType,
@@ -2406,6 +2651,10 @@ namespace Slang
             MemberExpr*	memberRefExpr,
             Type*		baseElementType,
             IntVal*				baseElementCount);
+
+        // Check a member expr as a general member lookup.
+        // This is the default/fallback behavior if the base type isn't swizzlable.
+        Expr* checkGeneralMemberLookupExpr(MemberExpr* expr, Type* baseType);
 
             /// Perform semantic checking of an assignment where the operands have already been checked.
         Expr* checkAssignWithCheckedOperands(AssignExpr* expr);
@@ -2418,7 +2667,7 @@ namespace Slang
         Expr* visitStaticMemberExpr(StaticMemberExpr* expr);
 
             /// Perform checking operations required for the "base" expression of a member-reference like `base.someField`
-        Expr* checkBaseForMemberExpr(Expr* baseExpr);
+        Expr* checkBaseForMemberExpr(Expr* baseExpr, bool& outNeedDeref);
 
         Expr* lookupMemberResultFailure(
             DeclRefExpr*     expr,
@@ -2493,6 +2742,12 @@ namespace Slang
 
         Expr* visitAsTypeExpr(AsTypeExpr* expr);
 
+        Expr* visitExpandExpr(ExpandExpr* expr);
+
+        Expr* visitEachExpr(EachExpr* expr);
+
+        void maybeCheckKnownBuiltinInvocation(Expr* invokeExpr);
+
         //
         // Some syntax nodes should not occur in the concrete input syntax,
         // and will only appear *after* checking is complete. We need to
@@ -2515,14 +2770,13 @@ namespace Slang
         CASE(OverloadedExpr)
         CASE(OverloadedExpr2)
         CASE(AggTypeCtorExpr)
-        CASE(CastToSuperTypeExpr)
         CASE(ModifierCastExpr)
         CASE(LetExpr)
         CASE(ExtractExistentialValueExpr)
         CASE(OpenRefExpr)
         CASE(MakeOptionalExpr)
         CASE(PartiallyAppliedGenericExpr)
-
+        CASE(PackExpr)
     #undef CASE
 
         Expr* visitStaticMemberExpr(StaticMemberExpr* expr);
@@ -2533,6 +2787,7 @@ namespace Slang
 
         Expr* visitThisExpr(ThisExpr* expr);
         Expr* visitThisTypeExpr(ThisTypeExpr* expr);
+        Expr* visitCastToSuperTypeExpr(CastToSuperTypeExpr* expr);
         Expr* visitReturnValExpr(ReturnValExpr* expr);
         Expr* visitAndTypeExpr(AndTypeExpr* expr);
         Expr* visitPointerTypeExpr(PointerTypeExpr* expr);
@@ -2549,10 +2804,15 @@ namespace Slang
 
         Expr* visitGetArrayLengthExpr(GetArrayLengthExpr* expr);
 
+        Expr* visitDefaultConstructExpr(DefaultConstructExpr* expr);
+
         Expr* visitSPIRVAsmExpr(SPIRVAsmExpr*);
 
             /// Perform semantic checking on a `modifier` that is being applied to the given `type`
         Val* checkTypeModifier(Modifier* modifier, Type* type);
+    private:
+        // Convert the logic operator expression to not use 'InvokeExpr' type
+        Expr* convertToLogicOperatorExpr(InvokeExpr* expr);
 
     };
 
@@ -2599,7 +2859,7 @@ namespace Slang
 
         void visitTargetCaseStmt(TargetCaseStmt* stmt);
 
-        void visitIntrinsicAsmStmt(IntrinsicAsmStmt*) {}
+        void visitIntrinsicAsmStmt(IntrinsicAsmStmt*);
 
         void visitDefaultStmt(DefaultStmt* stmt);
 
@@ -2623,6 +2883,9 @@ namespace Slang
         void tryInferLoopMaxIterations(ForStmt* stmt);
 
         void checkLoopInDifferentiableFunc(Stmt* stmt);
+
+    private:
+        void validateCaseStmts(SwitchStmt* stmt, DiagnosticSink* sink);
     };
 
     struct SemanticsDeclVisitorBase
@@ -2641,4 +2904,30 @@ namespace Slang
     };
 
     bool isUnsizedArrayType(Type* type);
+
+    bool isInterfaceType(Type* type);
+
+    EnumDecl* isEnumType(Type* type);
+
+    DeclVisibility getDeclVisibility(Decl* decl);
+
+    // If `type` is unsized, return the trailing unsized array field that makes it so.
+    VarDeclBase* getTrailingUnsizedArrayElement(Type* type, VarDeclBase* rootObject, ArrayExpressionType*& outArrayType);
+
+    // Test if `type` can be an opaque handle on certain targets, this includes
+    // texture, buffer, sampler, acceleration structure, etc.
+    bool isOpaqueHandleType(Type* type);
+
+    void diagnoseMissingCapabilityProvenance(CompilerOptionSet& optionSet, DiagnosticSink* sink, Decl* decl, CapabilitySet& setToFind);
+    void diagnoseCapabilityProvenance(CompilerOptionSet& optionSet, DiagnosticSink* sink, Decl* decl, CapabilityAtom atomToFind, HashSet<Decl*>& printedDecls);
+
+    void _ensureAllDeclsRec(
+        SemanticsDeclVisitorBase* visitor,
+        Decl* decl,
+        DeclCheckState              state);
+
+    RefPtr<EntryPoint> findAndValidateEntryPoint(
+        FrontEndEntryPointRequest* entryPointReq);
+
+    bool resolveStageOfProfileWithEntryPoint(Profile& entryPointProfile, CompilerOptionSet& optionSet, const List<RefPtr<TargetRequest>>& targets, FuncDecl* entryPointFuncDecl, DiagnosticSink* sink);
 }

@@ -432,20 +432,21 @@ static DocMarkdownWriter::Requirement _getRequirementFromTargetToken(const Token
         return Requirement{CodeGenTarget::SPIRV, UnownedStringSlice("")};
     }
 
-    const CapabilityAtom targetCap = findCapabilityAtom(targetName);
+    const CapabilityAtom targetCap = asAtom(findCapabilityName(targetName));
 
     if (targetCap == CapabilityAtom::Invalid)
     {
         return Requirement{ CodeGenTarget::None, String() };
     }
+    SLANG_ASSERT(targetCap < CapabilityAtom::Count);
 
     static const CapabilityAtom rootAtoms[] =
     {
-        CapabilityAtom::GLSL,
-        CapabilityAtom::HLSL,
-        CapabilityAtom::CUDA,
-        CapabilityAtom::CPP,
-        CapabilityAtom::C,
+        CapabilityAtom::glsl,
+        CapabilityAtom::hlsl,
+        CapabilityAtom::cuda,
+        CapabilityAtom::cpp,
+        CapabilityAtom::c,
     };
 
     for (auto rootAtom : rootAtoms)
@@ -458,27 +459,30 @@ static DocMarkdownWriter::Requirement _getRequirementFromTargetToken(const Token
         }
     }
 
-    if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::GLSL))
+    if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::glsl))
     {
         return Requirement{CodeGenTarget::GLSL, targetName};
     }
-    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::HLSL))
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::hlsl))
     {
         return Requirement{ CodeGenTarget::HLSL, targetName };
     }
-    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::CUDA))
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::cuda))
     {
         return Requirement{ CodeGenTarget::CUDASource, targetName };
     }
-    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::CPP))
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::cpp))
     {
         return Requirement{ CodeGenTarget::CPPSource, targetName };
     }
-    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::C))
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::c))
     {
         return Requirement{ CodeGenTarget::CSource, targetName };
     }
-    
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::metal))
+    {
+        return Requirement{ CodeGenTarget::Metal, targetName };
+    }
     return Requirement{ CodeGenTarget::Unknown, String() };
 }
 
@@ -1066,6 +1070,8 @@ void DocMarkdownWriter::writeAggType(const ASTMarkup::Entry& entry, AggTypeDeclB
         List<Decl*> uniqueMethods;
         for (const auto& [_, decl] : memberDict)
         {
+            if (!shouldDocumentDecl(decl))
+                continue;
             CallableDecl* callableDecl = as<CallableDecl>(decl);
             if (callableDecl && isVisible(callableDecl))
             {

@@ -7,14 +7,14 @@
 #define SLANG_HANDLE_RESULT_FAIL(x) assert(!"failure")
 #endif
 
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 #include "../../source/core/slang-writer.h"
 
 #include "../../source/core/slang-process-util.h"
 
 #include "../../source/compiler-core/slang-command-line-args.h"
 
-#include "../../slang-gfx.h"
+#include "slang-gfx.h"
 
 namespace renderer_test {
 
@@ -71,6 +71,12 @@ struct Options
 
     bool dontAddDefaultEntryPoints = false;
 
+    bool disableDebugInfo = false;
+
+    bool allowGLSL = false;
+
+    Slang::String entryPointName;
+
     Slang::List<Slang::String> renderFeatures;          /// Required render features for this test to run
 
     uint32_t computeDispatchSize[3] = { 1, 1, 1 };
@@ -79,11 +85,7 @@ struct Options
 
     Slang::DownstreamArgs downstreamArgs;                    ///< Args to downstream tools. Here it's just slang
 
-#if defined(SLANG_CONFIG_DEFAULT_SPIRV_DIRECT)
     bool generateSPIRVDirectly = true;
-#else
-    bool generateSPIRVDirectly = false;
-#endif
 
     Options() { downstreamArgs.addName("slang"); }
 

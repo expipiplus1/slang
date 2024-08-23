@@ -295,12 +295,6 @@ namespace Slang
     // being in templates, because gcc/clang get angry.
     //
     template<typename T>
-    void FilteredModifierList<T>::Iterator::operator++()
-    {
-        current = adjust(current->next);
-    }
-    //
-    template<typename T>
     Modifier* FilteredModifierList<T>::adjust(Modifier* modifier)
     {
         Modifier* m = modifier;
@@ -315,6 +309,11 @@ namespace Slang
         }        
     }
 
+    template<typename T>
+    void FilteredModifierList<T>::Iterator::operator++()
+    {
+        current = FilteredModifierList<T>::adjust(current->next);
+    }
     //
 
     enum class UserDefinedAttributeTargets
@@ -323,7 +322,8 @@ namespace Slang
         Struct = 1,
         Var = 2,
         Function = 4,
-        All = 7
+        Param = 8,
+        All = 0x0F
     };
 
     const int kUnsizedArrayMagicLength = 0x7FFFFFFF;
@@ -337,7 +337,7 @@ namespace Slang
 
         /// Get the parent decl, skipping any generic decls in between.
     Decl* getParentDecl(Decl* decl);
-
+    Decl* getParentAggTypeDecl(Decl* decl);
     Decl* getParentFunc(Decl* decl);
 
 } // namespace Slang

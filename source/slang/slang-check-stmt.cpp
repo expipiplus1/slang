@@ -52,11 +52,20 @@ namespace Slang
         // local `struct` declaration, where it would have members
         // that need to be recursively checked.
         //
-        ensureDeclBase(stmt->decl, DeclCheckState::Checked, this);
+        ensureDeclBase(stmt->decl, DeclCheckState::DefinitionChecked, this);
     }
 
     void SemanticsStmtVisitor::visitBlockStmt(BlockStmt* stmt)
     {
+        // Make sure to fully check all nested agg type decls first.
+        if (stmt->scopeDecl)
+        {
+            for (auto decl : stmt->scopeDecl->members)
+            {
+                if (as<AggTypeDeclBase>(decl))
+                    ensureAllDeclsRec(decl, DeclCheckState::DefinitionChecked);
+            }
+        }
         checkStmt(stmt->body);
     }
 
@@ -192,10 +201,10 @@ namespace Slang
         checkLoopInDifferentiableFunc(stmt);
     }
 
-    Expr* SemanticsVisitor::checkExpressionAndExpectIntegerConstant(Expr* expr, IntVal** outIntVal)
+    Expr* SemanticsVisitor::checkExpressionAndExpectIntegerConstant(Expr* expr, IntVal** outIntVal, ConstantFoldingKind kind)
     {
         expr = CheckExpr(expr);
-        auto intVal = CheckIntegerConstantExpression(expr, IntegerConstantExpressionCoercionType::AnyInteger, nullptr);
+        auto intVal = CheckIntegerConstantExpression(expr, IntegerConstantExpressionCoercionType::AnyInteger, nullptr, kind);
         if (outIntVal)
             *outIntVal = intVal;
         return expr;
@@ -207,14 +216,14 @@ namespace Slang
 
         stmt->varDecl->type.type = m_astBuilder->getIntType();
         addModifier(stmt->varDecl, m_astBuilder->create<ConstModifier>());
-        stmt->varDecl->setCheckState(DeclCheckState::Checked);
+        stmt->varDecl->setCheckState(DeclCheckState::DefinitionChecked);
 
         IntVal* rangeBeginVal = nullptr;
         IntVal* rangeEndVal = nullptr;
 
         if (stmt->rangeBeginExpr)
         {
-            stmt->rangeBeginExpr = checkExpressionAndExpectIntegerConstant(stmt->rangeBeginExpr, &rangeBeginVal);
+            stmt->rangeBeginExpr = checkExpressionAndExpectIntegerConstant(stmt->rangeBeginExpr, &rangeBeginVal, ConstantFoldingKind::LinkTime);
         }
         else
         {
@@ -222,12 +231,53 @@ namespace Slang
             rangeBeginVal = rangeBeginConst;
         }
 
-        stmt->rangeEndExpr = checkExpressionAndExpectIntegerConstant(stmt->rangeEndExpr, &rangeEndVal);
+        stmt->rangeEndExpr = checkExpressionAndExpectIntegerConstant(stmt->rangeEndExpr, &rangeEndVal, ConstantFoldingKind::LinkTime);
 
         stmt->rangeBeginVal = rangeBeginVal;
         stmt->rangeEndVal = rangeEndVal;
 
         subContext.checkStmt(stmt->body);
+    }
+
+    void SemanticsStmtVisitor::validateCaseStmts(SwitchStmt* stmt, DiagnosticSink* sink)
+    {
+        auto blockStmt = as<BlockStmt>(stmt->body);
+        if (!blockStmt)
+            return;
+
+        auto seqStmt = as<SeqStmt>(blockStmt->body);
+        if (!seqStmt)
+            return;
+
+        bool hasDefaultStmt = false;
+        HashSet<Val*> caseStmtVals;
+        for (auto& sStmt : seqStmt->stmts)
+        {
+            if (auto caseStmt = as<CaseStmt>(sStmt))
+            {
+                // check that all case tags are unique
+                if (caseStmt->exprVal)
+                {
+                    // exprVal contains the constant folded expr, that is checked for
+                    // uniqueness within the scope of the switch statement.
+                    if (!caseStmtVals.add(caseStmt->exprVal))
+                    {
+                        sink->diagnose(sStmt, Diagnostics::switchDuplicateCases);
+                        return;
+                    }
+                }
+            }
+            else if (as<DefaultStmt>(sStmt))
+            {
+                // check that there is at most one `default` clause
+                if (hasDefaultStmt)
+                {
+                    sink->diagnose(sStmt, Diagnostics::switchMultipleDefault);
+                    return;
+                }
+                hasDefaultStmt = true;
+            }
+        }
     }
 
     void SemanticsStmtVisitor::visitSwitchStmt(SwitchStmt* stmt)
@@ -238,16 +288,18 @@ namespace Slang
         stmt->condition = CheckExpr(stmt->condition);
         subContext.checkStmt(stmt->body);
 
-        // TODO(tfoley): need to check that all case tags are unique
-
-        // TODO(tfoley): check that there is at most one `default` clause
+        // check the case value exits within the switch
+        validateCaseStmts(stmt, getSink());
     }
 
     void SemanticsStmtVisitor::visitCaseStmt(CaseStmt* stmt)
     {
-        // TODO(tfoley): Need to coerce to type being switch on,
-        // and ensure that value is a compile-time constant
         auto expr = CheckExpr(stmt->expr);
+
+        // coerce to type being switch on, and ensure that value is a compile-time constant
+        // The Vals in the AST are pointer-unique, making them easy to check for duplicates
+        // by addeing them to a HashSet.
+        auto exprVal = tryConstantFoldExpr(expr, ConstantFoldingKind::CompileTime, nullptr);
         auto switchStmt = FindOuterStmt<SwitchStmt>();
 
         if (!switchStmt)
@@ -261,6 +313,7 @@ namespace Slang
         }
 
         stmt->expr = expr;
+        stmt->exprVal = exprVal;
         stmt->parentStmt = switchStmt;
     }
 
@@ -280,13 +333,33 @@ namespace Slang
     void SemanticsStmtVisitor::visitTargetCaseStmt(TargetCaseStmt* stmt)
     {
         auto switchStmt = FindOuterStmt<TargetSwitchStmt>();
+        CapabilitySet set((CapabilityName)stmt->capability);
+        if (getShared()->isInLanguageServer() && getShared()->getSession()->getCompletionRequestTokenName() == stmt->capabilityToken.getName())
+        {
+            getShared()->getLinkage()->contentAssistInfo.completionSuggestions.scopeKind = CompletionSuggestions::ScopeKind::Capabilities;
+        }
 
+        if (stmt->capabilityToken.getContentLength() != 0 &&
+            (set.getCapabilityTargetSets().getCount() != 1 || set.isInvalid() || set.isEmpty()))
+        {
+            getSink()->diagnose(
+                stmt->capabilityToken.loc,
+                Diagnostics::invalidTargetSwitchCase,
+                capabilityNameToString((CapabilityName)stmt->capability));
+        }
         if (!switchStmt)
         {
             getSink()->diagnose(stmt, Diagnostics::caseOutsideSwitch);
         }
         WithOuterStmt subContext(this, stmt);
         subContext.checkStmt(stmt->body);
+    }
+
+    void SemanticsStmtVisitor::visitIntrinsicAsmStmt(IntrinsicAsmStmt* stmt)
+    {
+        WithOuterStmt subContext(this, stmt);
+        for (auto& arg : stmt->args)
+            arg = subContext.CheckExpr(arg);
     }
 
     void SemanticsStmtVisitor::visitDefaultStmt(DefaultStmt* stmt)
@@ -326,7 +399,7 @@ namespace Slang
         auto function = getParentFunc();
         if (!stmt->expression)
         {
-            if (function && !function->returnType.equals(m_astBuilder->getVoidType()))
+            if (function && !function->returnType.equals(m_astBuilder->getVoidType()) && !as<ConstructorDecl>(function))
             {
                 getSink()->diagnose(stmt, Diagnostics::returnNeedsExpression);
             }
@@ -415,7 +488,7 @@ namespace Slang
             return;
 
         auto initialLitVal =
-            as<ConstantIntVal>(tryFoldIntegerConstantExpression(initialVal, nullptr));
+            as<ConstantIntVal>(tryFoldIntegerConstantExpression(initialVal, ConstantFoldingKind::CompileTime, nullptr));
 
         ConstantIntVal* finalVal = nullptr;
         auto binaryExpr = as<InfixExpr>(stmt->predicateExpression);
@@ -443,7 +516,7 @@ namespace Slang
             return;
         if (!rightCompareOperand)
             return;
-        if (auto rightVal = tryFoldIntegerConstantExpression(binaryExpr->arguments[1], nullptr))
+        if (auto rightVal = tryFoldIntegerConstantExpression(binaryExpr->arguments[1], ConstantFoldingKind::CompileTime, nullptr))
         {
             auto leftVar = as<VarExpr>(leftCompareOperand);
             if (!leftVar)
@@ -451,7 +524,7 @@ namespace Slang
             predicateVar = leftVar->declRef;
             finalVal = as<ConstantIntVal>(rightVal);
         }
-        else if (auto leftVal = tryFoldIntegerConstantExpression(binaryExpr->arguments[0], nullptr))
+        else if (auto leftVal = tryFoldIntegerConstantExpression(binaryExpr->arguments[0], ConstantFoldingKind::CompileTime, nullptr))
         {
             auto rightVar = as<VarExpr>(rightCompareOperand);
             if (!rightVar)
@@ -530,7 +603,7 @@ namespace Slang
             return;
         if (opSideEffectExpr->arguments.getCount() == 2)
         {
-            auto stepVal = tryFoldIntegerConstantExpression(opSideEffectExpr->arguments[1], nullptr);
+            auto stepVal = tryFoldIntegerConstantExpression(opSideEffectExpr->arguments[1], ConstantFoldingKind::CompileTime, nullptr);
             if (!stepVal)
                 return;
             if (auto constantIntVal = as<ConstantIntVal>(stepVal))
@@ -648,7 +721,7 @@ namespace Slang
     {
         stmt->device = CheckExpr(stmt->device);
         stmt->gridDims = CheckExpr(stmt->gridDims);
-        ensureDeclBase(stmt->dispatchThreadID, DeclCheckState::Checked, this);
+        ensureDeclBase(stmt->dispatchThreadID, DeclCheckState::DefinitionChecked, this);
         WithOuterStmt subContext(this, stmt);
         stmt->kernelCall = subContext.CheckExpr(stmt->kernelCall);
         return;

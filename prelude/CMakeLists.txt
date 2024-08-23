@@ -12,7 +12,7 @@ foreach(input ${SLANG_PRELUDE_HEADERS})
     add_custom_command(
         OUTPUT ${output}
         COMMAND slang-embed "${input}" ${output}
-        DEPENDS ${input}
+        DEPENDS ${input} slang-embed
         VERBATIM
     )
     list(APPEND SLANG_PRELUDE_SOURCE ${output})
@@ -24,7 +24,7 @@ slang_add_target(
     EXPLICIT_SOURCE ${SLANG_PRELUDE_SOURCE}
     EXCLUDE_FROM_ALL
     TARGET_NAME prelude
-    INCLUDE_DIRECTORIES_PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+    INCLUDE_DIRECTORIES_PUBLIC ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/../include
     PUBLIC_HEADERS ${CMAKE_CURRENT_LIST_DIR}/slang*.h
     # It's an object library, so the install step only installs the headers
     INSTALL

@@ -194,6 +194,7 @@ void WorkspaceVersion::parseDiagnostics(String compilerOutput)
 {
     List<UnownedStringSlice> lines;
     StringUtil::calcLines(compilerOutput.getUnownedSlice(), lines);
+
     for (Index lineIndex = 0; lineIndex < lines.getCount(); lineIndex++)
     {
         auto line = lines[lineIndex];
@@ -243,11 +244,11 @@ void WorkspaceVersion::parseDiagnostics(String compilerOutput)
         pos = line.indexOf(' ');
         diagnostic.code = StringUtil::parseIntAndAdvancePos(line, pos);
         diagnostic.message = line.tail(colonIndex + 2);
-        if (lineIndex + 1 < lines.getCount() && lines[lineIndex].startsWith("^+"))
+        if (lineIndex + 1 < lines.getCount() && lines[lineIndex+1].startsWith("^+"))
         {
             lineIndex++;
             pos = 2;
-            auto tokenLength = StringUtil::parseIntAndAdvancePos(line, pos);
+            auto tokenLength = StringUtil::parseIntAndAdvancePos(lines[lineIndex], pos);
             diagnostic.range.end.character += tokenLength;
         }
 
@@ -272,7 +273,19 @@ void WorkspaceVersion::parseDiagnostics(String compilerOutput)
             diagnostic.range.end.line--;
             diagnostic.range.end.character--;
         }
-        diagnosticList.messages.add(diagnostic);
+        if (diagnostic.code == -1 && diagnosticList.messages.getCount())
+        {
+            // If this is a decoration message, add it as related information.
+            LanguageServerProtocol::DiagnosticRelatedInformation relatedInfo;
+            relatedInfo.location.range = diagnostic.range;
+            relatedInfo.location.uri = URI::fromLocalFilePath(fileName.getUnownedSlice()).uri;
+            relatedInfo.message = diagnostic.message;
+            diagnosticList.messages.getLast().relatedInformation.add(relatedInfo);
+        }
+        else
+        {
+            diagnosticList.messages.add(diagnostic);
+        }
         if (diagnosticList.messages.getCount() >= 1000)
             break;
     }
@@ -383,40 +396,64 @@ void DocumentVersion::setText(const String& newText)
 {
     text = newText;
     StringUtil::calcLines(text.getUnownedSlice(), lines);
-    utf16CharStarts.clear();
+    mapUTF16CharIndexToCodePointIndex.clear();
+    mapCodePointIndexToUTF8ByteOffset.clear();
 }
+
+void DocumentVersion::ensureUTFBoundsAvailable()
+{
+    for (auto slice : lines)
+    {
+        List<Index> bounds;
+        List<Index> utf8Bounds;
+        Index index = 0;
+        Index codePointIndex = 0;
+        while (index < slice.getLength())
+        {
+            auto startIndex = index;
+            const Char32 codePoint = getUnicodePointFromUTF8(
+                [&]() -> Byte
+                {
+                    if (index < slice.getLength())
+                        return slice[index++];
+                    else
+                        return '\0';
+                });
+            if (!codePoint)
+                break;
+
+            Char16 buffer[2];
+            int count = encodeUnicodePointToUTF16Reversed(codePoint, buffer);
+            for (int i = 0; i < count; i++)
+                bounds.add(codePointIndex);
+            utf8Bounds.add(startIndex);
+            codePointIndex++;
+        }
+        bounds.add(slice.getLength());
+        utf8Bounds.add(slice.getLength());
+        mapUTF16CharIndexToCodePointIndex.add(_Move(bounds));
+        mapCodePointIndexToUTF8ByteOffset.add(_Move(utf8Bounds));
+    }
+}
+
 ArrayView<Index> DocumentVersion::getUTF16Boundaries(Index line)
 {
-    if (!utf16CharStarts.getCount())
+    if (!mapUTF16CharIndexToCodePointIndex.getCount())
     {
-        for (auto slice : lines)
-        {
-            List<Index> bounds;
-            Index index = 0;
-            while (index < slice.getLength())
-            {
-                auto startIndex = index;
-                const Char32 codePoint = getUnicodePointFromUTF8(
-                    [&]() -> Byte
-                    {
-                        if (index < slice.getLength())
-                            return slice[index++];
-                        else
-                            return '\0';
-                    });
-                if (!codePoint)
-                    break;
-                Char16 buffer[2];
-                int count = encodeUnicodePointToUTF16Reversed(codePoint, buffer);
-                for (int i = 0; i < count; i++)
-                    bounds.add(startIndex);
-            }
-            bounds.add(slice.getLength());
-            utf16CharStarts.add(_Move(bounds));
-        }
+        ensureUTFBoundsAvailable();
     }
-    return line >= 1 && line <= utf16CharStarts.getCount() ? utf16CharStarts[line - 1].getArrayView()
+    return line >= 1 && line <= mapUTF16CharIndexToCodePointIndex.getCount() ? mapUTF16CharIndexToCodePointIndex[line - 1].getArrayView()
                                                            : ArrayView<Index>();
+}
+
+ArrayView<Index> DocumentVersion::getUTF8Boundaries(Index line)
+{
+    if (!mapCodePointIndexToUTF8ByteOffset.getCount())
+    {
+        ensureUTFBoundsAvailable();
+    }
+    return line >= 1 && line <= mapCodePointIndexToUTF8ByteOffset.getCount() ? mapCodePointIndexToUTF8ByteOffset[line - 1].getArrayView()
+        : ArrayView<Index>();
 }
 
 void DocumentVersion::oneBasedUTF8LocToZeroBasedUTF16Loc(
@@ -432,6 +469,15 @@ void DocumentVersion::oneBasedUTF8LocToZeroBasedUTF16Loc(
     auto bounds = getUTF16Boundaries(inLine);
     outLine = rsLine;
     outCol = std::lower_bound(bounds.begin(), bounds.end(), inCol - 1) - bounds.begin();
+}
+
+void DocumentVersion::oneBasedUTF8LocToZeroBasedUTF16Loc(
+    Index inLine, Index inCol, int& outLine, int& outCol)
+{
+    Index ioutLine, ioutCol;
+    oneBasedUTF8LocToZeroBasedUTF16Loc(inLine, inCol, ioutLine, ioutCol);
+    outLine = (int)ioutLine;
+    outCol = (int)ioutCol;
 }
 
 void DocumentVersion::zeroBasedUTF16LocToOneBasedUTF8Loc(
@@ -496,6 +542,35 @@ ASTMarkup* WorkspaceVersion::getOrCreateMarkupAST(ModuleDecl* module)
     return astMarkup.Ptr();
 }
 
+void WorkspaceVersion::ensureWorkspaceFlavor(UnownedStringSlice path)
+{
+    if (flavor != WorkspaceFlavor::Standard)
+        return;
+
+    if (path.endsWithCaseInsensitive(".vfx"))
+    {
+        // Setup linkage for vfx files.
+        // TODO: consider supporting this as an external config file.
+        flavor = WorkspaceFlavor::VFX;
+        linkage->m_optionSet.set(CompilerOptionName::EnableEffectAnnotations, true);
+        linkage->addPreprocessorDefine("VS", "__file_decl");
+        linkage->addPreprocessorDefine("CS", "__file_decl");
+        linkage->addPreprocessorDefine("GS", "__file_decl");
+        linkage->addPreprocessorDefine("PS", "__file_decl");
+        linkage->addPreprocessorDefine("RTX", "__file_decl");
+        linkage->addPreprocessorDefine("PS_RTX", "__file_decl");
+        linkage->addPreprocessorDefine("VS_RTX", "__file_decl");
+        linkage->addPreprocessorDefine("FRAGMENT_ANNOTATION", "");
+        linkage->addPreprocessorDefine("DynamicCombo", "//");
+        linkage->addPreprocessorDefine("DynamicComboRule", "//");
+        linkage->addPreprocessorDefine("HEADER", "__ignored_block");
+        linkage->addPreprocessorDefine("MODES", "__ignored_block");
+        linkage->addPreprocessorDefine("PS_RENDER_STATE", "__ignored_block");
+        linkage->addPreprocessorDefine("FEATURES", "__ignored_block");
+        linkage->addPreprocessorDefine("COMMON", "__transparent_block");
+    }
+}
+
 Module* WorkspaceVersion::getOrLoadModule(String path)
 {
     Module* module;
@@ -512,6 +587,9 @@ Module* WorkspaceVersion::getOrLoadModule(String path)
     auto moduleName = getMangledNameFromNameString(path.getUnownedSlice());
     linkage->contentAssistInfo.primaryModuleName = linkage->getNamePool()->getName(moduleName);
     linkage->contentAssistInfo.primaryModulePath = path;
+
+    ensureWorkspaceFlavor(path.getUnownedSlice());
+
     // Note: 
     // The module at `path` may have already been loaded into the linkage previously
     // due to an `import`. However that module won't get fully checked in when the checker

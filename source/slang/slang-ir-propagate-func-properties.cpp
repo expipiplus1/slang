@@ -11,8 +11,25 @@ class FuncPropertyPropagationContext
 {
 public:
     virtual bool canProcess(IRFunc* f) = 0;
+    virtual bool isInitialFunc(IRFunc* f) = 0;
     virtual bool propagate(IRBuilder& builder, IRFunc* func) = 0;
 };
+
+static bool isResourceLoad(IROp op)
+{
+    switch (op)
+    {
+    case kIROp_ImageLoad:
+    case kIROp_StructuredBufferLoad:
+    case kIROp_ByteAddressBufferLoad:
+    case kIROp_StructuredBufferLoadStatus:
+    case kIROp_RWStructuredBufferLoad:
+    case kIROp_RWStructuredBufferLoadStatus:
+        return true;
+    default:
+        return false;
+    }
+}
 
 static bool isKnownOpCodeWithSideEffect(IROp op)
 {
@@ -37,6 +54,19 @@ static bool isKnownOpCodeWithSideEffect(IROp op)
 class ReadNoneFuncPropertyPropagationContext : public FuncPropertyPropagationContext
 {
 public:
+    virtual bool isInitialFunc(IRFunc* f) override
+    {
+        // If the func has already been marked with any decorations, skip.
+        for (auto decoration : f->getDecorations())
+        {
+            switch (decoration->getOp())
+            {
+            case kIROp_ReadNoneDecoration:
+                return true;
+            }
+        }
+        return false;
+    }
     virtual bool canProcess(IRFunc* f) override
     {
         // If the func has already been marked with any decorations, skip.
@@ -54,7 +84,7 @@ public:
 
     virtual bool propagate(IRBuilder& builder, IRFunc* f) override
     {
-        bool hasSideEffectCall = false;
+        bool hasReadNoneCall = false;
         for (auto block : f->getBlocks())
         {
             for (auto inst : block->getChildren())
@@ -62,11 +92,14 @@ public:
                 // Is this inst known to not have global side effect/analyzable?
                 if (!isKnownOpCodeWithSideEffect(inst->getOp()))
                 {
-                    if (inst->mightHaveSideEffects())
+                    if (inst->mightHaveSideEffects() || isResourceLoad(inst->getOp()))
                     {
-                        // We have a inst that has side effect and is not understood by this method.
+                        // We have a inst that has side effect that is not understood by this method,
                         // e.g. bufferStore, discard, etc.
-                        hasSideEffectCall = true;
+                        // or we are seeing a resource load.
+                        // These operations are not movable or removable,
+                        // and should not be treated as ReadNone.
+                        hasReadNoneCall = true;
                         break;
                     }
                 }
@@ -79,12 +112,12 @@ public:
                     default:
                         // We are calling an unknown function, so we have to assume
                         // there are side effects in the call.
-                        hasSideEffectCall = true;
+                        hasReadNoneCall = true;
                         break;
                     case kIROp_Func:
                         if (!callee->findDecoration<IRReadNoneDecoration>())
                         {
-                            hasSideEffectCall = true;
+                            hasReadNoneCall = true;
                             break;
                         }
                     }
@@ -102,16 +135,16 @@ public:
                         continue;
                     if (isGlobalOrUnknownMutableAddress(f, operand))
                     {
-                        hasSideEffectCall = true;
+                        hasReadNoneCall = true;
                         break;
                     }
                     break;
                 }
             }
-            if (hasSideEffectCall)
+            if (hasReadNoneCall)
                 break;
         }
-        if (!hasSideEffectCall)
+        if (!hasReadNoneCall)
         {
             builder.addDecoration(f, kIROp_ReadNoneDecoration);
             return true;
@@ -174,7 +207,7 @@ bool propagateFuncPropertiesImpl(IRModule* module, FuncPropertyPropagationContex
             }
             if (auto func = as<IRFunc>(inst))
             {
-                if (context->canProcess(func))
+                if (context->isInitialFunc(func))
                 {
                     addCallersToWorkList(func);
                 }
@@ -238,7 +271,20 @@ public:
         }
         return true;
     }
-
+    virtual bool isInitialFunc(IRFunc* f) override
+    {
+        // If the func has already been marked with any decorations, skip.
+        for (auto decoration : f->getDecorations())
+        {
+            switch (decoration->getOp())
+            {
+            case kIROp_ReadNoneDecoration:
+            case kIROp_NoSideEffectDecoration:
+                return true;
+            }
+        }
+        return false;
+    }
     virtual bool propagate(IRBuilder& builder, IRFunc* f) override
     {
         bool hasSideEffectCall = false;

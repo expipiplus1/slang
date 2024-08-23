@@ -443,6 +443,11 @@ List<LanguageServerProtocol::CompletionItem> CompletionContext::collectMembersAn
             linkage->contentAssistInfo.completionSuggestions.swizzleBaseType,
             linkage->contentAssistInfo.completionSuggestions.elementCount);
     }
+    else if (linkage->contentAssistInfo.completionSuggestions.scopeKind ==
+        CompletionSuggestions::ScopeKind::Capabilities)
+    {
+        return createCapabilityCandidates();
+    }
     List<LanguageServerProtocol::CompletionItem> result;
     bool useCommitChars = true;
     bool addKeywords = false;
@@ -595,6 +600,24 @@ List<LanguageServerProtocol::CompletionItem> CompletionContext::collectMembersAn
     return result;
 }
 
+List<LanguageServerProtocol::CompletionItem> CompletionContext::createCapabilityCandidates()
+{
+    List<LanguageServerProtocol::CompletionItem> result;
+    List<UnownedStringSlice> names;
+    getCapabilityNames(names);
+    for (auto name : names.getArrayView(1, names.getCount()-1))
+    {
+        if (name.startsWith("_"))
+            continue;
+        LanguageServerProtocol::CompletionItem item;
+        item.data = 0;
+        item.kind = LanguageServerProtocol::kCompletionItemKindEnumMember;
+        item.label = name;
+        result.add(item);
+    }
+    return result;
+}
+
 List<LanguageServerProtocol::CompletionItem> CompletionContext::createSwizzleCandidates(
     Type* type, IntegerLiteralValue elementCount[2])
 {
@@ -649,6 +672,20 @@ List<LanguageServerProtocol::CompletionItem> CompletionContext::createSwizzleCan
                 item.label = nameSB.toString();
                 result.add(item);
             }
+        }
+    }
+    else if (auto tupleType = as<TupleType>(type))
+    {
+        auto count = Math::Min((int)elementCount[0], 4);
+        for (int i = 0; i < count; i++)
+        {
+            LanguageServerProtocol::CompletionItem item;
+            item.data = 0;
+            if (tupleType->getMember(i))
+                item.detail = tupleType->getMember(i)->toString();
+            item.kind = LanguageServerProtocol::kCompletionItemKindVariable;
+            item.label = String("_") + String(i);
+            result.add(item);
         }
     }
     for (auto& item : result)

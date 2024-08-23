@@ -12,13 +12,20 @@
 
 namespace Slang
 {
+    IntVal* SemanticsVisitor::checkLinkTimeConstantIntVal(
+        Expr* expr)
+    {
+        expr = CheckExpr(expr);
+        return CheckIntegerConstantExpression(expr, IntegerConstantExpressionCoercionType::AnyInteger, nullptr, ConstantFoldingKind::LinkTime);
+    }
+
     ConstantIntVal* SemanticsVisitor::checkConstantIntVal(
         Expr*    expr)
     {
         // First type-check the expression as normal
         expr = CheckExpr(expr);
 
-        auto intVal = CheckIntegerConstantExpression(expr, IntegerConstantExpressionCoercionType::AnyInteger, nullptr);
+        auto intVal = CheckIntegerConstantExpression(expr, IntegerConstantExpressionCoercionType::AnyInteger, nullptr, ConstantFoldingKind::CompileTime);
         if(!intVal)
             return nullptr;
 
@@ -37,7 +44,7 @@ namespace Slang
         // First type-check the expression as normal
         expr = CheckExpr(expr);
 
-        auto intVal = CheckEnumConstantExpression(expr);
+        auto intVal = CheckEnumConstantExpression(expr, ConstantFoldingKind::CompileTime);
         if(!intVal)
             return nullptr;
 
@@ -71,6 +78,30 @@ namespace Slang
 
         getSink()->diagnose(expr, Diagnostics::expectedAStringLiteral);
 
+        return false;
+    }
+
+    bool SemanticsVisitor::checkCapabilityName(Expr* expr, CapabilityName& outCapabilityName)
+    {
+        if (auto varExpr = as<VarExpr>(expr))
+        {
+            if (!varExpr->name)
+                return false;
+            if (varExpr->name == getSession()->getCompletionRequestTokenName())
+            {
+                auto& suggestions = getLinkage()->contentAssistInfo.completionSuggestions;
+                suggestions.clear();
+                suggestions.scopeKind = CompletionSuggestions::ScopeKind::Capabilities;
+            }
+            outCapabilityName = findCapabilityName(varExpr->name->text.getUnownedSlice());
+            if (outCapabilityName == CapabilityName::Invalid)
+            {
+                getSink()->diagnose(expr, Diagnostics::unknownCapability, varExpr->name);
+                return false;
+            }
+            return true;
+        }
+        getSink()->diagnose(expr, Diagnostics::expectCapability);
         return false;
     }
 
@@ -181,10 +212,14 @@ namespace Slang
         attrDecl->nameAndLoc.loc = structDecl->nameAndLoc.loc;
         attrDecl->loc = structDecl->loc;
 
-        AttributeTargetModifier* targetModifier = m_astBuilder->create<AttributeTargetModifier>();
-        targetModifier->syntaxClass = attrUsageAttr->targetSyntaxClass;
-        targetModifier->loc = attrUsageAttr->loc;
-        addModifier(attrDecl, targetModifier);
+        while(attrUsageAttr)
+        {
+            AttributeTargetModifier* targetModifier = m_astBuilder->create<AttributeTargetModifier>();
+            targetModifier->syntaxClass = attrUsageAttr->targetSyntaxClass;
+            targetModifier->loc = attrUsageAttr->loc;
+            addModifier(attrDecl, targetModifier);
+            attrUsageAttr = as<AttributeUsageAttribute>(attrUsageAttr->next);
+        }
 
         // Every attribute declaration is associated with the type
         // of syntax nodes it constructs (via reflection/RTTI).
@@ -209,7 +244,7 @@ namespace Slang
                 paramDecl->nameAndLoc = member->nameAndLoc;
                 paramDecl->type = varMember->type;
                 paramDecl->loc = member->loc;
-                paramDecl->setCheckState(DeclCheckState::Checked);
+                paramDecl->setCheckState(DeclCheckState::DefinitionChecked);
 
                 paramDecl->parentDecl = attrDecl;
                 attrDecl->members.add(paramDecl);
@@ -233,7 +268,7 @@ namespace Slang
         //
         // TODO: what check state is relevant here?
         //
-        ensureDecl(attrDecl, DeclCheckState::Checked);
+        ensureDecl(attrDecl, DeclCheckState::DefinitionChecked);
 
         return attrDecl;
     }
@@ -287,6 +322,11 @@ namespace Slang
             cls = m_astBuilder->findSyntaxClass(UnownedStringSlice::fromLiteral("FuncDecl"));
             return true;
         }
+        if (typeFlags == (int)UserDefinedAttributeTargets::Param)
+        {
+            cls = m_astBuilder->findSyntaxClass(UnownedStringSlice::fromLiteral("ParamDecl"));
+            return true;
+        }
         return false;
     }
 
@@ -296,26 +336,40 @@ namespace Slang
         {
             SLANG_ASSERT(attr->args.getCount() == 3);
 
-            int32_t values[3];
+            IntVal* values[3];
 
             for (int i = 0; i < 3; ++i)
             {
-                int32_t value = 1;
+                IntVal* value = nullptr;
 
                 auto arg = attr->args[i];
                 if (arg)
                 {
-                    auto intValue = checkConstantIntVal(arg);
+                    auto intValue = checkLinkTimeConstantIntVal(arg);
                     if (!intValue)
                     {
                         return false;
                     }
-                    if (intValue->getValue() < 1)
+                    if (auto constIntVal = as<ConstantIntVal>(intValue))
                     {
-                        getSink()->diagnose(attr, Diagnostics::nonPositiveNumThreads, intValue->getValue());
-                        return false;
+                        if (constIntVal->getValue() < 1)
+                        {
+                            getSink()->diagnose(attr, Diagnostics::nonPositiveNumThreads, constIntVal->getValue());
+                            return false;
+                        }
+                        if (intValue->getType() != m_astBuilder->getIntType())
+                        {
+                            intValue = m_astBuilder->getIntVal(m_astBuilder->getIntType(), constIntVal->getValue());
+                        }
                     }
-                    value = int32_t(intValue->getValue());
+                    // Make sure we always canonicalize the type to int.
+                    value = intValue;
+                    if (value->getType() != m_astBuilder->getIntType())
+                        value = m_astBuilder->getTypeCastIntVal(m_astBuilder->getIntType(), value);
+                }
+                else
+                {
+                    value = m_astBuilder->getIntVal(m_astBuilder->getIntType(), 1);
                 }
                 values[i] = value;
             }
@@ -323,6 +377,47 @@ namespace Slang
             numThreadsAttr->x = values[0];
             numThreadsAttr->y = values[1];
             numThreadsAttr->z = values[2];
+        }
+        else if (auto waveSizeAttr = as<WaveSizeAttribute>(attr))
+        {
+            SLANG_ASSERT(attr->args.getCount() == 1);
+
+            IntVal* value = nullptr;
+
+            auto arg = attr->args[0];
+            if (arg)
+            {
+                auto intValue = checkLinkTimeConstantIntVal(arg);
+                if (!intValue)
+                {
+                    return false;
+                }
+                if (auto constIntVal = as<ConstantIntVal>(intValue))
+                {
+                    bool isValidWaveSize = false;
+                    const IntegerLiteralValue waveSize = constIntVal->getValue();
+                    for (int validWaveSize : { 4, 8, 16, 32, 64, 128 })
+                    {
+                        if (validWaveSize == waveSize)
+                        {
+                            isValidWaveSize = true;
+                            break;
+                        }
+                    }
+                    if (!isValidWaveSize)
+                    {
+                        getSink()->diagnose(attr, Diagnostics::invalidWaveSize, constIntVal->getValue());
+                        return false;
+                    }
+                }
+                value = intValue;
+            }
+            else
+            {
+                value = m_astBuilder->getIntVal(m_astBuilder->getIntType(), 1);
+            }
+
+            waveSizeAttr->numLanes = value;
         }
         else if (auto anyValueSizeAttr = as<AnyValueSizeAttribute>(attr))
         {
@@ -349,6 +444,23 @@ namespace Slang
 
             anyValueSizeAttr->size = int32_t(value->getValue());
         }
+        else if (auto glslRequireShaderInputParameter = as<GLSLRequireShaderInputParameterAttribute>(attr))
+        {
+            if (attr->args.getCount() != 1)
+            {
+                return false;
+            }
+            auto value = checkConstantIntVal(attr->args[0]);
+            if (value == nullptr)
+            {
+                return false;
+            }
+            if (value->getValue() < 0)
+            {
+                return false;
+            }
+            glslRequireShaderInputParameter->parameterNumber = int32_t(value->getValue());
+        }
         else if (auto overloadRankAttr = as<OverloadRankAttribute>(attr))
         {
             if (attr->args.getCount() != 1)
@@ -361,6 +473,17 @@ namespace Slang
                 return false;
             }
             overloadRankAttr->rank = int32_t(rank->getValue());
+        }
+        else if (auto inputAttachmentIndexLayoutAttribute = as<GLSLInputAttachmentIndexLayoutAttribute>(attr))
+        {
+            if (attr->args.getCount() != 1)
+                return false;
+    
+            auto location = checkConstantIntVal(attr->args[0]);
+            if(!location)
+                return false;
+
+            inputAttachmentIndexLayoutAttribute->location = location->getValue();
         }
         else if (auto bindingAttr = as<GLSLBindingAttribute>(attr))
         {
@@ -669,6 +792,13 @@ namespace Slang
 
             rayPayloadAttr->location = (int32_t)val->getValue();
         }
+        else if (auto rayPayloadInAttr = as<VulkanRayPayloadInAttribute>(attr))
+        {
+            SLANG_ASSERT(attr->args.getCount() == 1);
+            auto val = checkConstantIntVal(attr->args[0]);
+            if (!val) return false;
+            rayPayloadInAttr->location = (int32_t)val->getValue();
+        }
         else if (auto callablePayloadAttr = as<VulkanCallablePayloadAttribute>(attr))
         {
             SLANG_ASSERT(attr->args.getCount() == 1);
@@ -677,6 +807,13 @@ namespace Slang
             if (!val) return false;
 
             callablePayloadAttr->location = (int32_t)val->getValue();
+        }
+        else if (auto callablePayloadInAttr = as<VulkanCallablePayloadInAttribute>(attr))
+        {
+            SLANG_ASSERT(attr->args.getCount() == 1);
+            auto val = checkConstantIntVal(attr->args[0]);
+            if (!val) return false;
+            callablePayloadInAttr->location = (int32_t)val->getValue();
         }
         else if (auto hitObjectAttributesAttr = as<VulkanHitObjectAttributesAttribute>(attr))
         {
@@ -782,6 +919,52 @@ namespace Slang
             }
 
             pyExportAttr->name = name;
+        }
+        else if (auto requireCapAttr = as<RequireCapabilityAttribute>(attr))
+        {
+            List<CapabilityName> capabilityNames;
+            for (auto& arg : attr->args)
+            {
+                CapabilityName capName;
+                if (checkCapabilityName(arg, capName))
+                {
+                    capabilityNames.add(capName);
+                    if(isInternalCapabilityName(capName))
+                        maybeDiagnose(getSink(), this->getOptionSet(), DiagnosticCategory::Capability, attr, Diagnostics::usingInternalCapabilityName, attr, capName);
+                }
+            }
+            requireCapAttr->capabilitySet = CapabilitySet(capabilityNames);
+            if (requireCapAttr->capabilitySet.isInvalid())
+                maybeDiagnose(getSink(), this->getOptionSet(), DiagnosticCategory::Capability, attr, Diagnostics::unexpectedCapability, attr, CapabilityName::Invalid);
+        }
+        else if (auto requirePreludeAttr = as<RequirePreludeAttribute>(attr))
+        {
+            if (attr->args.getCount() > 2)
+            {
+                getSink()->diagnose(attr, Diagnostics::tooManyArguments, attr->args.getCount(), 0);
+                return false;
+            }
+            else if (attr->args.getCount() < 2)
+            {
+                getSink()->diagnose(attr, Diagnostics::notEnoughArguments, attr->args.getCount(), 2);
+                return false;
+            }
+            CapabilityName capName;
+            if (!checkCapabilityName(attr->args[0], capName))
+            {
+                return false;
+            }
+            requirePreludeAttr->capabilitySet = CapabilitySet(capName);
+            if (auto stringLitExpr = as<StringLiteralExpr>(attr->args[1]))
+            {
+                requirePreludeAttr->prelude = getStringLiteralTokenValue(stringLitExpr->token);
+            }
+            else
+            {
+                getSink()->diagnose(attr->args[1], Diagnostics::expectedAStringLiteral);
+                return false;
+            }
+            return true;
         }
         else
         {
@@ -919,9 +1102,215 @@ namespace Slang
         return attr;
     }
 
+    ASTNodeType getModifierConflictGroupKind(ASTNodeType modifierType)
+    {
+        switch (modifierType)
+        {
+            // Allowed only on parameters and global variables.
+        case ASTNodeType::InModifier:
+            return modifierType;
+        case ASTNodeType::OutModifier:
+        case ASTNodeType::RefModifier:
+        case ASTNodeType::ConstRefModifier:
+        case ASTNodeType::InOutModifier:
+            return ASTNodeType::OutModifier;
+
+            // Modifiers that are their own exclusive group.
+        case ASTNodeType::GLSLLayoutModifier:
+        case ASTNodeType::GLSLParsedLayoutModifier:
+        case ASTNodeType::GLSLConstantIDLayoutModifier:
+        case ASTNodeType::GLSLLocationLayoutModifier:
+        case ASTNodeType::GLSLInputAttachmentIndexLayoutAttribute:
+        case ASTNodeType::GLSLOffsetLayoutAttribute:
+        case ASTNodeType::GLSLUnparsedLayoutModifier:
+        case ASTNodeType::GLSLLayoutModifierGroupMarker:
+        case ASTNodeType::GLSLLayoutModifierGroupBegin:
+        case ASTNodeType::GLSLLayoutModifierGroupEnd:
+        case ASTNodeType::GLSLBufferModifier:
+        case ASTNodeType::MemoryQualifierSetModifier:
+        case ASTNodeType::GLSLWriteOnlyModifier:
+        case ASTNodeType::GLSLReadOnlyModifier:
+        case ASTNodeType::GLSLVolatileModifier:
+        case ASTNodeType::GLSLRestrictModifier:
+        case ASTNodeType::GLSLPatchModifier:
+        case ASTNodeType::RayPayloadAccessSemantic:
+        case ASTNodeType::RayPayloadReadSemantic:
+        case ASTNodeType::RayPayloadWriteSemantic:
+        case ASTNodeType::GloballyCoherentModifier:
+        case ASTNodeType::PreciseModifier:
+        case ASTNodeType::IntrinsicOpModifier:
+        case ASTNodeType::InlineModifier:
+        case ASTNodeType::HLSLExportModifier:
+        case ASTNodeType::ExternCppModifier:
+        case ASTNodeType::ExportedModifier:
+        case ASTNodeType::ConstModifier:
+        case ASTNodeType::ConstExprModifier:
+        case ASTNodeType::MatrixLayoutModifier:
+        case ASTNodeType::RowMajorLayoutModifier:
+        case ASTNodeType::HLSLRowMajorLayoutModifier:
+        case ASTNodeType::GLSLColumnMajorLayoutModifier:
+        case ASTNodeType::ColumnMajorLayoutModifier:
+        case ASTNodeType::HLSLColumnMajorLayoutModifier:
+        case ASTNodeType::GLSLRowMajorLayoutModifier:
+        case ASTNodeType::HLSLEffectSharedModifier:
+        case ASTNodeType::HLSLVolatileModifier:
+        case ASTNodeType::GLSLPrecisionModifier:
+        case ASTNodeType::HLSLGroupSharedModifier:
+            return modifierType;
+
+        case ASTNodeType::HLSLStaticModifier:
+        case ASTNodeType::ActualGlobalModifier:
+        case ASTNodeType::HLSLUniformModifier:
+            return ASTNodeType::HLSLStaticModifier;
+
+        case ASTNodeType::HLSLNoInterpolationModifier:
+        case ASTNodeType::HLSLNoPerspectiveModifier:
+        case ASTNodeType::HLSLLinearModifier:
+        case ASTNodeType::HLSLSampleModifier:
+        case ASTNodeType::HLSLCentroidModifier:
+        case ASTNodeType::PerVertexModifier:
+            return ASTNodeType::InterpolationModeModifier;
+
+        case ASTNodeType::PrefixModifier:
+        case ASTNodeType::PostfixModifier:
+            return ASTNodeType::PrefixModifier;
+
+        case ASTNodeType::BuiltinModifier:
+        case ASTNodeType::PublicModifier:
+        case ASTNodeType::PrivateModifier:
+        case ASTNodeType::InternalModifier:
+            return ASTNodeType::VisibilityModifier;
+
+        default:
+            return ASTNodeType::NodeBase;
+        }
+    }
+
+    bool isModifierAllowedOnDecl(bool isGLSLInput, ASTNodeType modifierType, Decl* decl)
+    {
+        switch (modifierType)
+        {
+            // In addition to the above cases, these are also present on empty
+            // global declarations, for instance
+            // layout(local_size_x=1) in;
+        case ASTNodeType::InModifier:
+        case ASTNodeType::InOutModifier:
+        case ASTNodeType::OutModifier:
+        case ASTNodeType::GLSLLayoutModifier:
+        case ASTNodeType::GLSLParsedLayoutModifier:
+        case ASTNodeType::GLSLConstantIDLayoutModifier:
+        case ASTNodeType::GLSLLocationLayoutModifier:
+        case ASTNodeType::GLSLInputAttachmentIndexLayoutAttribute:
+        case ASTNodeType::GLSLOffsetLayoutAttribute:
+        case ASTNodeType::GLSLUnparsedLayoutModifier:
+        case ASTNodeType::GLSLLayoutModifierGroupMarker:
+        case ASTNodeType::GLSLLayoutModifierGroupBegin:
+        case ASTNodeType::GLSLLayoutModifierGroupEnd:
+            // If we are in GLSL mode, also allow these but otherwise fall to
+            // the regular check
+            if(isGLSLInput && as<EmptyDecl>(decl) && isGlobalDecl(decl))
+                return true;
+            [[fallthrough]];
+
+        case ASTNodeType::RefModifier:
+        case ASTNodeType::ConstRefModifier:
+        case ASTNodeType::GLSLBufferModifier:
+        case ASTNodeType::GLSLPatchModifier:
+        case ASTNodeType::RayPayloadAccessSemantic:
+        case ASTNodeType::RayPayloadReadSemantic:
+        case ASTNodeType::RayPayloadWriteSemantic:
+            return (as<VarDeclBase>(decl) && isGlobalDecl(decl)) || as<ParamDecl>(decl) || as<GLSLInterfaceBlockDecl>(decl);
+
+        case ASTNodeType::GLSLWriteOnlyModifier:
+        case ASTNodeType::GLSLReadOnlyModifier:
+        case ASTNodeType::GLSLVolatileModifier:
+        case ASTNodeType::GLSLRestrictModifier:
+            if(isGLSLInput)
+                return (as<VarDeclBase>(decl) && (isGlobalDecl(decl)) || as<ParamDecl>(decl) || as<GLSLInterfaceBlockDecl>(decl)) 
+                    || as<StructDecl>(getParentDecl(decl)) && isGlobalDecl(getParentDecl(decl));
+            return (as<VarDeclBase>(decl) && (isGlobalDecl(decl)) || as<ParamDecl>(decl) || as<GLSLInterfaceBlockDecl>(decl));
+
+        case ASTNodeType::GloballyCoherentModifier:
+        case ASTNodeType::HLSLVolatileModifier:
+            if(isGLSLInput)
+                return as<VarDecl>(decl) && (isGlobalDecl(decl) || as<StructDecl>(getParentDecl(decl)) || as<GLSLInterfaceBlockDecl>(decl))
+                    || as<VarDeclBase>(decl) && isGlobalDecl(decl) || as<ParamDecl>(decl) || (as<StructDecl>(getParentDecl(decl)) && isGlobalDecl(getParentDecl(decl)));
+            return as<VarDecl>(decl) && (isGlobalDecl(decl) || as<StructDecl>(getParentDecl(decl)) || as<GLSLInterfaceBlockDecl>(decl));
+
+            // Allowed only on parameters, struct fields and global variables.
+        case ASTNodeType::InterpolationModeModifier:
+        case ASTNodeType::HLSLNoInterpolationModifier:
+        case ASTNodeType::HLSLNoPerspectiveModifier:
+        case ASTNodeType::HLSLLinearModifier:
+        case ASTNodeType::HLSLSampleModifier:
+        case ASTNodeType::HLSLCentroidModifier:
+        case ASTNodeType::PerVertexModifier:
+        case ASTNodeType::HLSLUniformModifier:
+        case ASTNodeType::DynamicUniformModifier:
+            return (as<VarDeclBase>(decl) && (isGlobalDecl(decl) || as<StructDecl>(getParentDecl(decl)))) || as<ParamDecl>(decl);
+
+        case ASTNodeType::HLSLSemantic:
+        case ASTNodeType::HLSLLayoutSemantic:
+        case ASTNodeType::HLSLRegisterSemantic:
+        case ASTNodeType::HLSLPackOffsetSemantic:
+        case ASTNodeType::HLSLSimpleSemantic:
+            return (as<VarDeclBase>(decl) && (isGlobalDecl(decl) || as<StructDecl>(getParentDecl(decl)))) || as<ParamDecl>(decl) || as<FuncDecl>(decl);
+
+            // Allowed only on functions
+        case ASTNodeType::IntrinsicOpModifier:
+        case ASTNodeType::SpecializedForTargetModifier:
+        case ASTNodeType::InlineModifier:
+        case ASTNodeType::PrefixModifier:
+        case ASTNodeType::PostfixModifier:
+            return as<CallableDecl>(decl);
+
+        case ASTNodeType::BuiltinModifier:
+        case ASTNodeType::PublicModifier:
+        case ASTNodeType::PrivateModifier:
+        case ASTNodeType::InternalModifier:
+        case ASTNodeType::ExternModifier:
+        case ASTNodeType::HLSLExportModifier:
+        case ASTNodeType::ExternCppModifier:
+            return as<VarDeclBase>(decl) || as<AggTypeDeclBase>(decl) || as<NamespaceDeclBase>(decl) || as<CallableDecl>(decl)
+                || as<TypeDefDecl>(decl) || as<PropertyDecl>(decl) || as<SyntaxDecl>(decl) || as<AttributeDecl>(decl)
+                || as<InheritanceDecl>(decl);
+
+        case ASTNodeType::ExportedModifier:
+            return as<ImportDecl>(decl);
+
+        case ASTNodeType::ConstModifier:
+        case ASTNodeType::HLSLStaticModifier:
+        case ASTNodeType::ConstExprModifier:
+        case ASTNodeType::PreciseModifier:
+            return as<VarDeclBase>(decl) || as<CallableDecl>(decl);
+
+        case ASTNodeType::ActualGlobalModifier:
+        case ASTNodeType::MatrixLayoutModifier:
+        case ASTNodeType::RowMajorLayoutModifier:
+        case ASTNodeType::HLSLRowMajorLayoutModifier:
+        case ASTNodeType::GLSLColumnMajorLayoutModifier:
+        case ASTNodeType::ColumnMajorLayoutModifier:
+        case ASTNodeType::HLSLColumnMajorLayoutModifier:
+        case ASTNodeType::GLSLRowMajorLayoutModifier:
+        case ASTNodeType::HLSLEffectSharedModifier:
+            return as<VarDeclBase>(decl) || as<GLSLInterfaceBlockDecl>(decl);
+
+        case ASTNodeType::GLSLPrecisionModifier:
+            return as<VarDeclBase>(decl) || as<GLSLInterfaceBlockDecl>(decl) || as<CallableDecl>(decl);
+        case ASTNodeType::HLSLGroupSharedModifier:
+            // groupshared must be global or static.
+            if (!as<VarDeclBase>(decl))
+                return false;
+            return isGlobalDecl(decl) || isEffectivelyStatic(decl);
+        default:
+            return true;
+        }
+    }
+
     Modifier* SemanticsVisitor::checkModifier(
         Modifier*        m,
-        ModifiableSyntaxNode*   syntaxNode)
+        ModifiableSyntaxNode*   syntaxNode,
+        bool ignoreUnallowedModifier)
     {
         if(auto hlslUncheckedAttribute = as<UncheckedAttribute>(m))
         {
@@ -932,7 +1321,62 @@ namespace Slang
             // the right syntax class to instantiate.
             //
 
-            return checkAttribute(hlslUncheckedAttribute, syntaxNode);
+            auto checkedAttr = checkAttribute(hlslUncheckedAttribute, syntaxNode);
+
+            if (as<UnscopedEnumAttribute>(checkedAttr))
+            {
+                if (auto parentDecl = as<ContainerDecl>(getParentDecl(as<Decl>(syntaxNode))))
+                    parentDecl->invalidateMemberDictionary();
+                return getASTBuilder()->create<TransparentModifier>();
+            }
+            return checkedAttr;
+        }
+
+        if (auto decl = as<Decl>(syntaxNode))
+        {
+            auto moduleDecl = getModuleDecl(decl);
+            bool isGLSLInput = getOptionSet().getBoolOption(CompilerOptionName::AllowGLSL);
+            if (!isGLSLInput && moduleDecl && moduleDecl->findModifier<GLSLModuleModifier>())
+                isGLSLInput = true;
+            if (!isModifierAllowedOnDecl(isGLSLInput, m->astNodeType, decl))
+            {
+                if (!ignoreUnallowedModifier)
+                {
+                    getSink()->diagnose(m, Diagnostics::modifierNotAllowed, m);
+                    return nullptr;
+                }
+                return m;
+            }
+        }
+
+        MemoryQualifierSetModifier::Flags::MemoryQualifiersBit memoryQualifierBit = MemoryQualifierSetModifier::Flags::kNone;
+        if(as<GloballyCoherentModifier>(m))
+            memoryQualifierBit = MemoryQualifierSetModifier::Flags::kCoherent;
+        else if(as<GLSLReadOnlyModifier>(m))
+            memoryQualifierBit = MemoryQualifierSetModifier::Flags::kReadOnly;
+        else if(as<GLSLWriteOnlyModifier>(m))
+            memoryQualifierBit = MemoryQualifierSetModifier::Flags::kWriteOnly;
+        else if(as<GLSLVolatileModifier>(m))
+            memoryQualifierBit = MemoryQualifierSetModifier::Flags::kVolatile;
+        else if(as<GLSLRestrictModifier>(m))
+            memoryQualifierBit = MemoryQualifierSetModifier::Flags::kRestrict;
+        if(memoryQualifierBit != MemoryQualifierSetModifier::Flags::kNone)
+        {
+            bool newModifier = false;
+            MemoryQualifierSetModifier* memoryQualifiers = syntaxNode->findModifier<MemoryQualifierSetModifier>();
+            if(!memoryQualifiers)
+            {
+                newModifier = true;
+                memoryQualifiers = getASTBuilder()->create<MemoryQualifierSetModifier>();
+            }
+            memoryQualifiers->addQualifier(m,
+                memoryQualifierBit);
+            if (newModifier)
+            {
+                m->next = memoryQualifiers;
+                return memoryQualifiers;
+            }
+            return nullptr;
         }
 
         if (auto hlslSemantic = as<HLSLSimpleSemantic>(m))
@@ -1044,9 +1488,18 @@ namespace Slang
 
         if (as<PrivateModifier>(m))
         {
-            if (as<AggTypeDeclBase>(syntaxNode) || as<NamespaceDeclBase>(syntaxNode))
+            if (auto decl = as<Decl>(syntaxNode))
             {
-                getSink()->diagnose(m, Diagnostics::invalidUseOfPrivateVisibility, as<Decl>(syntaxNode));
+                if (isGlobalDecl(decl))
+                {
+                    getSink()->diagnose(m, Diagnostics::invalidUseOfPrivateVisibility, as<Decl>(syntaxNode));
+                    return m;
+                }
+            }
+            if (as<NamespaceDeclBase>(syntaxNode))
+            {
+                getSink()->diagnose(m, Diagnostics::invalidVisibilityModifierOnTypeOfDecl, syntaxNode->astNodeType);
+                return m;
             }
             else if (auto decl = as<Decl>(syntaxNode))
             {
@@ -1057,7 +1510,54 @@ namespace Slang
                 }
             }
         }
+        else if (as<InternalModifier>(m))
+        {
+            if (as<NamespaceDeclBase>(syntaxNode))
+            {
+                getSink()->diagnose(m, Diagnostics::invalidVisibilityModifierOnTypeOfDecl, syntaxNode->astNodeType);
+                return m;
+            }
+        }
 
+        if (auto attr = as<GLSLLayoutLocalSizeAttribute>(m))
+        {
+            SLANG_ASSERT(attr->args.getCount() == 3);
+
+            IntVal* values[3];
+
+            for (int i = 0; i < 3; ++i)
+            {
+                IntVal* value = nullptr;
+
+                auto arg = attr->args[i];
+                if (arg)
+                {
+                    auto intValue = checkConstantIntVal(arg);
+                    if (!intValue)
+                    {
+                        return nullptr;
+                    }
+                    if (auto cintVal = as<ConstantIntVal>(intValue))
+                    {
+                        if (cintVal->getValue() < 1)
+                        {
+                            getSink()->diagnose(attr, Diagnostics::nonPositiveNumThreads, cintVal->getValue());
+                            return nullptr;
+                        }
+                    }
+                    value = intValue;
+                }
+                else
+                {
+                    value = m_astBuilder->getIntVal(m_astBuilder->getIntType(), 1);
+                }
+                values[i] = value;
+            }
+
+            attr->x = values[0];
+            attr->y = values[1];
+            attr->z = values[2];
+        }
 
         // Default behavior is to leave things as they are,
         // and assume that modifiers are mostly already checked.
@@ -1137,6 +1637,36 @@ namespace Slang
         }
     }
 
+    void postProcessingOnModifiers(Modifiers& modifiers)
+    {
+        // compress all `require` nodes into 1 `require` modifier
+        RequireCapabilityAttribute* firstRequire = nullptr;
+        Modifier* previous = nullptr;
+        Modifier* next = nullptr;
+        for (auto m = modifiers.first; m != nullptr; m = next)
+        {
+            next = m->next;
+            //
+
+            if (auto req = as<RequireCapabilityAttribute>(m))
+            {
+                if (!firstRequire)
+                {
+                    firstRequire = req;
+                    previous = m;
+                    continue;
+                }
+                firstRequire->capabilitySet.unionWith(req->capabilitySet);
+                if(previous)
+                    previous->next = next;
+                continue;
+            }
+
+            //
+            previous = m;
+        }
+    }
+
     void SemanticsVisitor::checkModifiers(ModifiableSyntaxNode* syntaxNode)
     {
         // TODO(tfoley): need to make sure this only
@@ -1148,9 +1678,26 @@ namespace Slang
         Modifier* resultModifiers = nullptr;
         Modifier** resultModifierLink = &resultModifiers;
 
+        // We will keep track of the modifiers for each conflict group.
+        Dictionary<ASTNodeType, Modifier*> mapExclusiveGroupToModifier;
+
         Modifier* modifier = syntaxNode->modifiers.first;
-        while(modifier)
+        bool ignoreUnallowedModifier = false;
+        while (modifier)
         {
+            // Check if a modifier belonging to the same conflict group is already
+            // defined.
+            Modifier* existingModifier = nullptr;
+            auto conflictGroup = getModifierConflictGroupKind(modifier->astNodeType);
+            if (conflictGroup != ASTNodeType::NodeBase)
+            {
+                if (mapExclusiveGroupToModifier.tryGetValue(conflictGroup, existingModifier))
+                {
+                    getSink()->diagnose(modifier->loc, Diagnostics::duplicateModifier, modifier, existingModifier);
+                }
+                mapExclusiveGroupToModifier[conflictGroup] = modifier;
+            }
+
             // Because we are rewriting the list in place, we need to extract
             // the next modifier here (not at the end of the loop).
             auto next = modifier->next;
@@ -1160,7 +1707,14 @@ namespace Slang
             // be to return a single unlinked modifier.
             modifier->next = nullptr;
 
-            auto checkedModifier = checkModifier(modifier, syntaxNode);
+            // For any modifiers appears after "SharedModifiers", we will not diagnose
+            // an error if the modifier is not allowed on the declaration.
+            if (as<SharedModifiers>(modifier))
+                ignoreUnallowedModifier = true;
+            
+            // may return a list of modifiers
+            auto checkedModifier = checkModifier(modifier, syntaxNode, ignoreUnallowedModifier);
+
             if(checkedModifier)
             {
                 // If checking gave us a modifier to add, then we
@@ -1185,6 +1739,8 @@ namespace Slang
         // Whether we actually re-wrote anything or note, lets
         // install the new list of modifiers on the declaration
         syntaxNode->modifiers.first = resultModifiers;
+
+        postProcessingOnModifiers(syntaxNode->modifiers);
     }
 
 

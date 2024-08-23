@@ -74,10 +74,22 @@ syntax snorm : SNormModifier;
 ///
 syntax __extern_cpp : ExternCppModifier;
 
+__magic_type(DefaultInitializableType)
+interface IDefaultInitializable
+{
+    __builtin_requirement($( (int)BuiltinRequirementKind::DefaultInitializableConstructor))
+    __init();
+}
+
 interface IComparable
 {
+    __builtin_requirement($( (int)BuiltinRequirementKind::Equals))
     bool equals(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::LessThan))
     bool lessThan(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::LessThanOrEquals))
     bool lessThanOrEquals(This other);
 }
 
@@ -107,15 +119,34 @@ interface IArithmetic : IComparable
 
 interface ILogical : IComparable
 {
+    __builtin_requirement($( (int)BuiltinRequirementKind::Shl) )
     This shl(int value);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::Shr) )
     This shr(int value);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::BitAnd) )
     This bitAnd(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::BitOr) )
     This bitOr(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::BitXor) )
     This bitXor(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::BitNot) )
     This bitNot();
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::And) )
     This and(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::Or) )
     This or(This other);
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::Not) )
     This not();
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::InitLogicalFromInt) )
     __init(int val);
 }
 
@@ -163,7 +194,9 @@ interface IFloat : IArithmetic, IDifferentiable
 /// A type that can be used as an operand for builtins
 [sealed]
 [builtin]
-interface __BuiltinType {}
+interface __BuiltinType 
+{
+}
 
 /// A type that can be used for arithmetic operations
 [sealed]
@@ -216,6 +249,12 @@ attribute_syntax [Differentiable(order:int = 0)] : BackwardDifferentiableAttribu
 
 __intrinsic_op($(kIROp_RequirePrelude))
 void __requirePrelude(constexpr String preludeText);
+
+__intrinsic_op($(kIROp_RequireGLSLExtension))
+void __requireGLSLExtension(constexpr String preludeText);
+
+__intrinsic_op($(kIROp_StaticAssert))
+void static_assert(constexpr bool condition, NativeString errorMessage);
 
 /// Interface to denote types as differentiable.
 /// Allows for user-specified differential types as
@@ -333,85 +372,24 @@ interface __BuiltinFloatingPointType : __BuiltinRealType, IFloat
 // A type resulting from an `enum` declaration.
 [builtin]
 __magic_type(EnumTypeType)
-interface __EnumType
+interface __EnumType : ILogical
 {
     // The type of tags for this `enum`
     //
     // Note: using `__Tag` instead of `Tag` to avoid any
     // conflict if a user had an `enum` case called `Tag`
     associatedtype __Tag : __BuiltinIntegerType;
+
+    __builtin_requirement($( (int)BuiltinRequirementKind::InitLogicalFromInt) )
+    __init(__Tag value);
 };
 
-// Use an extension to declare that every `enum` type
-// inherits an initializer based on the tag type.
-//
-// Note: there is an important and subtle point here.
-// If we declared these initializers inside the `interface`
-// declaration above, then they would implicitly be
-// *requirements* of the `__EnumType` interface, and any
-// type that declares conformance to it would need to
-// provide implementations. That would put the onus on
-// the semantic checker to synthesize such initializers
-// when conforming an `enum` type to `__EnumType` (just
-// as it currently synthesizes the `__Tag` requirement.
-// Putting the declaration in an `extension` makes them
-// concrete declerations rather than interface requirements.
-// (Admittedly, they are "concrete" declarations with
-// no bodies, because currently all initializers are
-// assumed to be intrinsics).
-//
-// TODO: It might be more accurate to express this as:
-//
-//      __generic<T:__EnumType> extension T { ... }
-//
-// That alternative would express an extension of every
-// type that conforms to `__EnumType`, rather than an
-// extension of `__EnumType` itself. The distinction
-// is subtle, and unfortunately not one the Slang type
-// checker is equiped to handle right now. For now we
-// will stick with the syntax that actually works, even
-// if it might be the less technically correct one.
-//
-//
-extension __EnumType
-{
-    // TODO: this should be a single initializer using
-    // the `__Tag` associated type from the `__EnumType`
-    // interface, but right now the scoping for looking
-    // up that type isn't working right.
-    //
-    __intrinsic_op($(kIROp_IntCast))
-    __init(int value);
-    __intrinsic_op($(kIROp_IntCast))
-    __init(uint value);
-}
-
-// A type resulting from an `enum` declaration
-// with the `[flags]` attribute.
-[builtin]
-interface __FlagsEnumType : __EnumType
-{
-};
 
 interface IArray<T>
 {
     int getCount();
     __subscript(int index) -> T
     {
-        get;
-    }
-}
-
-__generic<T, let N:int>
-__magic_type(ArrayExpressionType)
-struct Array : IArray<T>
-{
-    [ForceInline]
-    int getCount() { return N; }
-
-    __subscript(int index) -> T
-    {
-        __intrinsic_op($(kIROp_GetElement))
         get;
     }
 }
@@ -441,6 +419,8 @@ __generic<T, let N : int> __intrinsic_op(select) vector<T,N> select(vector<bool,
 // Allow real-number types to be cast into each other
 __intrinsic_op($(kIROp_FloatCast))
     T __realCast<T : __BuiltinRealType, U : __BuiltinRealType>(U val);
+__intrinsic_op($(kIROp_CastIntToFloat))
+    T __realCast<T : __BuiltinRealType, U : __BuiltinIntegerType>(U val);
 __intrinsic_op($(kIROp_IntCast))
     T __intCast<T : __BuiltinType, U : __BuiltinType>(U val);
 ${{{{
@@ -592,7 +572,7 @@ ${{{{
         __intrinsic_op($(kIROp_Rsh)) This shr(int other);
         __intrinsic_op($(kIROp_BitAnd)) This bitAnd(This other);
         __intrinsic_op($(kIROp_BitOr)) This bitOr(This other);
-        [__unsafeForceInlineEarly] This and(This other) {return __intCast<This>(__intCast<bool>(this) && __intCast<bool>(other)); }
+        [__unsafeForceInlineEarly] This and(This other) {return __intCast<This>(and(__intCast<bool>(this), __intCast<bool>(other))); }
         [__unsafeForceInlineEarly] This or(This other) {return __intCast<This>(__intCast<bool>(this) || __intCast<bool>(other)); }
         __intrinsic_op($(kIROp_BitXor)) This bitXor(This other);
         __intrinsic_op($(kIROp_BitNot)) This bitNot();
@@ -621,7 +601,7 @@ ${{{{
     case BaseType::Float:
     case BaseType::Double:
 }}}}
-        [TreatAsDifferentiable]
+        [Differentiable]
         static $(kBaseTypes[tt].name) getPi() { return $(kBaseTypes[tt].name)(3.14159265358979323846264338328); }
 
          __intrinsic_op($(kIROp_Less)) bool lessThan(This other);
@@ -699,14 +679,14 @@ struct __none_t
 {
 };
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t = $( (uint64_t)AddressSpace::UserPointer)ULL>
 __magic_type(PtrType)
 __intrinsic_type($(kIROp_PtrType))
 struct Ptr
 {
     __generic<U>
     __intrinsic_op($(kIROp_BitCast))
-    __init(Ptr<U> ptr);
+    __init(Ptr<U, addrSpace> ptr);
 
     __intrinsic_op($(kIROp_CastIntToPtr))
     __init(uint64_t val);
@@ -714,67 +694,64 @@ struct Ptr
     __intrinsic_op($(kIROp_CastIntToPtr))
     __init(int64_t val);
 
-    __subscript(int index) -> T
+    __generic<TInt : __BuiltinIntegerType>
+    __subscript(TInt index) -> T
     {
-        [__unsafeForceInlineEarly]
-        get
-        {
-            return __load(__getElementPtr(this, index));
-        }
-
-        [__unsafeForceInlineEarly]
-        set(T newValue)
-        {
-            __store(__getElementPtr(this, index), newValue);
-        }
-
-        __intrinsic_op($(kIROp_GetElementPtr))
+        __intrinsic_op($(kIROp_GetOffsetPtr))
         ref;
     }
 };
 
 __intrinsic_op($(kIROp_Load))
-T __load<T>(Ptr<T> ptr);
+T __load<T, let addrSpace : uint64_t>(Ptr<T, addrSpace> ptr);
 
 __intrinsic_op($(kIROp_Store))
-void __store<T>(Ptr<T> ptr, T val);
+void __store<T, let addrSpace : uint64_t>(Ptr<T, addrSpace> ptr, T val);
 
 __intrinsic_op($(kIROp_GetElementPtr))
-Ptr<T> __getElementPtr<T>(Ptr<T> ptr, int index);
+Ptr<T, addrSpace> __getElementPtr<T, let addrSpace : uint64_t, TIndex : __BuiltinIntegerType>(Ptr<T, addrSpace> ptr, TIndex index);
 
-__intrinsic_op($(kIROp_GetElementPtr))
-Ptr<T> __getElementPtr<T>(Ptr<T> ptr, int64_t index);
+__intrinsic_op($(kIROp_GetOffsetPtr))
+Ptr<T, addrSpace> __getOffsetPtr<T, let addrSpace : uint64_t, TIndex : __BuiltinIntegerType>(Ptr<T, addrSpace> ptr, TIndex index);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 __intrinsic_op($(kIROp_Less))
-bool operator<(Ptr<T> p1, Ptr<T> p2);
+bool operator <(Ptr<T, addrSpace> p1, Ptr<T, addrSpace> p2);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 __intrinsic_op($(kIROp_Leq))
-bool operator<=(Ptr<T> p1, Ptr<T> p2);
+bool operator <=(Ptr<T, addrSpace> p1, Ptr<T, addrSpace> p2);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 __intrinsic_op($(kIROp_Greater))
-bool operator>(Ptr<T> p1, Ptr<T> p2);
+bool operator>(Ptr<T, addrSpace> p1, Ptr<T, addrSpace> p2);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 __intrinsic_op($(kIROp_Geq))
-bool operator>=(Ptr<T> p1, Ptr<T> p2);
+bool operator >=(Ptr<T, addrSpace> p1, Ptr<T, addrSpace> p2);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 __intrinsic_op($(kIROp_Neq))
-bool operator!=(Ptr<T> p1, Ptr<T> p2);
+bool operator !=(Ptr<T, addrSpace> p1, Ptr<T, addrSpace> p2);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 __intrinsic_op($(kIROp_Eql))
-bool operator==(Ptr<T> p1, Ptr<T> p2);
+bool operator ==(Ptr<T, addrSpace> p1, Ptr<T, addrSpace> p2);
 
 extension bool : IRangedValue
 {
-    __generic<T>
+    __generic<T, let addrSpace : uint64_t>
     __implicit_conversion($(kConversionCost_PtrToBool))
     __intrinsic_op($(kIROp_CastPtrToBool))
-    __init(Ptr<T> ptr);
+    __init(Ptr<T, addrSpace> ptr);
+
+    __generic<T : __EnumType>
+    __implicit_conversion($(kConversionCost_IntegerTruncate))
+    [__unsafeForceInlineEarly]
+    __init(T v)
+    {
+        return __slang_noop_cast<T.__Tag>(v) != __intCast<T.__Tag>(0);
+    }
 
     static const bool maxValue = true;
     static const bool minValue = false;
@@ -782,9 +759,9 @@ extension bool : IRangedValue
 
 extension uint64_t : IRangedValue
 {
-    __generic<T>
+    __generic<T, let addrSpace : uint64_t>
     __intrinsic_op($(kIROp_CastPtrToInt))
-    __init(Ptr<T> ptr);
+    __init(Ptr<T, addrSpace> ptr);
 
     static const uint64_t maxValue = 0xFFFFFFFFFFFFFFFFULL;
     static const uint64_t minValue = 0;
@@ -792,9 +769,9 @@ extension uint64_t : IRangedValue
 
 extension int64_t : IRangedValue
 {
-    __generic<T>
+    __generic<T, let addrSpace : uint64_t>
     __intrinsic_op($(kIROp_CastPtrToInt))
-    __init(Ptr<T> ptr);
+    __init(Ptr<T, addrSpace> ptr);
 
     static const int64_t maxValue =  0x7FFFFFFFFFFFFFFFLL;
     static const int64_t minValue = -0x8000000000000000LL;
@@ -802,9 +779,9 @@ extension int64_t : IRangedValue
 
 extension intptr_t : IRangedValue
 {
-    __generic<T>
+    __generic<T, let addrSpace : uint64_t>
     __intrinsic_op($(kIROp_CastPtrToInt))
-    __init(Ptr<T> ptr);
+    __init(Ptr<T, addrSpace> ptr);
     static const intptr_t maxValue = $(SLANG_PROCESSOR_X86_64?"0x7FFFFFFFFFFFFFFFz":"0x7FFFFFFFz");
     static const intptr_t minValue = $(SLANG_PROCESSOR_X86_64?"0x8000000000000000z":"0x80000000z");
     static const int size = $(SLANG_PROCESSOR_X86_64?"8":"4");
@@ -812,9 +789,9 @@ extension intptr_t : IRangedValue
 
 extension uintptr_t : IRangedValue
 {
-    __generic<T>
+    __generic<T, let addrSpace : uint64_t>
     __intrinsic_op($(kIROp_CastPtrToInt))
-    __init(Ptr<T> ptr);
+    __init(Ptr<T, addrSpace> ptr);
     static const uintptr_t maxValue = $(SLANG_PROCESSOR_X86_64?"0xFFFFFFFFFFFFFFFFz":"0xFFFFFFFFz");
     static const uintptr_t minValue = 0z;
     static const int size = $(SLANG_PROCESSOR_X86_64?"8":"4");
@@ -843,6 +820,8 @@ __magic_type(ConstRefType)
 __intrinsic_type($(kIROp_ConstRefType))
 struct ConstRef
 {};
+
+typealias __Addr<T> = Ptr<T, $( (uint64_t)AddressSpace::Generic)ULL>;
 
 __generic<T>
 __magic_type(OptionalType)
@@ -891,6 +870,89 @@ bool operator!=(__none_t noneVal, Optional<T> val)
     return val.hasValue;
 }
 
+__generic<each T>
+__magic_type(TupleType)
+struct Tuple
+{
+    __intrinsic_op($(kIROp_MakeTuple))
+    __init(expand each T);
+}
+
+__intrinsic_op($(kIROp_MakeTuple))
+Tuple<T> makeTuple<each T>(T v);
+
+Tuple<T, U> concat<each T, each U>(Tuple<T> t, Tuple<U> u)
+{
+    return makeTuple(expand each t, expand each u);
+}
+
+
+[__unsafeForceInlineEarly]
+bool __assign(inout bool v, bool newVal)
+{
+    v = newVal;
+    return newVal;
+}
+
+[__unsafeForceInlineEarly]
+void __tupleLessKernel<T : IComparable>(inout bool result, inout bool exit, T a, T b)
+{
+    if (!exit)
+    {
+        if (a.lessThan(b))
+        {
+            result = true;
+            exit = true;
+        }
+        else if (!a.equals(b))
+        {
+            exit = true;
+        }
+    }
+}
+
+[__unsafeForceInlineEarly]
+void __tupleGreaterKernel<T : IComparable>(inout bool result, inout bool exit, T a, T b)
+{
+    if (!exit)
+    {
+        if (!a.lessThanOrEquals(b))
+        {
+            result = true;
+            exit = true;
+        }
+        else if (!a.equals(b))
+        {
+            exit = true;
+        }
+    }
+}
+
+__generic<each T : IComparable>
+extension Tuple<T> : IComparable
+{
+    bool lessThan(Tuple<T> other)
+    {
+        bool result = false;
+        bool exit = false;
+        expand __tupleLessKernel(result, exit, each this, each other);
+        return result;
+    }
+    bool lessThanOrEquals(Tuple<T> other)
+    {
+        bool result = false;
+        bool exit = false;
+        expand __tupleGreaterKernel(result, exit, each this, each other);
+        return !result;
+    }
+    bool equals(Tuple<T> other)
+    {
+        bool result = true;
+        expand result && __assign(result, result && (each this).equals(each other));
+        return result;
+    }
+}
+
 __generic<T>
 __magic_type(NativeRefType)
 __intrinsic_type($(kIROp_NativePtrType))
@@ -917,26 +979,31 @@ __magic_type(StringType)
 __intrinsic_type($(kIROp_StringType))
 struct String
 {
-    __target_intrinsic(cpp)
+    [require(cpp)]
     __intrinsic_op($(kIROp_MakeString))
     __init(int val);
-    __target_intrinsic(cpp)
+
+    [require(cpp)]
     __intrinsic_op($(kIROp_MakeString))
     __init(uint val);
-    __target_intrinsic(cpp)
+
+    [require(cpp)]
     __intrinsic_op($(kIROp_MakeString))
     __init(int64_t val);
-    __target_intrinsic(cpp)
+
+    [require(cpp)]
     __intrinsic_op($(kIROp_MakeString))
     __init(uint64_t val);
-    __target_intrinsic(cpp)
+
+    [require(cpp)]
     __intrinsic_op($(kIROp_MakeString))
     __init(float val);
-    __target_intrinsic(cpp)
+
+    [require(cpp)]
     __intrinsic_op($(kIROp_MakeString))
     __init(double val);
 
-    __target_intrinsic(cpp)
+    [require(cpp)]
     int64_t getLength();
 
     property int length
@@ -951,11 +1018,23 @@ __magic_type(NativeStringType)
 __intrinsic_type($(kIROp_NativeStringType))
 struct NativeString
 {
-    __target_intrinsic(cpp, "int(strlen($0))")
-    int getLength();
+    [require(cpp)]
+    int getLength()
+    {
+        __target_switch
+        {
+        case cpp: __intrinsic_asm "int(strlen($0))";
+        }
+    }
 
-    __target_intrinsic(cpp, "(void*)((const char*)($0))")
-    Ptr<void> getBuffer();
+    [require(cpp)]
+    Ptr<void> getBuffer()
+    {
+        __target_switch
+        {
+        case cpp: __intrinsic_asm "(void*)((const char*)($0))";
+        }
+    }
 
     property int length { [__unsafeForceInlineEarly] get{return getLength();} }
 
@@ -969,10 +1048,10 @@ extension Ptr<void>
     [__unsafeForceInlineEarly]
     __init(NativeString nativeStr) { this = nativeStr.getBuffer(); }
 
-    __generic<T>
+    __generic<T, let addrSpace : uint64_t>
     __intrinsic_op(0)
     __implicit_conversion($(kConversionCost_PtrToVoidPtr))
-    __init(Ptr<T> ptr);
+    __init(Ptr<T, addrSpace> ptr);
 
     __generic<T>
     __intrinsic_op(0)
@@ -1000,8 +1079,8 @@ extension float : IRangedValue
 
 extension double : IRangedValue
 {
-    static const double maxValue = 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0;
-    static const double minValue = -179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0;
+    static const double maxValue = bit_cast<double>(0x7fefffffffffffffULL);
+    static const double minValue = bit_cast<double>(0xffefffffffffffffULL);
 }
 
 extension int : IRangedValue
@@ -1040,6 +1119,19 @@ extension int16_t : IRangedValue
     static const int16_t minValue = -32768;
 }
 
+__generic<T, let N:int>
+__magic_type(ArrayExpressionType)
+struct Array : IArray<T>
+{
+    __intrinsic_op($(kIROp_GetArrayLength))
+    int getCount();
+
+    __subscript(int index) -> T
+    {
+        __intrinsic_op($(kIROp_GetElement))
+        get;
+    }
+}
     /// An `N` component vector with elements of type `T`.
 __generic<T = float, let N : int = 4>
 __magic_type(VectorExpressionType)
@@ -1076,6 +1168,7 @@ __magic_type(MatrixExpressionType)
 struct matrix : IArray<vector<T,C>>
 {
     __intrinsic_op($(kIROp_MakeMatrixFromScalar))
+    __implicit_conversion($(kConversionCost_ScalarToMatrix))
     [TreatAsDifferentiable]
     __init(T val);
 
@@ -1091,12 +1184,15 @@ struct matrix : IArray<vector<T,C>>
     __subscript(int index) -> vector<T,C> { __intrinsic_op($(kIROp_GetElement)) get; }
 }
 
+__intrinsic_op($(kIROp_Eql))
+vector<bool, N> __vectorEql<T, let N:int>(vector<T, N> left, vector<T,N> right);
+
 __generic<T:__BuiltinFloatingPointType, let N : int>
 extension vector<T,N> : IFloat
 {
-    [__unsafeForceInlineEarly] bool lessThan(This other) { return this < other; }
-    [__unsafeForceInlineEarly] bool lessThanOrEquals(This other) { return this <= other; }
-    [__unsafeForceInlineEarly] bool equals(This other) { return all(this == other); }
+    [__unsafeForceInlineEarly] bool lessThan(This other) { return this[0] < other[0]; }
+    [__unsafeForceInlineEarly] bool lessThanOrEquals(This other) { return this[0] <= other[0]; }
+    [__unsafeForceInlineEarly] bool equals(This other) { return all(__vectorEql(this, other)); }
     __intrinsic_op($(kIROp_Add)) This add(This other);
     __intrinsic_op($(kIROp_Sub)) This sub(This other);
     __intrinsic_op($(kIROp_Mul)) This mul(This other);
@@ -1107,9 +1203,9 @@ extension vector<T,N> : IFloat
     [__unsafeForceInlineEarly] float toFloat() { return __realCast<float>(this[0]); }
 
     [OverloadRank(-1)]
-    [__unsafeForceInlineEarly] __init(int v) { return vector<T,N>(T(v)); }
+    [__unsafeForceInlineEarly] __init(int v) { this = vector<T,N>(T(v)); }
     [OverloadRank(-1)]
-    [__unsafeForceInlineEarly] __init(float v) { return vector<T,N>(T(v)); }
+    [__unsafeForceInlineEarly] __init(float v) { this = vector<T,N>(T(v)); }
 
     // IDifferentiable
 
@@ -1155,9 +1251,16 @@ extension matrix<T,N,M,L> : IFloat
     [TreatAsDifferentiable][__unsafeForceInlineEarly] float toFloat() { return __realCast<float>(this[0][0]); }
 
     [OverloadRank(-1)]
-    [TreatAsDifferentiable][__unsafeForceInlineEarly] __init(int v) { return matrix<T,N,M>(T(v)); }
+    [TreatAsDifferentiable]
+    [__unsafeForceInlineEarly]
+    __implicit_conversion($(kConversionCost_ScalarIntegerToFloatMatrix))
+    __init(int v) { this = matrix<T,N,M>(T(v)); }
+
     [OverloadRank(-1)]
-    [TreatAsDifferentiable][__unsafeForceInlineEarly] __init(float v) { return matrix<T,N,M>(T(v)); }
+    [TreatAsDifferentiable]
+    [__unsafeForceInlineEarly]
+    __implicit_conversion($(kConversionCost_ScalarToMatrix))
+    __init(float v) { this = matrix<T,N,M>(T(v)); }
 
     // IDifferentiable.
     typedef matrix<T, N,M,L> Differential;
@@ -1182,6 +1285,39 @@ extension matrix<T,N,M,L> : IFloat
     static Differential dmul(U a, Differential b)
     {
         return __realCast<T, U>(a) * b;
+    }
+}
+
+__generic<let R : int, let C : int, let L : int>
+extension matrix<int16_t,R,C,L>
+{
+    typealias T = int16_t;
+    __implicit_conversion($(kConversionCost_IntegerTruncate))
+    __init(int value) { this = matrix<T,R,C,L>(T(value)); }
+}
+
+__intrinsic_op(makeVector)
+__generic<T, let N:int>
+vector<T,N*2> __makeVector(vector<T,N> vec1, vector<T,N> vec2);
+
+__generic<T>
+extension vector<T, 4>
+{
+    __generic<let L : int>
+    [__unsafeForceInlineEarly]
+    __init(matrix<T, 2, 2, L> value)
+    {
+        this = __makeVector(value[0], value[1]);
+    }
+}
+__generic<T, let L : int>
+extension matrix<T, 2, 2, L>
+{
+    [__unsafeForceInlineEarly]
+    __init(vector<T, 4> value)
+    {
+        this[0] = value.xy;
+        this[1] = value.zw;
     }
 }
 
@@ -1225,11 +1361,27 @@ for (int tt = 0; tt < kTypeCount; ++tt)
     }
 
     // Declare HLSL matrix types
-    for (int rr = 2; rr <= 4; ++rr)
-    for (int cc = 2; cc <= 4; ++cc)
+    for (int rr = 1; rr <= 4; ++rr)
+    for (int cc = 1; cc <= 4; ++cc)
     {
         sb << "typedef matrix<" << kTypes[tt].name << "," << rr << "," << cc << "> " << kTypes[tt].name << rr << "x" << cc << ";\n";
     }
+}
+
+sb << "\n\n";
+sb << "// Cast from vector<T,1> to T, which is a scalar type\n";
+
+for (int tt = 0; tt < kBaseTypeCount; ++tt)
+{
+    if(kBaseTypes[tt].tag == BaseType::Void) continue;
+
+    const char* tname = kBaseTypes[tt].name;
+
+    sb << "extension " << tname << "\n";
+    sb << "{\n";
+    sb << "    __implicit_conversion(" << kConversionCost_OneVectorToScalar << ")\n";
+    sb << "    __init(vector<" << tname << ",1> v) { this = v[0]; }\n";
+    sb << "}\n";
 }
 
 // Declare additional built-in generic types
@@ -1255,12 +1407,15 @@ struct ParameterBlock {}
 __generic<T, let MAX_VERTS : uint>
 __magic_type(VerticesType)
 __intrinsic_type($(kIROp_VerticesType))
-struct Vertices
+[__NonCopyableType]
+struct OutputVertices
 {
     __subscript(uint index) -> T
     {
-        // TODO: Ellie make sure these remains write only
-        __intrinsic_op($(kIROp_GetElementPtr))
+        // TODO: Make sure this remains write only, we can't do this with just
+        // a 'set' operation as it's legal to only write to part of the output
+        // buffer, or part of the output buffer at a time.
+        __intrinsic_op($(kIROp_MeshOutputRef))
         ref;
     }
 };
@@ -1268,24 +1423,28 @@ struct Vertices
 __generic<T, let MAX_PRIMITIVES : uint>
 __magic_type(IndicesType)
 __intrinsic_type($(kIROp_IndicesType))
-struct Indices
+[__NonCopyableType]
+struct OutputIndices
 {
     __subscript(uint index) -> T
     {
-        // TODO: Ellie: It's illegal to not write out the whole primitive at once, should we use set over ref?
-        __intrinsic_op($(kIROp_GetElementPtr))
-        ref;
+        // It's illegal to not write out the entire primitive at once, so limit
+        // this to set
+        [mutating]
+        __intrinsic_op($(kIROp_MeshOutputSet))
+        set;
     }
 };
 
 __generic<T, let MAX_PRIMITIVES : uint>
 __magic_type(PrimitivesType)
 __intrinsic_type($(kIROp_PrimitivesType))
-struct Primitives
+[__NonCopyableType]
+struct OutputPrimitives
 {
     __subscript(uint index) -> T
     {
-        __intrinsic_op($(kIROp_GetElementPtr))
+        __intrinsic_op($(kIROp_MeshOutputRef))
         ref;
     }
 };
@@ -1388,12 +1547,14 @@ for (int tt = 0; tt < kBaseTypeCount; ++tt)
     sb << "}\n";
 }
 
-for( int R = 2; R <= 4; ++R )
-for( int C = 2; C <= 4; ++C )
+for( int R = 1; R <= 4; ++R )
+for( int C = 1; C <= 4; ++C )
 {
     sb << "__generic<T, let L:int> __extension matrix<T, " << R << "," << C << ", L>\n{\n";
 
     // initialize from R*C scalars
+    if (R == 1 || C == 1)
+        sb << "[require(hlsl)]\n";
     sb << "__intrinsic_op(" << int(kIROp_MakeMatrix) << ") __init(";
     for( int ii = 0; ii < R; ++ii )
     for( int jj = 0; jj < C; ++jj )
@@ -1404,6 +1565,8 @@ for( int C = 2; C <= 4; ++C )
     sb << ");\n";
 
     // Initialize from R C-vectors
+    if (R == 1 || C == 1)
+        sb << "[require(hlsl)]\n";
     sb << "__intrinsic_op(" << int(kIROp_MakeMatrix) << ") __init(";
     for (int ii = 0; ii < R; ++ii)
     {
@@ -1417,8 +1580,23 @@ for( int C = 2; C <= 4; ++C )
     for( int cc = C; cc <= 4; ++cc )
     {
         if(rr == R && cc == C) continue;
+        if (R == 1 || C == 1)
+            sb << "[require(hlsl)]\n";
         sb << "__intrinsic_op(" << int(kIROp_MatrixReshape) << ") __init(matrix<T," << rr << "," << cc << ", L> value);\n";
     }
+
+    // Initialize from matrix and vector
+    if (R > 2)
+    {
+        sb << "__init(matrix<T," << (R - 1) << "," << C << "> m, vector<T," << C << "> row" << (R - 1) << ") ";
+        sb << "{ this = This(";
+        for (int ii = 0; ii < R - 1; ++ii)
+        {
+            sb << "m[" << ii << "], ";
+        }
+        sb << "row" << (R - 1) << "); }\n";
+    }
+
     sb << "}\n";
 }
 
@@ -1528,23 +1706,30 @@ for (auto op : intrinsicUnaryOps)
 
 }}}}
 
+__generic<T, let addrSpace : uint64_t>
+__intrinsic_op(0)
+[require(cpp_cuda_spirv)]
+__prefix Ref<T> operator*(Ptr<T, addrSpace> value);
+
 __generic<T>
 __intrinsic_op(0)
-__prefix Ref<T> operator*(Ptr<T> value);
+[require(cpp_cuda_spirv)]
+__prefix Ptr<T, $( (uint64_t)AddressSpace::UserPointer)ULL> operator&(__ref T value);
 
 __generic<T>
 __intrinsic_op(0)
-__prefix Ptr<T> operator&(__ref T value);
+[require(cpp_cuda_spirv)]
+__Addr<T> __get_addr( __ref T value);
 
-__generic<T>
-__intrinsic_op($(kIROp_GetElementPtr))
-Ptr<T> operator+(Ptr<T> value, int64_t offset);
+__generic<T, let addrSpace : uint64_t>
+__intrinsic_op($(kIROp_GetOffsetPtr))
+Ptr<T, addrSpace> operator+(Ptr<T, addrSpace> value, int64_t offset);
 
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 [__unsafeForceInlineEarly]
-Ptr<T> operator-(Ptr<T> value, int64_t offset)
+Ptr<T, addrSpace> operator -(Ptr<T, addrSpace> value, int64_t offset)
 {
-    return __getElementPtr(value, -offset);
+    return __getOffsetPtr(value, -offset);
 }
 
 __generic<T : IArithmetic>
@@ -1607,9 +1792,9 @@ matrix<T,R,C> operator$(op.name)(in out matrix<T,R,C,L> value)
 {$(fixity.bodyPrefix) value = value $(op.binOp) T(1); return $(fixity.returnVal); }
 
 $(fixity.qual)
-__generic<T>
+__generic<T, let addrSpace : uint64_t>
 [__unsafeForceInlineEarly]
-Ptr<T> operator$(op.name)(in out Ptr<T> value)
+Ptr<T, addrSpace> operator$(op.name)(in out Ptr<T, addrSpace> value)
 {$(fixity.bodyPrefix) value = value $(op.binOp) 1; return $(fixity.returnVal); }
 
 ${{{{
@@ -1923,12 +2108,19 @@ T reinterpret(U value);
 
 // Use an otherwise unused value
 //
-// This can be used to silence the warning about returning before initializing
-// an out paramter.
+// This can be used to silence the warning about returning before initializing an out paramter.
 __generic<T>
 [__readNone]
 [ForceInline]
+__intrinsic_op($(kIROp_Unmodified))
 void unused(inout T){}
+
+// This can be used to silence the warning about not writing to an inout parameter.
+__generic<T>
+[__readNone]
+[ForceInline]
+__intrinsic_op($(kIROp_Unmodified))
+void unmodified(out T){}
 
 // Specialized function
 
@@ -1939,83 +2131,88 @@ int getStringHash(String string);
 /// Use will produce a syntax error in downstream compiler
 /// Useful for testing diagnostics around compilation errors of downstream compiler
 /// It 'returns' an int so can be used in expressions without the front end complaining.
-__target_intrinsic(hlsl, " @ ")
-__target_intrinsic(glsl, " @ ")
-__target_intrinsic(cuda, " @ ")
-__target_intrinsic(cpp, " @ ")
-int __SyntaxError();
+[require(cpp_cuda_glsl_hlsl)]
+int __SyntaxError()
+{
+    __target_switch
+    {
+    case cpp: __intrinsic_asm " @ ";
+    case cuda: __intrinsic_asm " @ ";
+    case glsl: __intrinsic_asm " @ ";
+    case hlsl: __intrinsic_asm " @ ";
+    }
+}
 
 /// For downstream compilers that allow sizeof/alignof/offsetof
 /// Can't be called in the C/C++ style. Need to use __size_of<some_type>() as opposed to sizeof(some_type).
 __generic<T>
-__target_intrinsic(cuda, "sizeof($G0)")
-__target_intrinsic(cpp, "sizeof($G0)")
 [__readNone]
-int __sizeOf();
+[require(cpp_cuda)]
+int __sizeOf()
+{
+    __intrinsic_asm "sizeof($[0])", T;
+}
 
 __generic<T>
-__target_intrinsic(cuda, "sizeof($T0)")
-__target_intrinsic(cpp, "sizeof($T0)")
 [__readNone]
-int __sizeOf(T v);
+[require(cpp_cuda)]
+int __sizeOf(T v)
+{
+    __target_switch
+    {
+    case cpp: __intrinsic_asm "sizeof($T0)";
+    case cuda: __intrinsic_asm "sizeof($T0)";
+    }
+}
 
 __generic<T>
-__target_intrinsic(cuda, "SLANG_ALIGN_OF($G0)")
-__target_intrinsic(cpp, "SLANG_ALIGN_OF($G0)")
 [__readNone]
-int __alignOf();
+[require(cpp_cuda)]
+int __alignOf()
+{
+    __target_switch
+    {
+    case cuda :
+    case cpp :
+        __intrinsic_asm "SLANG_ALIGN_OF($[0])", T;
+    }
+}
 
 __generic<T>
-__target_intrinsic(cuda, "SLANG_ALIGN_OF($T0)")
-__target_intrinsic(cpp, "SLANG_ALIGN_OF($T0)")
 [__readNone]
-int __alignOf(T v);
+[require(cpp_cuda)]
+int __alignOf(T v)
+{
+    __target_switch
+    {
+    case cpp: __intrinsic_asm "SLANG_ALIGN_OF($T0)";
+    case cuda: __intrinsic_asm "SLANG_ALIGN_OF($T0)";
+    }
+}
 
 // It would be nice to have offsetof equivalent, but it's not clear how that would work in terms of the Slang language.
 // Here we allow calculating the offset of a field in bytes from an *instance* of the type.
 __generic<T,F>
-__target_intrinsic(cuda, "int(((char*)&($1)) - ((char*)&($0)))")
-__target_intrinsic(cpp, "int(((char*)&($1)) - ((char*)&($0))")
 [__readNone]
-int __offsetOf(in T t, in F field);
+[require(cpp_cuda)]
+int __offsetOf(in T t, in F field)
+{
+    __target_switch
+    {
+    case cpp: __intrinsic_asm "int(((char*)&($1)) - ((char*)&($0))";
+    case cuda: __intrinsic_asm "int(((char*)&($1)) - ((char*)&($0)))";
+    }
+}
 
 /// Mark beginning of "interlocked" operations in a fragment shader.
-__glsl_extension(GL_ARB_fragment_shader_interlock)
-__glsl_version(420)
-void beginInvocationInterlock()
-{
-    __target_switch
-    {
-    case glsl:
-        __intrinsic_asm "beginInvocationInterlockARB";
-    case spirv:
-        spirv_asm {
-            OpCapability FragmentShaderPixelInterlockEXT;
-            OpExtension "SPV_EXT_fragment_shader_interlock";
-            OpExecutionMode __entryPoint PixelInterlockOrderedEXT;
-            OpBeginInvocationInterlockEXT;
-        };
-    }
-}
+[require(glsl_spirv, GL_ARB_fragment_shader_interlock, fragment)]
+__intrinsic_op($(kIROp_BeginFragmentShaderInterlock))
+void beginInvocationInterlock();
 
 /// Mark end of "interlocked" operations in a fragment shader.
-__glsl_extension(GL_ARB_fragment_shader_interlock)
-__glsl_version(420)
-void endInvocationInterlock()
-{
-    __target_switch
-    {
-    case glsl:
-        __intrinsic_asm "endInvocationInterlockARB";
-    case spirv:
-        spirv_asm {
-            OpCapability FragmentShaderPixelInterlockEXT;
-            OpExtension "SPV_EXT_fragment_shader_interlock";
-            OpExecutionMode __entryPoint PixelInterlockOrderedEXT;
-            OpEndInvocationInterlockEXT;
-        };
-    }
-}
+[require(glsl_spirv, GL_ARB_fragment_shader_interlock, fragment)]
+__intrinsic_op($(kIROp_EndFragmentShaderInterlock))
+void endInvocationInterlock();
 
 // Operators to apply to `enum` types
 
@@ -2059,7 +2256,7 @@ __generic<T : IComparable>
 [OverloadRank(-10)]
 bool operator >=(T v0, T v1)
 {
-    return v1.lessThan(v1);
+    return v1.lessThanOrEquals(v0);
 }
 __generic<T : IComparable>
 [__unsafeForceInlineEarly]
@@ -2156,6 +2353,59 @@ T operator &&(T v0, T v1)
 {
     return v0.and(v1);
 }
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+bool and(bool v0, bool v1)
+{
+    return __and(v0, v1);
+}
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+__intrinsic_op($(kIROp_And))
+vector<bool, N> and<let N : int>(vector<bool, N> v0, vector<bool, N> v1);
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+vector<bool, N> and<let N : int>(bool b, vector<bool, N> v)
+{
+    return and(vector<bool, N>(b), v);
+}
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+vector<bool, N> and<let N : int>(vector<bool, N> v, bool b)
+{
+    return and(v, vector<bool, N>(b));
+}
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+bool or(bool v0, bool v1)
+{
+    return __or(v0, v1);
+}
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+__intrinsic_op($(kIROp_Or))
+vector<bool, N> or<let N : int>(vector<bool, N> v0, vector<bool, N> v1);
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+vector<bool, N> or<let N : int>(bool b, vector<bool, N> v)
+{
+    return or(vector<bool, N>(b), v);
+}
+
+[__unsafeForceInlineEarly]
+[OverloadRank(-10)]
+vector<bool, N> or<let N : int>(vector<bool, N> v, bool b)
+{
+    return or(v, vector<bool, N>(b));
+}
+
 __generic<T : ILogical>
 [__unsafeForceInlineEarly]
 [OverloadRank(-10)]
@@ -2191,6 +2441,27 @@ __prefix T operator !(T v0)
 {
     return v0.not();
 }
+
+// The operator overloads defined above already allows Enum types to be used
+// in logical operators, but we still provide overloads for __EnumTypes and map
+// them directly to intrinsic op to allow constant propagation at AST level to
+// work on enum types.
+
+__generic<T : __EnumType>
+[__unsafeForceInlineEarly]
+__intrinsic_op($(kIROp_BitAnd))
+T operator &(T v0, T v1);
+
+__generic<T : __EnumType>
+[__unsafeForceInlineEarly]
+__intrinsic_op($(kIROp_BitOr))
+T operator |(T v0, T v1);
+
+__generic<T : __EnumType>
+[__unsafeForceInlineEarly]
+__intrinsic_op($(kIROp_BitNot))
+__prefix T operator ~(T v0);
+
 
 // IR level type traits.
 
@@ -2247,10 +2518,21 @@ __intrinsic_op($(kIROp_IsFloat))
 bool __isFloat_impl(T t);
 
 __generic<T>
+__intrinsic_op($(kIROp_IsHalf))
+bool __isHalf_impl(T t);
+
+__generic<T>
 [__unsafeForceInlineEarly]
 bool __isFloat()
 {
     return __isFloat_impl(__declVal<T>());
+}
+
+__generic<T>
+[__unsafeForceInlineEarly]
+bool __isHalf()
+{
+    return __isHalf_impl(__declVal<T>());
 }
 
 __generic<T>
@@ -2286,6 +2568,35 @@ bool __isVector()
     return __isVector_impl(__declVal<T>());
 }
 
+__generic<T>
+__intrinsic_op($(kIROp_GetNaturalStride))
+int __naturalStrideOf_impl(T v);
+
+__generic<T>
+[__unsafeForceInlineEarly]
+int __naturalStrideOf()
+{
+    return __naturalStrideOf_impl(__declVal<T>());
+}
+
+__intrinsic_op($(kIROp_AlignOf))
+int __alignOf_intrinsic_impl<T>(T t);
+
+[ForceInline]
+int __alignOf_intrinsic<T>()
+{
+    return __alignOf_intrinsic_impl<T>(__default<T>());
+}
+
+__intrinsic_op($(kIROp_TreatAsDynamicUniform))
+T asDynamicUniform<T>(T v);
+
+__generic<T>
+__intrinsic_op( $(kIROp_GetLegalizedSPIRVGlobalParamAddr))
+__Addr<T> __getLegalizedSPIRVGlobalParamAddr(T val);
+
+__intrinsic_op($(kIROp_RequireComputeDerivative))
+void __requireComputeDerivative();
 
 // Binding Attributes
 
@@ -2307,7 +2618,7 @@ __attributeTarget(DeclBase)
 attribute_syntax [push_constant]									: PushConstantAttribute;
 
 __attributeTarget(VarDeclBase)
-attribute_syntax [vk_location(locaiton : int)] : GLSLLocationAttribute;
+attribute_syntax [vk_location(location : int)] : GLSLLocationAttribute;
 
 __attributeTarget(VarDeclBase)
 attribute_syntax [vk_index(index : int)] : GLSLIndexAttribute;
@@ -2315,11 +2626,20 @@ attribute_syntax [vk_index(index : int)] : GLSLIndexAttribute;
 __attributeTarget(FuncDecl)
 attribute_syntax [vk_spirv_instruction(op : int, set : String = "")]     : SPIRVInstructionOpAttribute;
 
+__attributeTarget(VarDeclBase)
+attribute_syntax [vk_input_attachment_index(location : int)] : GLSLInputAttachmentIndexLayoutAttribute;
+
 __attributeTarget(FuncDecl)
 attribute_syntax [spv_target_env_1_3] : SPIRVTargetEnv13Attribute;
 
 __attributeTarget(VarDeclBase)
 attribute_syntax [disable_array_flattening] : DisableArrayFlatteningAttribute;
+
+__attributeTarget(EnumDecl)
+attribute_syntax [UnscopedEnum] : UnscopedEnumAttribute;
+
+__attributeTarget(EnumDecl)
+attribute_syntax[Flags] : FlagsAttribute;
 
 // Statement Attributes
 
@@ -2360,6 +2680,9 @@ attribute_syntax [call]                 : CallAttribute;
 __attributeTarget(FuncDecl)
 attribute_syntax [shader(stage)]    : EntryPointAttribute;
 
+__attributeTarget(FuncDecl)
+attribute_syntax [Shader(stage)]    : EntryPointAttribute;
+
 // Hull Shader
 __attributeTarget(FuncDecl)
 attribute_syntax [maxtessfactor(factor: float)]     : MaxTessFactorAttribute;
@@ -2395,6 +2718,12 @@ attribute_syntax [earlydepthstencil]    : EarlyDepthStencilAttribute;
 __attributeTarget(FuncDecl)
 attribute_syntax [numthreads(x: int, y: int = 1, z: int = 1)]   : NumThreadsAttribute;
 
+__attributeTarget(FuncDecl)
+attribute_syntax [NumThreads(x: int, y: int = 1, z: int = 1)]   : NumThreadsAttribute;
+
+__attributeTarget(FuncDecl)
+attribute_syntax [WaveSize(numLanes: int)]   : WaveSizeAttribute;
+
 //
 __attributeTarget(VarDeclBase)
 attribute_syntax [__vulkanRayPayload(location : int = -1)] : VulkanRayPayloadAttribute;
@@ -2417,6 +2746,9 @@ attribute_syntax [nonmutating] : NonmutatingAttribute;
 __attributeTarget(FunctionDeclBase)
 attribute_syntax [constref] : ConstRefAttribute;
 
+__attributeTarget(FunctionDeclBase)
+attribute_syntax [__ref] : RefAttribute;
+
     /// Indicates that a function computes its result as a function of its arguments without loading/storing any memory or other state.
     ///
     /// This is equivalent to the LLVM `readnone` function attribute.
@@ -2428,6 +2760,7 @@ enum _AttributeTargets
     Struct = $( (int) UserDefinedAttributeTargets::Struct),
     Var = $( (int) UserDefinedAttributeTargets::Var),
     Function = $( (int) UserDefinedAttributeTargets::Function),
+    Param = $( (int) UserDefinedAttributeTargets::Param),
 };
 __attributeTarget(StructDecl)
 attribute_syntax [__AttributeUsage(target : _AttributeTargets)] : AttributeUsageAttribute;
@@ -2440,6 +2773,9 @@ attribute_syntax [vk_image_format(format : String)] : FormatAttribute;
 
 __attributeTarget(Decl)
 attribute_syntax [allow(diagnostic: String)] : AllowAttribute;
+
+__attributeTarget(Decl)
+attribute_syntax [require(capability)] : RequireCapabilityAttribute;
 
 // Linking
 __attributeTarget(Decl)
@@ -2482,7 +2818,7 @@ __attributeTarget(FuncDecl)
 attribute_syntax [CUDAKernel] : CudaKernelAttribute;
 
 __attributeTarget(FuncDecl)
-attribute_syntax[AutoPyBindCUDA] : AutoPyBindCudaAttribute;
+attribute_syntax [AutoPyBindCUDA] : AutoPyBindCudaAttribute;
 
 __attributeTarget(AggTypeDecl)
 attribute_syntax [PyExport(name: String)] : PyExportAttribute;
@@ -2509,6 +2845,9 @@ attribute_syntax [builtin] : BuiltinAttribute;
 __attributeTarget(DeclBase)
 attribute_syntax [__requiresNVAPI] : RequiresNVAPIAttribute;
 
+__attributeTarget(AggTypeDecl)
+attribute_syntax[RequirePrelude(target, prelude:String)] : RequirePreludeAttribute;
+
 __attributeTarget(DeclBase)
 attribute_syntax [__AlwaysFoldIntoUseSiteAttribute] : AlwaysFoldIntoUseSiteAttribute;
 
@@ -2529,3 +2868,18 @@ attribute_syntax [PreferCheckpoint] : PreferCheckpointAttribute;
 
 __attributeTarget(DeclBase)
 attribute_syntax [KnownBuiltin(name : String)] : KnownBuiltinAttribute;
+
+__attributeTarget(FunctionDeclBase)
+attribute_syntax [NonUniformReturn] : NonDynamicUniformAttribute;
+
+__attributeTarget(FunctionDeclBase)
+attribute_syntax [__GLSLRequireShaderInputParameter(parameterNumber:int)] : GLSLRequireShaderInputParameterAttribute;
+
+__attributeTarget(FuncDecl)
+attribute_syntax [DerivativeGroupQuad] : DerivativeGroupQuadAttribute;
+
+__attributeTarget(FuncDecl)
+attribute_syntax [DerivativeGroupLinear] : DerivativeGroupLinearAttribute;
+
+__attributeTarget(FuncDecl)
+attribute_syntax [noRefInline] : NoRefInlineAttribute;

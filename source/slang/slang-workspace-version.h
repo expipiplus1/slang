@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../../slang-com-helper.h"
-#include "../../slang-com-ptr.h"
-#include "../../slang.h"
+#include "slang-com-helper.h"
+#include "slang-com-ptr.h"
+#include "slang.h"
 #include "../core/slang-basic.h"
 #include "../core/slang-com-object.h"
 #include "../compiler-core/slang-language-server-protocol.h"
@@ -20,7 +20,8 @@ namespace Slang
         String path;
         String text;
         List<UnownedStringSlice> lines;
-        List<List<Index>> utf16CharStarts;
+        List<List<Index>> mapUTF16CharIndexToCodePointIndex;
+        List<List<Index>> mapCodePointIndexToUTF8ByteOffset;
     public:
         void setPath(String filePath)
         {
@@ -32,10 +33,14 @@ namespace Slang
         const String& getText() { return text; }
         void setText(const String& newText);
 
+        void ensureUTFBoundsAvailable();
         ArrayView<Index> getUTF16Boundaries(Index line);
+        ArrayView<Index> getUTF8Boundaries(Index line);
 
         void oneBasedUTF8LocToZeroBasedUTF16Loc(
             Index inLine, Index inCol, Index& outLine, Index& outCol);
+        void oneBasedUTF8LocToZeroBasedUTF16Loc(
+            Index inLine, Index inCol, int& outLine, int& outCol);
         void zeroBasedUTF16LocToOneBasedUTF8Loc(
             Index inLine, Index inCol, Index& outLine, Index& outCol);
 
@@ -60,7 +65,11 @@ namespace Slang
                 return -1;
 
             Index lineStart = lineIndex >= 1 ? getLineStart(lines[lineIndex - 1]) : 0;
-            return lineStart + colIndex - 1;
+            auto boundaries = getUTF8Boundaries(lineIndex);
+            Index byteOffset = 0;
+            if (colIndex > 0 && colIndex <= boundaries.getCount())
+                byteOffset = boundaries[colIndex - 1];
+            return lineStart + byteOffset;
         }
 
         // Get 1-based, utf-8 encoding location from offset.
@@ -81,6 +90,8 @@ namespace Slang
             {
                 col = Index(offset - getLineStart(lines[line-1])) + 1;
             }
+            if (line > 0 && line <= lines.getCount())
+                col = UTF8Util::calcCodePointCount(lines[line-1].head(col));
         }
 
         // Get line from 1-based index.
@@ -108,6 +119,12 @@ namespace Slang
         String originalOutput;
     };
 
+    enum class WorkspaceFlavor
+    {
+        Standard,
+        VFX,
+    };
+
     class WorkspaceVersion : public RefObject
     {
     private:
@@ -117,10 +134,12 @@ namespace Slang
         void parseDiagnostics(String compilerOutput);
     public:
         Workspace* workspace;
+        WorkspaceFlavor flavor = WorkspaceFlavor::Standard;
         RefPtr<Linkage> linkage;
         Dictionary<String, DocumentDiagnostics> diagnostics;
         ASTMarkup* getOrCreateMarkupAST(ModuleDecl* module);
         Module* getOrLoadModule(String path);
+        void ensureWorkspaceFlavor(UnownedStringSlice path);
         MacroDefinitionContentAssistInfo* tryGetMacroDefinition(UnownedStringSlice name);
     };
 

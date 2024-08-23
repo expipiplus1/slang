@@ -5,11 +5,6 @@
 // related to computing linearized inheritance
 // information for types and decalrations.
 
-//#include "slang-lookup.h"
-//#include "slang-syntax.h"
-//#include "slang-ast-synthesis.h"
-//#include <limits>
-
 namespace Slang
 {
     InheritanceInfo SharedSemanticsContext::getInheritanceInfo(Type* type)
@@ -17,7 +12,12 @@ namespace Slang
         // We cache the computed inheritance information for types,
         // and re-use that information whenever possible.
 
-        if(auto found = m_mapTypeToInheritanceInfo.tryGetValue(type))
+        // DeclRefTypes will have their inheritance info cached in m_mapDeclRefToInheritanceInfo.
+        if (auto declRefType = as<DeclRefType>(type))
+            return _getInheritanceInfo(declRefType->getDeclRef(), declRefType);
+        
+        // Non ordinary types are cached on m_mapTypeToInheritanceInfo.
+        if (auto found = m_mapTypeToInheritanceInfo.tryGetValue(type))
             return *found;
 
         // Note: we install a null pointer into the dictionary to act
@@ -31,9 +31,6 @@ namespace Slang
 
         auto info = _calcInheritanceInfo(type);
         m_mapTypeToInheritanceInfo[type] = info;
-
-        getSession()->m_typeDictionarySize = Math::Max(
-            getSession()->m_typeDictionarySize, (int)m_mapTypeToInheritanceInfo.getCount());
 
         return info;
     }
@@ -67,6 +64,9 @@ namespace Slang
 
         auto info = _calcInheritanceInfo(declRef, declRefType);
         m_mapDeclRefToInheritanceInfo[declRef] = info;
+
+        getSession()->m_typeDictionarySize = Math::Max(
+            getSession()->m_typeDictionarySize, (int)m_mapDeclRefToInheritanceInfo.getCount());
 
         return info;
     }
@@ -266,7 +266,7 @@ namespace Slang
                 addDirectBaseType(baseType, satisfyingWitness);
             }
         }
-        else if (auto genericTypeParamDeclRef = declRef.as<GenericTypeParamDecl>())
+        else if (auto genericTypeParamDeclRef = declRef.as<GenericTypeParamDeclBase>())
         {
             // The constraints placed on a generic type parameter are siblings of that
             // parameter in its parent `GenericDecl`, so we need to enumerate all of
@@ -298,7 +298,14 @@ namespace Slang
                 //
                 auto subDeclRefType = as<DeclRefType>(subType);
                 if (!subDeclRefType)
-                    continue;
+                {
+                    if (auto subEachType = as<EachType>(subType))
+                    {
+                        subDeclRefType = as<DeclRefType>(subEachType->getElementType());
+                    }
+                    if (!subDeclRefType)
+                        continue;
+                }
                 if (subDeclRefType->getDeclRef() != genericTypeParamDeclRef)
                     continue;
 
@@ -417,7 +424,7 @@ namespace Slang
                     break;
                 auto rightBaseType = rightBase->origin.type;
 
-                if (visitor.isSubtype(leftBaseType, rightBaseType))
+                if (visitor.isSubtype(leftBaseType, rightBaseType, IsSubTypeOptions::None))
                 {
                     // If a type earlier in the list of bases is a subtype of
                     // one later in the list, then the ordering is consistent
@@ -427,7 +434,7 @@ namespace Slang
                     //
                     // TODO: decide whether to diagnose this case.
                 }
-                else if (visitor.isSubtype(rightBaseType, leftBaseType))
+                else if (visitor.isSubtype(rightBaseType, leftBaseType, IsSubTypeOptions::None))
                 {
                     // If a type later in the list is a subtype of a type earlier
                     // in the list, then the declared list of bases is inconsistent
@@ -567,6 +574,18 @@ namespace Slang
                 // we need to have a plan for what to do when we see
                 // that same facet come to the front of one of our lists
                 // later.
+            }
+
+            // If we still cannot find a facet, then there is a true cycle in
+            // the inheritance graph, which is an error in the user code.
+            if (!foundFacet.getImpl())
+            {
+                if (!bases.isEmpty())
+                {
+                    auto baseDecl = (*bases.begin())->facetImpl.origin.declRef.getDecl();
+                    getSink()->diagnose(baseDecl, Diagnostics::cyclicReferenceInInheritance, baseDecl);
+                }
+                return;
             }
 
             // At this point we definitely have a facet we'd like to
@@ -793,6 +812,8 @@ namespace Slang
     {
         for (auto base : *this)
         {
+            if (base->facets.isEmpty())
+                continue;
             if (base->facets.getTail().containsMatchFor(facet))
                 return true;
         }
@@ -906,6 +927,35 @@ namespace Slang
 
             InheritanceInfo info;
             info.facets = mergedFacets;
+            return info;
+        }
+        else if (auto eachType = as<EachType>(type))
+        {
+            auto elementInheritanceInfo = getInheritanceInfo(eachType->getElementType());
+            SemanticsVisitor visitor(this);
+            auto directFacet = new(arena) Facet::Impl(
+                Facet::Kind::Type,
+                Facet::Directness::Self,
+                DeclRef<Decl>(),
+                type,
+                visitor.createTypeEqualityWitness(type));
+            Facet tail = directFacet;
+            for (auto facet : elementInheritanceInfo.facets)
+            {
+                if (facet->directness == Facet::Directness::Direct)
+                {
+                    auto eachFacet = new(arena) Facet::Impl(
+                        Facet::Kind::Type,
+                        Facet::Directness::Direct,
+                        facet->origin.declRef,
+                        facet->origin.type,
+                        astBuilder->getEachSubtypeWitness(type, facet->subtypeWitness->getSup(), facet->subtypeWitness));
+                    tail->next = eachFacet;
+                    tail = eachFacet;
+                }
+            }
+            InheritanceInfo info;
+            info.facets = FacetList(directFacet);
             return info;
         }
         else

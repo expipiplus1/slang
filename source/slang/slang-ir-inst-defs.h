@@ -101,6 +101,7 @@ INST(Nop, nop, 0, 0)
     //
     /* Kind */
         INST(TypeKind, Type, 0, HOISTABLE)
+        INST(TypeParameterPackKind, TypeParameterPack, 0, HOISTABLE)
         INST(RateKind, Rate, 0, HOISTABLE)
         INST(GenericKind, Generic, 0, HOISTABLE)
     INST_RANGE(Kind, TypeKind, GenericKind)
@@ -127,11 +128,20 @@ INST(Nop, nop, 0, 0)
     INST(ComPtrType, ComPtr, 1, HOISTABLE)
     // A NativePtr<T> type represents a native pointer to a managed resource.
     INST(NativePtrType, NativePtr, 1, HOISTABLE)
+    // An AtomicUint is a placeholder type for a storage buffer, and will be mangled during compiling.
+    INST(GLSLAtomicUintType, GLSLAtomicUint, 0, HOISTABLE)
 
     /* SamplerStateTypeBase */
         INST(SamplerStateType, SamplerState, 0, HOISTABLE)
         INST(SamplerComparisonStateType, SamplerComparisonState, 0, HOISTABLE)
     INST_RANGE(SamplerStateTypeBase, SamplerStateType, SamplerComparisonStateType)
+
+    INST(DefaultBufferLayoutType, DefaultLayout, 0, HOISTABLE)
+    INST(Std140BufferLayoutType, Std140Layout, 0, HOISTABLE)
+    INST(Std430BufferLayoutType, Std430Layout, 0, HOISTABLE)
+    INST(ScalarBufferLayoutType, ScalarLayout, 0, HOISTABLE)
+
+    INST(SubpassInputType, SubpassInputType, 2, HOISTABLE)
 
     INST(TextureFootprintType, TextureFootprintType, 1, HOISTABLE)
 
@@ -183,6 +193,9 @@ INST(Nop, nop, 0, 0)
             INST(PrimitivesType, Primitives, 2, HOISTABLE)
         INST_RANGE(MeshOutputType, VerticesType, PrimitivesType)
 
+        /* Metal Mesh Grid Properties */
+            INST(MetalMeshGridPropertiesType, mesh_grid_properties, 0, HOISTABLE)
+
         /* HLSLStructuredBufferTypeBase */
             INST(HLSLStructuredBufferType,                  StructuredBuffer,                   0, HOISTABLE)
             INST(HLSLRWStructuredBufferType,                RWStructuredBuffer,                 0, HOISTABLE)
@@ -197,20 +210,22 @@ INST(Nop, nop, 0, 0)
                     INST(ConstantBufferType, ConstantBuffer, 1, HOISTABLE)
                     INST(TextureBufferType, TextureBuffer, 1, HOISTABLE)
                     INST(ParameterBlockType, ParameterBlock, 1, HOISTABLE)
-                    INST(GLSLShaderStorageBufferType, GLSLShaderStorageBuffer, 0, HOISTABLE)
-                INST_RANGE(UniformParameterGroupType, ConstantBufferType, GLSLShaderStorageBufferType)
+                INST_RANGE(UniformParameterGroupType, ConstantBufferType, ParameterBlockType)
             
                 /* VaryingParameterGroupType */
                     INST(GLSLInputParameterGroupType, GLSLInputParameterGroup, 0, HOISTABLE)
                     INST(GLSLOutputParameterGroupType, GLSLOutputParameterGroup, 0, HOISTABLE)
                 INST_RANGE(VaryingParameterGroupType, GLSLInputParameterGroupType, GLSLOutputParameterGroupType)
-            INST_RANGE(ParameterGroupType, ConstantBufferType, GLSLOutputParameterGroupType)
-        INST_RANGE(PointerLikeType, ConstantBufferType, GLSLOutputParameterGroupType)
-    INST_RANGE(BuiltinGenericType, HLSLPointStreamType, GLSLOutputParameterGroupType)
+                INST(GLSLShaderStorageBufferType, GLSLShaderStorageBuffer, 1, HOISTABLE)
+            INST_RANGE(ParameterGroupType, ConstantBufferType, GLSLShaderStorageBufferType)
+        INST_RANGE(PointerLikeType, ConstantBufferType, GLSLShaderStorageBufferType)
+    INST_RANGE(BuiltinGenericType, HLSLPointStreamType, GLSLShaderStorageBufferType)
 
 INST(RayQueryType, RayQuery, 1, HOISTABLE)
 INST(HitObjectType, HitObject, 0, HOISTABLE)
 
+// Opaque type that can be dynamically cast to other resource types.
+INST(DynamicResourceType, DynamicResource, 0, HOISTABLE)
 
 // A user-defined structure declaration at the IR level.
 // Unlike in the AST where there is a distinction between
@@ -230,6 +245,8 @@ INST(RTTIType, rtti_type, 0, HOISTABLE)
 INST(RTTIHandleType, rtti_handle_type, 0, HOISTABLE)
 INST(TupleType, tuple_type, 0, HOISTABLE)
 INST(TargetTupleType, TargetTuple, 0, HOISTABLE)
+INST(TypePack, TypePack, 0, HOISTABLE)
+INST(ExpandTypeOrVal, ExpandTypeOrVal, 1, HOISTABLE)
 
 // A type that identifies it's contained type as being emittable as `spirv_literal.
 INST(SPIRVLiteralType, spirvLiteralType, 1, HOISTABLE)
@@ -265,6 +282,8 @@ INST(StructKey, key, 0, GLOBAL)
 INST(GlobalGenericParam, global_generic_param, 0, GLOBAL)
 INST(WitnessTable, witness_table, 0, 0)
 
+INST(IndexedFieldKey, indexedFieldKey, 2, HOISTABLE)
+
 // A placeholder witness that ThisType implements the enclosing interface.
 // Used only in interface definitions.
 INST(ThisTypeWitness, thisTypeWitness, 1, 0)
@@ -280,10 +299,13 @@ INST(Block, block, 0, PARENT)
     INST(FloatLit, float_constant, 0, 0)
     INST(PtrLit, ptr_constant, 0, 0)
     INST(StringLit, string_constant, 0, 0)
+    INST(BlobLit, string_constant, 0, 0)
     INST(VoidLit, void_constant, 0, 0)
 INST_RANGE(Constant, BoolLit, VoidLit)
 
-INST(CapabilitySet, capabilitySet, 0, HOISTABLE)
+INST(CapabilityConjunction, capabilityConjunction, 0, HOISTABLE)
+INST(CapabilityDisjunction, capabilityDisjunction, 0, HOISTABLE)
+INST_RANGE(CapabilitySet, CapabilityConjunction, CapabilityDisjunction)
 
 INST(undefined, undefined, 0, 0)
 
@@ -324,8 +346,12 @@ INST(MakeArrayFromElement, makeArrayFromElement, 1, 0)
 INST(MakeStruct, makeStruct, 0, 0)
 INST(MakeTuple, makeTuple, 0, 0)
 INST(MakeTargetTuple, makeTuple, 0, 0)
+INST(MakeValuePack, makeValuePack, 0, 0)
 INST(GetTargetTupleElement, getTargetTupleElement, 0, 0)
 INST(GetTupleElement, getTupleElement, 2, 0)
+INST(MakeWitnessPack, MakeWitnessPack, 0, HOISTABLE)
+INST(Expand, Expand, 1, 0)
+INST(Each, Each, 1, HOISTABLE)
 INST(MakeResultValue, makeResultValue, 1, 0)
 INST(MakeResultError, makeResultError, 1, 0)
 INST(IsResultError, isResultError, 1, 0)
@@ -335,6 +361,8 @@ INST(GetOptionalValue, getOptionalValue, 1, 0)
 INST(OptionalHasValue, optionalHasValue, 1, 0)
 INST(MakeOptionalValue, makeOptionalValue, 1, 0)
 INST(MakeOptionalNone, makeOptionalNone, 1, 0)
+INST(CombinedTextureSamplerGetTexture, CombinedTextureSamplerGetTexture, 1, 0)
+INST(CombinedTextureSamplerGetSampler, CombinedTextureSamplerGetSampler, 1, 0)
 INST(Call, call, 1, 0)
 
 INST(RTTIObject, rtti_object, 0, 0)
@@ -348,6 +376,10 @@ INST(UnpackAnyValue, unpackAnyValue, 1, 0)
 
 INST(WitnessTableEntry, witness_table_entry, 2, 0)
 INST(InterfaceRequirementEntry, interface_req_entry, 2, GLOBAL)
+
+// An inst to represent the workgroup size of the calling entry point.
+// We will materialize this inst during `translateGLSLGlobalVar`.
+INST(GetWorkGroupSize, GetWorkGroupSize, 0, HOISTABLE)
 
 INST(Param, param, 0, 0)
 INST(StructField, field, 2, 0)
@@ -380,7 +412,11 @@ INST(FieldAddress, get_field_addr, 2, 0)
 
 INST(GetElement, getElement, 2, 0)
 INST(GetElementPtr, getElementPtr, 2, 0)
+// Pointer offset: computes pBase + offset_in_elements
+INST(GetOffsetPtr, getOffsetPtr, 2, 0) 
 INST(GetAddr, getAddr, 1, 0)
+
+INST(CastDynamicResource, castDynamicResource, 1, 0)
 
 // Get an unowned NativeString from a String.
 INST(getNativeStr, getNativeStr, 1, 0)
@@ -410,25 +446,27 @@ INST(ImageStore, imageStore, 3, 0)
 
 // Load (almost) arbitrary-type data from a byte-address buffer
 //
-// %dst = byteAddressBufferLoad(%buffer, %offset)
+// %dst = byteAddressBufferLoad(%buffer, %offset, %alignment)
 //
 // where
 // - `buffer` is a value of some `ByteAddressBufferTypeBase` type
 // - `offset` is an `int`
+// - `alignment` is an `int`
 // - `dst` is a value of some type containing only ordinary data
 //
-INST(ByteAddressBufferLoad, byteAddressBufferLoad, 2, 0)
+INST(ByteAddressBufferLoad, byteAddressBufferLoad, 3, 0)
 
 // Store (almost) arbitrary-type data to a byte-address buffer
 //
-// byteAddressBufferLoad(%buffer, %offset, %src)
+// byteAddressBufferLoad(%buffer, %offset, %alignment, %src)
 //
 // where
 // - `buffer` is a value of some `ByteAddressBufferTypeBase` type
 // - `offset` is an `int`
+// - `alignment` is an `int`
 // - `src` is a value of some type containing only ordinary data
 //
-INST(ByteAddressBufferStore, byteAddressBufferStore, 3, 0)
+INST(ByteAddressBufferStore, byteAddressBufferStore, 4, 0)
 
 // Load data from a structured buffer
 //
@@ -462,10 +500,16 @@ INST(StructuredBufferAppend, StructuredBufferAppend, 1, 0)
 INST(StructuredBufferConsume, StructuredBufferConsume, 1, 0)
 INST(StructuredBufferGetDimensions, StructuredBufferGetDimensions, 1, 0)
 
+// Resource qualifiers for dynamically varying index
+INST(NonUniformResourceIndex, nonUniformResourceIndex, 1, 0)
+
 INST(AtomicCounterIncrement, AtomicCounterIncrement, 1, 0)
 INST(AtomicCounterDecrement, AtomicCounterDecrement, 1, 0)
 
+INST(GetNaturalStride, getNaturalStride, 1, 0)
+
 INST(MeshOutputRef, meshOutputRef, 2, 0)
+INST(MeshOutputSet, meshOutputSet, 3, 0)
 
 // Construct a vector from a scalar
 //
@@ -531,6 +575,7 @@ INST(SwizzledStore, swizzledStore, 2, 0)
 /* IRTerminatorInst */
 
     INST(Return, return_val, 1, 0)
+    INST(Yield, yield, 1, 0)
     /* IRUnconditionalBranch */
         // unconditionalBranch <target>
         INST(unconditionalBranch, unconditionalBranch, 1, 0)
@@ -559,8 +604,6 @@ INST(TargetSwitch, targetSwitch, 1, 0)
 // A generic asm inst has an return semantics that terminates the control flow.
 INST(GenericAsm, GenericAsm, 1, 0)
 
-INST(discard, discard, 0, 0)
-
 /* IRUnreachable */
 INST(MissingReturn, missingReturn, 0, 0)
 INST(Unreachable, unreachable, 0, 0)
@@ -568,7 +611,12 @@ INST_RANGE(Unreachable, MissingReturn, Unreachable)
 
 INST_RANGE(TerminatorInst, Return, Unreachable)
 
+INST(discard, discard, 0, 0)
+
 INST(RequirePrelude, RequirePrelude, 1, 0)
+INST(RequireGLSLExtension, RequireGLSLExtension, 1, 0)
+INST(RequireComputeDerivative, RequireComputeDerivative, 0, 0)
+INST(StaticAssert, StaticAssert, 2, 0)
 
 // TODO: We should consider splitting the basic arithmetic/comparison
 // ops into cases for signed integers, unsigned integers, and floating-point
@@ -628,6 +676,8 @@ INST(SampleGrad, sampleGrad, 4, 0)
 
 INST(GroupMemoryBarrierWithGroupSync, GroupMemoryBarrierWithGroupSync, 0, 0)
 
+INST(ControlBarrier, ControlBarrier, 0, 0)
+
 // GPU_FOREACH loop of the form 
 INST(GpuForeach, gpuForeach, 3, 0)
 
@@ -645,6 +695,20 @@ INST(GetOptiXHitAttribute, getOptiXHitAttribute, 2, 0)
 INST(GetOptiXSbtDataPtr, getOptiXSbtDataPointer, 0, 0)
 
 INST(GetVulkanRayTracingPayloadLocation, GetVulkanRayTracingPayloadLocation, 1, 0)
+
+INST(GetLegalizedSPIRVGlobalParamAddr, GetLegalizedSPIRVGlobalParamAddr, 1, 0)
+
+INST(GetPerVertexInputArray, GetPerVertexInputArray, 1, 0)
+
+INST(ForceVarIntoStructTemporarily, ForceVarIntoStructTemporarily, 1, 0)
+INST(MetalAtomicCast, MetalAtomicCast, 1, 0)
+
+INST(IsTextureAccess, IsTextureAccess, 1, 0)
+INST(IsTextureScalarAccess, IsTextureScalarAccess, 1, 0)
+INST(IsTextureArrayAccess, IsTextureArrayAccess, 1, 0)
+INST(ExtractTextureFromTextureAccess, ExtractTextureFromTextureAccess, 1, 0)
+INST(ExtractCoordFromTextureAccess, ExtractCoordFromTextureAccess, 1, 0)
+INST(ExtractArrayCoordFromTextureAccess, ExtractArrayCoordFromTextureAccess, 1, 0)
 
 INST(MakeArrayList, makeArrayList, 0, 0)
 INST(MakeTensorView, makeTensorView, 0, 0)
@@ -664,7 +728,7 @@ INST_RANGE(BindingQuery, GetRegisterIndex, GetRegisterSpace)
 
 /* Decoration */
 
-INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
+    INST(HighLevelDeclDecoration,           highLevelDecl,          1, 0)
     INST(LayoutDecoration,                  layout,                 1, 0)
     INST(BranchDecoration,                  branch,                 0, 0)
     INST(FlattenDecoration,                 flatten,                0, 0)
@@ -675,9 +739,13 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
     /* TargetSpecificDecoration */
         INST(TargetDecoration,              target,                 1, 0)
         INST(TargetIntrinsicDecoration,     targetIntrinsic,        2, 0)
-    INST_RANGE(TargetSpecificDecoration, TargetDecoration, TargetIntrinsicDecoration)
+        INST_RANGE(TargetSpecificDefinitionDecoration, TargetDecoration, TargetIntrinsicDecoration)
+        INST(RequirePreludeDecoration, requirePrelude, 2, 0)
+    INST_RANGE(TargetSpecificDecoration, TargetDecoration, RequirePreludeDecoration)
     INST(GLSLOuterArrayDecoration,          glslOuterArray,         1, 0)
     
+    INST(TargetSystemValueDecoration,       TargetSystemValue,      2, 0)
+
     INST(InterpolationModeDecoration,       interpolationMode,      1, 0)
     INST(NameHintDecoration,                nameHint,               1, 0)
 
@@ -691,18 +759,24 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
     INST(TransitoryDecoration,              transitory,             0, 0)
 
     INST(VulkanRayPayloadDecoration,        vulkanRayPayload,       0, 0)
+    INST(VulkanRayPayloadInDecoration,      vulkanRayPayloadIn,       0, 0)
     INST(VulkanHitAttributesDecoration,     vulkanHitAttributes,    0, 0)
     INST(VulkanHitObjectAttributesDecoration, vulkanHitObjectAttributes, 0, 0)
+
+    INST(GlobalVariableShadowingGlobalParameterDecoration, GlobalVariableShadowingGlobalParameterDecoration, 2, 0)
 
     INST(RequireSPIRVVersionDecoration,     requireSPIRVVersion,    1, 0)
     INST(RequireGLSLVersionDecoration,      requireGLSLVersion,     1, 0)
     INST(RequireGLSLExtensionDecoration,    requireGLSLExtension,   1, 0)
     INST(RequireCUDASMVersionDecoration,    requireCUDASMVersion,   1, 0)
+    INST(RequireCapabilityAtomDecoration,   requireCapabilityAtom, 1, 0)
+
+    INST(HasExplicitHLSLBindingDecoration, HasExplicitHLSLBinding, 0, 0)
 
     INST(ReadNoneDecoration,                readNone,               0, 0)
     INST(VulkanCallablePayloadDecoration,   vulkanCallablePayload,  0, 0)
+    INST(VulkanCallablePayloadInDecoration, vulkanCallablePayloadIn,  0, 0)
     INST(EarlyDepthStencilDecoration,       earlyDepthStencil,      0, 0)
-    INST(GloballyCoherentDecoration,        globallyCoherent,       0, 0)
     INST(PreciseDecoration,                 precise,                0, 0)
     INST(PublicDecoration,                  public,                 0, 0)
     INST(HLSLExportDecoration,              hlslExport,             0, 0)
@@ -714,6 +788,7 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
     INST(MaxVertexCountDecoration,          maxVertexCount,         1, 0)
     INST(InstanceDecoration,                instance,               1, 0)
     INST(NumThreadsDecoration,              numThreads,             3, 0)
+    INST(WaveSizeDecoration,                waveSize,               1, 0)
 
         // Added to IRParam parameters to an entry point
     /* GeometryInputPrimitiveTypeDecoration */
@@ -776,6 +851,9 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
         INST(ExportDecoration, export, 1, 0)
     INST_RANGE(LinkageDecoration, ImportDecoration, ExportDecoration)
 
+        /// Marks an inst as coming from an `extern` symbol defined in the user code.
+    INST(UserExternDecoration, UserExtern, 0, 0)
+
         /// An extern_cpp decoration marks the inst to emit its name without mangling for C++ interop.
     INST(ExternCppDecoration, externCpp, 1, 0)
 
@@ -801,6 +879,7 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
     INST(AnyValueSizeDecoration, AnyValueSize, 1, 0)
     INST(SpecializeDecoration, SpecializeDecoration, 0, 0)
     INST(SequentialIDDecoration, SequentialIDDecoration, 1, 0)
+    INST(DynamicDispatchWitnessDecoration, DynamicDispatchWitnessDecoration, 0, 0)
     INST(StaticRequirementDecoration, StaticRequirementDecoration, 0, 0)
     INST(DispatchFuncDecoration, DispatchFuncDecoration, 1, 0)
     INST(TypeConstraintDecoration, TypeConstraintDecoration, 1, 0)
@@ -820,16 +899,24 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
 
         /// Applie to an IR function and signals that inlining should not be performed unless unavoidable.
     INST(NoInlineDecoration, noInline, 0, 0)
+    INST(NoRefInlineDecoration, noRefInline, 0, 0)
+
+    INST(DerivativeGroupQuadDecoration, DerivativeGroupQuad, 0, 0)
+    INST(DerivativeGroupLinearDecoration, DerivativeGroupLinear, 0, 0)
 
         // Marks a type to be non copyable, causing SSA pass to skip turning variables of the the type into SSA values.
     INST(NonCopyableTypeDecoration, nonCopyable, 0, 0)
+
+        // Marks a value to be dynamically uniform.
+    INST(DynamicUniformDecoration, DynamicUniform, 0, 0)
 
         /// A call to the decorated function should always be folded into its use site.
     INST(AlwaysFoldIntoUseSiteDecoration, alwaysFold, 0, 0)
 
     INST(GlobalOutputDecoration, output, 0, 0)
-    INST(GlobalInputDecoration, output, 0, 0)
+    INST(GlobalInputDecoration, input, 0, 0)
     INST(GLSLLocationDecoration, glslLocation, 1, 0)
+    INST(GLSLOffsetDecoration, glslOffset, 1, 0)
     INST(PayloadDecoration, payload, 0, 0)
 
     /* Mesh Shader outputs */
@@ -841,6 +928,11 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
     INST(GLSLPrimitivesRateDecoration, perprimitive, 0, 0)
         // Marks an inst that represents the gl_Position output.
     INST(GLPositionOutputDecoration, PositionOutput, 0, 0)
+        // Marks an inst that represents the gl_Position input.
+    INST(GLPositionInputDecoration, PositionInput, 0, 0)
+
+        // Marks a fragment shader input as per-vertex.
+    INST(PerVertexDecoration, PerVertex, 0, 0)
 
     /* StageAccessDecoration */
         INST(StageReadAccessDecoration, stageReadAccess, 0, 0)
@@ -848,7 +940,14 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
     INST_RANGE(StageAccessDecoration, StageReadAccessDecoration, StageWriteAccessDecoration)
 
     INST(SemanticDecoration, semantic, 2, 0)
+    INST(ConstructorDecoration, constructor, 1, 0)
+    INST(MethodDecoration, method, 0, 0)
     INST(PackOffsetDecoration, packoffset, 2, 0)
+
+        // Reflection metadata for a shader parameter that provides the original type name.
+    INST(UserTypeNameDecoration, UserTypeName, 1, 0)
+        // Reflection metadata for a shader parameter that refers to the associated counter buffer of a UAV.
+    INST(CounterBufferDecoration, CounterBuffer, 1, 0)
 
     INST(RequireSPIRVDescriptorIndexingExtensionDecoration, RequireSPIRVDescriptorIndexingExtensionDecoration, 0, 0)
     INST(SPIRVOpDecoration, spirvOpDecoration, 1, 0)
@@ -932,6 +1031,9 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
 
     INST_RANGE(CheckpointHintDecoration, PreferCheckpointDecoration, PreferRecomputeDecoration)
 
+        /// Marks a function whose return value is never dynamic uniform.
+    INST(NonDynamicUniformReturnDecoration, NonDynamicUniformReturnDecoration, 0, 0)
+
         /// Marks a class type as a COM interface implementation, which enables
         /// the witness table to be easily picked up by emit.
     INST(COMWitnessDecoration, COMWitnessDecoration, 1, 0)
@@ -945,11 +1047,27 @@ INST(HighLevelDeclDecoration,               highLevelDecl,          1, 0)
         /// Recognized by SPIRV-emit pass so we can emit a SPIRV `BufferBlock` decoration.
     INST(SPIRVBufferBlockDecoration, spvBufferBlock, 0, 0)
 
+        /// Decorates an inst with a debug source location (IRDebugSource, IRIntLit(line), IRIntLit(col)).
+    INST(DebugLocationDecoration, DebugLocation, 3, 0)
+
         /// Recognized by SPIRV-emit pass so we can emit a SPIRV `Block` decoration.
     INST(SPIRVBlockDecoration, spvBlock, 0, 0)
 
+        /// Decorates a SPIRV-inst as `NonUniformResource` to guarantee non-uniform index lookup of
+        /// - a resource within an array of resources via IRGetElement.
+        /// - an IRLoad that takes a pointer within a memory buffer via IRGetElementPtr.
+        /// - an IRIntCast to a resource that is casted from signed to unsigned or viceversa.
+        /// - an IRGetElementPtr itself when using the pointer on an intrinsic operation.
+    INST(SPIRVNonUniformResourceDecoration, NonUniformResource, 0, 0)
 
-    INST_RANGE(Decoration, HighLevelDeclDecoration, SPIRVBlockDecoration)
+        // Stores flag bits of which memory qualifiers an object has
+    INST(MemoryQualifierSetDecoration, MemoryQualifierSetDecoration, 1, 0)
+
+        /// Marks a function as one which access a bitfield with the specified
+        /// backing value key, width and offset
+    INST(BitFieldAccessorDecoration, BitFieldAccessorDecoration, 3, 0)
+
+ INST_RANGE(Decoration, HighLevelDeclDecoration, BitFieldAccessorDecoration)
 
     //
 
@@ -987,6 +1105,7 @@ INST(ExtractTaggedUnionPayload,         extractTaggedUnionPayload,  1, 0)
 
 INST(BitCast,                           bitCast,                    1, 0)
 INST(Reinterpret,                       reinterpret,                1, 0)
+INST(Unmodified,                        unmodified,                1, 0)
 INST(OutImplicitCast,                   outImplicitCast,           1, 0)
 INST(InOutImplicitCast,                 inOutImplicitCast,         1, 0)
 INST(IntCast, intCast, 1, 0)
@@ -997,15 +1116,20 @@ INST(CastPtrToBool, CastPtrToBool, 1, 0)
 INST(CastPtrToInt, CastPtrToInt, 1, 0)
 INST(CastIntToPtr, CastIntToPtr, 1, 0)
 INST(CastToVoid, castToVoid, 1, 0)
+INST(PtrCast, PtrCast, 1, 0)
+INST(TreatAsDynamicUniform, TreatAsDynamicUniform, 1, 0)
 
 INST(SizeOf,                            sizeOf,                     1, 0)
 INST(AlignOf,                           alignOf,                    1, 0)
+INST(CountOf, countOf, 1, 0)
 
+INST(GetArrayLength,                    GetArrayLength,             1, 0)
 INST(IsType, IsType, 3, 0)
 INST(TypeEquals, TypeEquals, 2, 0)
 INST(IsInt, IsInt, 1, 0)
 INST(IsBool, IsBool, 1, 0)
 INST(IsFloat, IsFloat, 1, 0)
+INST(IsHalf, IsHalf, 1, 0)
 INST(IsUnsignedInt, IsUnsignedInt, 1, 0)
 INST(IsSignedInt, IsSignedInt, 1, 0)
 INST(IsVector, IsVector, 1, 0)
@@ -1061,6 +1185,7 @@ INST_RANGE(Layout, VarLayout, EntryPointLayout)
     INST(UNormAttr, unorm, 0, HOISTABLE)
     INST(SNormAttr, snorm, 0, HOISTABLE)
     INST(NoDiffAttr, no_diff, 0, HOISTABLE)
+    INST(NonUniformAttr, nonuniform, 0, HOISTABLE)
 
     /* SemanticAttr */
         INST(UserSemanticAttr, userSemantic, 2, HOISTABLE)
@@ -1087,9 +1212,17 @@ INST(ExistentialTypeSpecializationDictionary, ExistentialTypeSpecializationDicti
 /* Differentiable Type Dictionary */
 INST(DifferentiableTypeDictionaryItem, DifferentiableTypeDictionaryItem, 0, 0)
 
+INST(BeginFragmentShaderInterlock, BeginFragmentShaderInterlock, 0, 0)
+INST(EndFragmentShaderInterlock, BeginFragmentShaderInterlock, 0, 0)
+
 /* DebugInfo */
 INST(DebugSource, DebugSource, 2, HOISTABLE)
 INST(DebugLine, DebugLine, 5, 0)
+INST(DebugVar, DebugVar, 4, 0)
+INST(DebugValue, DebugValue, 2, 0)
+
+/* Embedded Precompiled Libraries */
+INST(EmbeddedDXIL, EmbeddedDXIL, 1, 0)
 
 /* Inline assembly */
 
@@ -1104,7 +1237,12 @@ INST(SPIRVAsmInst, SPIRVAsmInst, 1, 0)
     // A reference to a slang IRInst, either a value or a type
     // This isn't hoistable, as we sometimes need to change the used value and
     // instructions around the specific asm block
-    INST(SPIRVAsmOperandInst, SPIRVAsmOperandInst, 1, 0)
+    INST(SPIRVAsmOperandInst, SPIRVAsmOperandInst, 1, 0)    
+    INST(SPIRVAsmOperandConvertTexel, SPIRVAsmOperandConvertTexel, 1, 0)
+    //a late resolving type to handle the case of ray objects (resolving late due to constexpr data requirment)
+    INST(SPIRVAsmOperandRayPayloadFromLocation, SPIRVAsmOperandRayPayloadFromLocation, 1, 0)
+    INST(SPIRVAsmOperandRayAttributeFromLocation, SPIRVAsmOperandRayAttributeFromLocation, 1, 0)
+    INST(SPIRVAsmOperandRayCallableFromLocation, SPIRVAsmOperandRayCallableFromLocation, 1, 0)
     // A named enumerator, the value is stored as a constant operand
     // It may have a second operand, which if present is a type with which to
     // construct a constant id to pass, instead of a literal constant
@@ -1114,7 +1252,6 @@ INST(SPIRVAsmInst, SPIRVAsmInst, 1, 0)
     // A reference to the glsl450 instruction set.
     INST(SPIRVAsmOperandGLSL450Set, SPIRVAsmOperandGLSL450Set, 0, HOISTABLE)
     INST(SPIRVAsmOperandDebugPrintfSet, SPIRVAsmOperandDebugPrintfSet, 0, HOISTABLE)
-
     // A string which is given a unique ID in the backend, used to refer to
     // results of other instrucions in the same asm block
     INST(SPIRVAsmOperandId, SPIRVAsmOperandId, 1, HOISTABLE)

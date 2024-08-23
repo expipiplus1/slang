@@ -40,6 +40,11 @@ class VarExpr : public DeclRefExpr
     SLANG_AST_CLASS(VarExpr)
 };
 
+class DefaultConstructExpr : public Expr
+{
+    SLANG_AST_CLASS(DefaultConstructExpr)
+};
+
 // An expression that references an overloaded set of declarations
 // having the same name.
 class OverloadedExpr : public Expr
@@ -52,6 +57,8 @@ class OverloadedExpr : public Expr
     // Optional: the base expression is this overloaded result
     // arose from a member-reference expression.
     Expr* base = nullptr;
+
+    Expr* originalExpr = nullptr;
 
     // The lookup result that was ambiguous
     LookupResult lookupResult2;
@@ -77,6 +84,7 @@ class LiteralExpr : public Expr
     // The token that was used to express the literal. This can be
     // used to get the raw text of the literal, including any suffix.
     Token token;
+    BaseType suffixType = BaseType::Void;
 };
 
 class IntegerLiteralExpr : public LiteralExpr
@@ -132,6 +140,18 @@ class GetArrayLengthExpr : public Expr
 {
     SLANG_AST_CLASS(GetArrayLengthExpr)
     Expr* arrayExpr = nullptr;
+};
+
+class ExpandExpr : public Expr
+{
+    SLANG_AST_CLASS(ExpandExpr)
+    Expr* baseExpr = nullptr;
+};
+
+class EachExpr : public Expr
+{
+    SLANG_AST_CLASS(EachExpr)
+    Expr* baseExpr = nullptr;
 };
 
 // A base class for expressions with arguments
@@ -235,6 +255,12 @@ class MemberExpr: public DeclRefExpr
     SourceLoc memberOperatorLoc;
 };
 
+// Member expression that is dereferenced, e.g. `a->b`.
+class DerefMemberExpr : public MemberExpr
+{
+    SLANG_AST_CLASS(DerefMemberExpr)
+};
+
 // Member looked up on a type, rather than a value
 class StaticMemberExpr: public DeclRefExpr
 {
@@ -265,8 +291,7 @@ class SwizzleExpr: public Expr
 {
     SLANG_AST_CLASS(SwizzleExpr)
     Expr* base = nullptr;
-    int elementCount;
-    int elementIndices[4];
+    ShortList<UInt, 4> elementIndices;
     SourceLoc memberOpLoc;
 };
 
@@ -399,6 +424,11 @@ class AlignOfExpr : public SizeOfLikeExpr
     SLANG_AST_CLASS(AlignOfExpr);
 };
 
+class CountOfExpr : public SizeOfLikeExpr
+{
+    SLANG_AST_CLASS(CountOfExpr);
+};
+
 class MakeOptionalExpr : public Expr
 {
     SLANG_AST_CLASS(MakeOptionalExpr)
@@ -427,6 +457,19 @@ class SelectExpr: public OperatorExpr
 {
     SLANG_AST_CLASS(SelectExpr)
 };
+
+class LogicOperatorShortCircuitExpr: public OperatorExpr
+{
+    SLANG_AST_CLASS(LogicOperatorShortCircuitExpr)
+public:
+    enum Flavor
+    {
+        And,    // &&
+        Or,     // ||
+    };
+    Flavor flavor;
+};
+
 
 class GenericAppExpr: public AppExprBase
 {
@@ -643,6 +686,17 @@ public:
     List<Val*> knownGenericArgs;
 };
 
+   
+    /// An expression that holds a set of argument exprs that got matched to a pack parameter
+    /// during overload resolution.
+    ///
+class PackExpr : public Expr
+{
+    SLANG_AST_CLASS(PackExpr)
+
+    List<Expr*> args;
+};
+
 class SPIRVAsmOperand
 {
     SLANG_VALUE_CLASS(SPIRVAsmOperand);
@@ -656,15 +710,20 @@ public:
         NamedValue, // Any other identifier
         SlangValue,
         SlangValueAddr,
+        SlangImmediateValue,
         SlangType,
         SampledType, // __sampledType(T), this becomes a 4 vector of the component type of T
         ImageType, // __imageType(texture), returns the equivalaent OpTypeImage of a given texture typed value.
         SampledImageType, // __sampledImageType(texture), returns the equivalent OpTypeSampledImage of a given texture typed value.
+        ConvertTexel, // __convertTexel(value), converts `value` to the native texel type of a texture.
         TruncateMarker, // __truncate, an invented instruction which coerces to the result type by truncating the element count
         EntryPoint, // __entryPoint, a placeholder for the id of a referencing entryPoint.
         BuiltinVar,
         GLSL450Set,
         NonSemanticDebugPrintfExtSet,
+        RayPayloadFromLocation, //insert from scope of all payloads in the spir-v shader the payload identified by the integer value provided
+        RayAttributeFromLocation,
+        RayCallableFromLocation,
     };
 
     // The flavour and token describes how this was parsed

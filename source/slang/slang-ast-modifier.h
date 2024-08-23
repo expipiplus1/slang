@@ -13,7 +13,6 @@ namespace Slang {
 class InModifier : public Modifier { SLANG_AST_CLASS(InModifier)};
 class OutModifier : public Modifier { SLANG_AST_CLASS(OutModifier)};
 class ConstModifier : public Modifier { SLANG_AST_CLASS(ConstModifier)};
-class InstanceModifier : public Modifier { SLANG_AST_CLASS(InstanceModifier)};
 class BuiltinModifier : public Modifier { SLANG_AST_CLASS(BuiltinModifier)};
 class InlineModifier : public Modifier { SLANG_AST_CLASS(InlineModifier)};
 class VisibilityModifier : public Modifier {SLANG_AST_CLASS(VisibilityModifier)};
@@ -24,22 +23,23 @@ class RequireModifier : public Modifier { SLANG_AST_CLASS(RequireModifier)};
 class ParamModifier : public Modifier { SLANG_AST_CLASS(ParamModifier)};
 class ExternModifier : public Modifier { SLANG_AST_CLASS(ExternModifier)};
 class HLSLExportModifier : public Modifier { SLANG_AST_CLASS(HLSLExportModifier) };
-class InputModifier : public Modifier { SLANG_AST_CLASS(InputModifier)};
 class TransparentModifier : public Modifier { SLANG_AST_CLASS(TransparentModifier)};
 class FromStdLibModifier : public Modifier { SLANG_AST_CLASS(FromStdLibModifier)};
 class PrefixModifier : public Modifier { SLANG_AST_CLASS(PrefixModifier)};
 class PostfixModifier : public Modifier { SLANG_AST_CLASS(PostfixModifier)};
 class ExportedModifier : public Modifier { SLANG_AST_CLASS(ExportedModifier)};
 class ConstExprModifier : public Modifier { SLANG_AST_CLASS(ConstExprModifier)};
-class GloballyCoherentModifier : public Modifier { SLANG_AST_CLASS(GloballyCoherentModifier)};
 class ExternCppModifier : public Modifier { SLANG_AST_CLASS(ExternCppModifier)};
 class GLSLPrecisionModifier : public Modifier { SLANG_AST_CLASS(GLSLPrecisionModifier)};
-
+class GLSLModuleModifier : public Modifier {SLANG_AST_CLASS(GLSLModuleModifier)};
 // Marks that the definition of a decl is not yet synthesized.
 class ToBeSynthesizedModifier : public Modifier {SLANG_AST_CLASS(ToBeSynthesizedModifier)};
 
 // Marks that the definition of a decl is synthesized.
 class SynthesizedModifier : public Modifier { SLANG_AST_CLASS(SynthesizedModifier) };
+
+// Marks a synthesized variable as local temporary variable.
+class LocalTempVarModifier : public Modifier { SLANG_AST_CLASS(LocalTempVarModifier) };
 
 // An `extern` variable in an extension is used to introduce additional attributes on an existing
 // field.
@@ -245,33 +245,31 @@ class GLSLLocationLayoutModifier : public GLSLParsedLayoutModifier
     SLANG_AST_CLASS(GLSLLocationLayoutModifier)
 };
 
+class GLSLBufferDataLayoutModifier : public GLSLParsedLayoutModifier
+{
+    SLANG_AST_CLASS(GLSLBufferDataLayoutModifier)
+};
+
+class GLSLStd140Modifier : public GLSLBufferDataLayoutModifier
+{
+    SLANG_AST_CLASS(GLSLStd140Modifier)
+};
+
+class GLSLStd430Modifier : public GLSLBufferDataLayoutModifier
+{
+    SLANG_AST_CLASS(GLSLStd430Modifier)
+};
+
+class GLSLScalarModifier : public GLSLBufferDataLayoutModifier
+{
+    SLANG_AST_CLASS(GLSLScalarModifier)
+};
+
 
 // A catch-all for single-keyword modifiers
 class SimpleModifier : public Modifier 
 {
     SLANG_AST_CLASS(SimpleModifier)
-};
-
-
-// Some GLSL-specific modifiers
-class GLSLBufferModifier : public SimpleModifier 
-{
-    SLANG_AST_CLASS(GLSLBufferModifier)
-};
-
-class GLSLWriteOnlyModifier : public SimpleModifier 
-{
-    SLANG_AST_CLASS(GLSLWriteOnlyModifier)
-};
-
-class GLSLReadOnlyModifier : public SimpleModifier 
-{
-    SLANG_AST_CLASS(GLSLReadOnlyModifier)
-};
-
-class GLSLPatchModifier : public SimpleModifier 
-{
-    SLANG_AST_CLASS(GLSLPatchModifier)
 };
 
 
@@ -629,7 +627,6 @@ class Attribute : public AttributeBase
 class UserDefinedAttribute : public Attribute 
 {
     SLANG_AST_CLASS(UserDefinedAttribute)
- 
 };
 
 class AttributeUsageAttribute : public Attribute 
@@ -638,6 +635,18 @@ class AttributeUsageAttribute : public Attribute
  
     SyntaxClass<NodeBase> targetSyntaxClass;
 };
+
+class NonDynamicUniformAttribute : public Attribute
+{
+    SLANG_AST_CLASS(NonDynamicUniformAttribute)
+};
+
+class RequireCapabilityAttribute : public Attribute
+{
+    SLANG_AST_CLASS(RequireCapabilityAttribute)
+    CapabilitySet capabilitySet;
+};
+
 
 // An `[unroll]` or `[unroll(count)]` attribute
 class UnrollAttribute : public Attribute 
@@ -706,6 +715,16 @@ class CallAttribute : public Attribute
 };
                // `[call]`
 
+class UnscopedEnumAttribute : public Attribute
+{
+    SLANG_AST_CLASS(UnscopedEnumAttribute)
+};
+
+    // Marks a enum to have `flags` semantics, where each enum case is a bitfield.
+class FlagsAttribute : public Attribute
+{
+    SLANG_AST_CLASS(FlagsAttribute);
+};
 
 // [[vk_push_constant]] [[push_constant]]
 class PushConstantAttribute : public Attribute 
@@ -730,11 +749,36 @@ class GLSLBindingAttribute : public Attribute
     int32_t set = 0;
 };
 
+class VkAliasedPointerAttribute : public Attribute
+{
+    SLANG_AST_CLASS(VkAliasedPointerAttribute)
+};
+
+class VkRestrictPointerAttribute : public Attribute
+{
+    SLANG_AST_CLASS(VkRestrictPointerAttribute)
+};
+
+class GLSLOffsetLayoutAttribute : public Attribute 
+{
+    SLANG_AST_CLASS(GLSLOffsetLayoutAttribute)
+
+    int64_t offset;
+};
+
 class GLSLSimpleIntegerLayoutAttribute : public Attribute 
 {
     SLANG_AST_CLASS(GLSLSimpleIntegerLayoutAttribute)
  
     int32_t value = 0;
+};
+
+/// [[vk_input_attachment_index]]
+class GLSLInputAttachmentIndexLayoutAttribute : public Attribute
+{
+    SLANG_AST_CLASS(GLSLInputAttachmentIndexLayoutAttribute)
+
+    IntegerLiteralValue location;
 };
 
 // [[vk_location]]
@@ -772,6 +816,24 @@ class DisableArrayFlatteningAttribute : public Attribute
 class GLSLLayoutLocalSizeAttribute : public Attribute
 {
     SLANG_AST_CLASS(GLSLLayoutLocalSizeAttribute)
+
+    // The number of threads to use along each axis
+    //
+    // TODO: These should be accessors that use the
+    // ordinary `args` list, rather than side data.
+    IntVal* x;
+    IntVal* y;
+    IntVal* z;
+};
+
+class GLSLLayoutDerivativeGroupQuadAttribute : public Attribute
+{
+    SLANG_AST_CLASS(GLSLLayoutDerivativeGroupQuadAttribute)
+};
+
+class GLSLLayoutDerivativeGroupLinearAttribute : public Attribute
+{
+    SLANG_AST_CLASS(GLSLLayoutDerivativeGroupLinearAttribute)
 };
 
 // TODO: for attributes that take arguments, the syntax node
@@ -824,9 +886,20 @@ class NumThreadsAttribute : public Attribute
     //
     // TODO: These should be accessors that use the
     // ordinary `args` list, rather than side data.
-    int32_t x;
-    int32_t y;
-    int32_t z;
+    IntVal* x;
+    IntVal* y;
+    IntVal* z;
+};
+
+class WaveSizeAttribute : public Attribute
+{
+    SLANG_AST_CLASS(WaveSizeAttribute)
+
+    // "numLanes" must be a compile time constant integer
+    // value of an allowed wave size, which is one of the
+    // followings: 4, 8, 16, 32, 64 or 128.
+    //
+    IntVal* numLanes;
 };
 
 class MaxVertexCountAttribute : public Attribute 
@@ -874,7 +947,12 @@ class VulkanRayPayloadAttribute : public Attribute
 
     int location;
 };
+class VulkanRayPayloadInAttribute : public Attribute 
+{
+    SLANG_AST_CLASS(VulkanRayPayloadInAttribute)
 
+    int location;
+};
 
 // A `[__vulkanCallablePayload(location)]` attribute, which is used in the
 // standard library implementation to indicate that a variable
@@ -886,7 +964,12 @@ class VulkanCallablePayloadAttribute : public Attribute
 
     int location;
 };
+class VulkanCallablePayloadInAttribute : public Attribute 
+{
+    SLANG_AST_CLASS(VulkanCallablePayloadInAttribute)
 
+    int location;
+};
 
 // A `[__vulkanHitAttributes]` attribute, which is used in the
 // standard library implementation to indicate that a variable
@@ -927,13 +1010,20 @@ class NonmutatingAttribute : public Attribute
 };
 
 // A `[constref]` attribute, which indicates that the `this` parameter of
-// a member function should be passed by reference.
+// a member function should be passed by const reference.
 //
 class ConstRefAttribute : public Attribute
 {
     SLANG_AST_CLASS(ConstRefAttribute)
 };
 
+// A `[ref]` attribute, which indicates that the `this` parameter of
+// a member function should be passed by reference.
+//
+class RefAttribute : public Attribute
+{
+    SLANG_AST_CLASS(RefAttribute)
+};
 
 // A `[__readNone]` attribute, which indicates that a function
 // computes its results strictly based on argument values, without
@@ -946,6 +1036,15 @@ class ReadNoneAttribute : public Attribute
 };
 
 
+// A `[__GLSLRequireShaderInputParameter]` attribute to annotate
+// functions that require a shader input as parameter
+//
+class GLSLRequireShaderInputParameterAttribute : public Attribute
+{
+    SLANG_AST_CLASS(GLSLRequireShaderInputParameterAttribute)
+
+    uint32_t parameterNumber;
+};
 
 // HLSL modifiers for geometry shader input topology
 class HLSLGeometryShaderInputPrimitiveTypeModifier : public Modifier 
@@ -1205,6 +1304,15 @@ class RequiresNVAPIAttribute : public Attribute
     SLANG_AST_CLASS(RequiresNVAPIAttribute)
 };
 
+    /// A `[RequirePrelude(target, "string")]` attribute indicates that the declaration being modifed
+    /// requires a textual prelude to be injected in the resulting target code.
+class RequirePreludeAttribute : public Attribute
+{
+    SLANG_AST_CLASS(RequirePreludeAttribute)
+
+    CapabilitySet capabilitySet;
+    String prelude;
+};
 
     /// A `[__AlwaysFoldIntoUseSite]` attribute indicates that the calls into the modified
     /// function should always be folded into use sites during source emit.
@@ -1352,6 +1460,23 @@ class NoInlineAttribute : public Attribute
     SLANG_AST_CLASS(NoInlineAttribute)
 };
 
+    /// A `[noRefInline]` attribute represents a request to not force inline a 
+    /// function specifically due to a refType parameter.
+class NoRefInlineAttribute : public Attribute
+{
+    SLANG_AST_CLASS(NoRefInlineAttribute)
+};
+
+class DerivativeGroupQuadAttribute : public Attribute
+{
+    SLANG_AST_CLASS(DerivativeGroupQuadAttribute)
+};
+
+class DerivativeGroupLinearAttribute : public Attribute
+{
+    SLANG_AST_CLASS(DerivativeGroupLinearAttribute)
+};
+
     /// A `[payload]` attribute indicates that a `struct` type will be used as
     /// a ray payload for `TraceRay()` calls, and thus also as input/output
     /// for shaders in the ray tracing pipeline that might be invoked for
@@ -1415,6 +1540,13 @@ class TypeModifier : public Modifier
     SLANG_AST_CLASS(TypeModifier)
 };
 
+    /// A kind of syntax element which appears as a modifier in the syntax, but
+    /// we represent as a function over type expressions
+class WrappingTypeModifier : public TypeModifier
+{
+    SLANG_AST_CLASS(WrappingTypeModifier)
+};
+
     /// A modifier that applies to a type and implies information about the
     /// underlying format of a resource that uses that type as its element type.
     ///
@@ -1440,5 +1572,89 @@ class NoDiffModifier : public TypeModifier
     SLANG_AST_CLASS(NoDiffModifier)
 };
 
+class GloballyCoherentModifier : public SimpleModifier
+{
+    SLANG_AST_CLASS(GloballyCoherentModifier)
+};
+
+// Some GLSL-specific modifiers
+class GLSLBufferModifier : public WrappingTypeModifier
+{
+    SLANG_AST_CLASS(GLSLBufferModifier)
+};
+
+class GLSLWriteOnlyModifier : public SimpleModifier
+{
+    SLANG_AST_CLASS(GLSLWriteOnlyModifier)
+};
+
+class GLSLReadOnlyModifier : public SimpleModifier
+{
+    SLANG_AST_CLASS(GLSLReadOnlyModifier)
+};
+
+class GLSLVolatileModifier : public SimpleModifier
+{
+    SLANG_AST_CLASS(GLSLVolatileModifier)
+};
+
+class GLSLRestrictModifier : public SimpleModifier
+{
+    SLANG_AST_CLASS(GLSLRestrictModifier)
+};
+
+class GLSLPatchModifier : public SimpleModifier
+{
+    SLANG_AST_CLASS(GLSLPatchModifier)
+};
+
+//
+class BitFieldModifier : public Modifier
+{
+    SLANG_AST_CLASS(BitFieldModifier)
+
+    IntegerLiteralValue width;
+
+    // Fields filled during semantic analysis
+    IntegerLiteralValue offset = 0;
+    DeclRef<VarDecl> backingDeclRef;
+};
+
+class DynamicUniformModifier : public Modifier
+{
+    SLANG_AST_CLASS(DynamicUniformModifier)
+};
+
+class MemoryQualifierSetModifier : public Modifier
+{
+    SLANG_AST_CLASS(MemoryQualifierSetModifier);
+
+    List<Modifier*> memoryModifiers;
+
+    uint32_t memoryQualifiers = 0;
+
+public:
+    struct Flags
+    {
+        enum MemoryQualifiersBit
+        {
+            kNone         = 0b0,
+            kCoherent     = 0b1,
+            kReadOnly     = 0b10,
+            kWriteOnly    = 0b100,
+            kVolatile     = 0b1000,
+            kRestrict     = 0b10000,
+            kRasterizerOrdered = 0b100000,
+        };
+    };
+
+    void addQualifier(Modifier* mod, Flags::MemoryQualifiersBit type)
+    {
+        memoryModifiers.add(mod);
+        memoryQualifiers |= type;
+    }
+    uint32_t getMemoryQualifierBit() { return memoryQualifiers; }
+    List<Modifier*> getModifiers() { return memoryModifiers; }
+};
 
 } // namespace Slang

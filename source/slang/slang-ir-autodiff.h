@@ -59,6 +59,8 @@ struct DiffTranscriberSet
 
 struct AutoDiffSharedContext
 {
+    TargetProgram* targetProgram = nullptr;
+
     IRModuleInst* moduleInst = nullptr;
 
     // A reference to the builtin IDifferentiable interface type.
@@ -113,7 +115,7 @@ struct AutoDiffSharedContext
 
     DiffTranscriberSet transcriberSet;
 
-    AutoDiffSharedContext(IRModuleInst* inModuleInst);
+    AutoDiffSharedContext(TargetProgram* target, IRModuleInst* inModuleInst);
 
 private:
 
@@ -306,8 +308,6 @@ struct DifferentialPairTypeBuilder
 
     DifferentialPairTypeBuilder(AutoDiffSharedContext* sharedContext) : sharedContext(sharedContext) {}
 
-    IRStructField* findField(IRInst* type, IRStructKey* key);
-
     IRInst* findSpecializationForParam(IRInst* specializeInst, IRInst* genericParam);
 
     IRInst* emitFieldAccessor(IRBuilder* builder, IRInst* baseInst, IRStructKey* key);
@@ -357,11 +357,12 @@ struct IRAutodiffPassOptions
 };
 
 bool processAutodiffCalls(
+    TargetProgram* target,
     IRModule*                           module,
     DiagnosticSink*                     sink,
     IRAutodiffPassOptions const&   options = IRAutodiffPassOptions());
 
-bool finalizeAutoDiffPass(IRModule* module);
+bool finalizeAutoDiffPass(TargetProgram* target, IRModule* module);
 
 // Utility methods
 
@@ -390,10 +391,6 @@ inline bool isRelevantDifferentialPair(IRType* type)
     }
     return false;
 }
-
-IRBlock* getBlock(IRInst* inst);
-
-IRInst* getInstInBlock(IRInst* inst);
 
 UIndex addPhiOutputArg(IRBuilder* builder, IRBlock* block, IRInst*& inoutTerminatorInst, IRInst* arg);
 

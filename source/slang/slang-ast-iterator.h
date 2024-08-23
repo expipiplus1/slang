@@ -3,16 +3,14 @@
 
 namespace Slang
 {
-template <typename Callback>
+template <typename Callback, typename Filter>
 struct ASTIterator
 {
     const Callback& callback;
-    UnownedStringSlice fileName;
-    SourceManager* sourceManager;
-    ASTIterator(const Callback& func, SourceManager* manager, UnownedStringSlice sourceFileName)
+    const Filter& filter;
+    ASTIterator(const Callback& func, const Filter& filterFunc)
         : callback(func)
-        , fileName(sourceFileName)
-        , sourceManager(manager)
+        , filter(filterFunc)
     {}
 
     void visitDecl(DeclBase* decl);
@@ -53,6 +51,10 @@ struct ASTIterator
         void visitIntegerLiteralExpr(IntegerLiteralExpr* expr)
         {
             iterator->maybeDispatchCallback(expr);
+        }
+        void visitOpenRefExpr(OpenRefExpr* expr)
+        {
+            dispatchIfNotNull(expr->innerExpr);
         }
         void visitFloatingPointLiteralExpr(FloatingPointLiteralExpr* expr)
         {
@@ -130,12 +132,30 @@ struct ASTIterator
             for (auto arg : expr->arguments)
                 dispatchIfNotNull(arg);
         }
+        void visitPackExpr(PackExpr* expr)
+        {
+            for (auto arg : expr->args)
+                dispatchIfNotNull(arg);
+        }
+
+        void visitExpandExpr(ExpandExpr* expr)
+        {
+            iterator->maybeDispatchCallback(expr);
+            dispatchIfNotNull(expr->baseExpr);
+        }
+
+        void visitEachExpr(EachExpr* expr)
+        {
+            iterator->maybeDispatchCallback(expr);
+            dispatchIfNotNull(expr->baseExpr);
+        }
 
         void visitDerefExpr(DerefExpr* expr)
         {
             iterator->maybeDispatchCallback(expr);
             dispatchIfNotNull(expr->base);
         }
+
         void visitMatrixSwizzleExpr(MatrixSwizzleExpr* expr)
         {
             iterator->maybeDispatchCallback(expr);
@@ -150,6 +170,7 @@ struct ASTIterator
         {
             iterator->maybeDispatchCallback(expr);
             dispatchIfNotNull(expr->base);
+            dispatchIfNotNull(expr->originalExpr);
         }
         void visitOverloadedExpr2(OverloadedExpr2* expr)
         {
@@ -428,13 +449,11 @@ struct ASTIterator
     };
 };
 
-template <typename CallbackFunc>
-void ASTIterator<CallbackFunc>::visitDecl(DeclBase* decl)
+template <typename CallbackFunc, typename FilterFunc>
+void ASTIterator<CallbackFunc, FilterFunc>::visitDecl(DeclBase* decl)
 {
     // Don't look at the decl if it is defined in a different file.
-    if (!as<ModuleDecl>(decl) && !sourceManager->getHumaneLoc(decl->loc, SourceLocType::Actual)
-                                      .pathInfo.foundPath.getUnownedSlice()
-                                      .endsWithCaseInsensitive(fileName))
+    if (!filter(decl))
         return;
 
     maybeDispatchCallback(decl);
@@ -468,12 +487,18 @@ void ASTIterator<CallbackFunc>::visitDecl(DeclBase* decl)
     {
         visitExpr(extDecl->targetType.exp);
     }
+    else if (auto usingDecl = as<UsingDecl>(decl))
+    {
+        visitExpr(usingDecl->arg);
+    }
     if (auto container = as<ContainerDecl>(decl))
     {
         for (auto member : container->members)
         {
             visitDecl(member);
         }
+        if (auto aggTypeDecl = as<AggTypeDecl>(decl))
+            visitExpr(aggTypeDecl->wrappedType.exp);
     }
     for (auto modifier : decl->modifiers)
     {
@@ -485,24 +510,23 @@ void ASTIterator<CallbackFunc>::visitDecl(DeclBase* decl)
         }
     }
 }
-template <typename CallbackFunc>
-void ASTIterator<CallbackFunc>::visitExpr(Expr* expr)
+template <typename CallbackFunc, typename FilterFunc>
+void ASTIterator<CallbackFunc, FilterFunc>::visitExpr(Expr* expr)
 {
     ASTIteratorExprVisitor visitor(this);
     visitor.dispatchIfNotNull(expr);
 }
-template <typename CallbackFunc>
-void ASTIterator<CallbackFunc>::visitStmt(Stmt* stmt)
+template <typename CallbackFunc, typename FilterFunc>
+void ASTIterator<CallbackFunc, FilterFunc>::visitStmt(Stmt* stmt)
 {
     ASTIteratorStmtVisitor visitor(this);
     visitor.dispatchIfNotNull(stmt);
 }
 
-template <typename Func>
-void iterateAST(
-    UnownedStringSlice fileName, SourceManager* manager, SyntaxNode* node, const Func& f)
+template <typename Func, typename FilterFunc>
+void iterateAST(SyntaxNode* node, const FilterFunc& filterFunc, const Func& f)
 {
-    ASTIterator<Func> iter(f, manager, fileName);
+    ASTIterator<Func, FilterFunc> iter(f, filterFunc);
     if (auto decl = as<Decl>(node))
     {
         iter.visitDecl(decl);
@@ -515,5 +539,19 @@ void iterateAST(
     {
         iter.visitStmt(stmt);
     }
+}
+
+template <typename Func>
+void iterateASTWithLanguageServerFilter(
+    UnownedStringSlice fileName, SourceManager* sourceManager, SyntaxNode* node, const Func& f)
+{
+    auto filter = [&](DeclBase* decl)
+        {
+            return as<NamespaceDeclBase>(decl) ||
+                sourceManager->getHumaneLoc(decl->loc, SourceLocType::Actual)
+                .pathInfo.foundPath.getUnownedSlice()
+                .endsWithCaseInsensitive(fileName);
+        };
+    iterateAST(node, filter, f);
 }
 } // namespace Slang
