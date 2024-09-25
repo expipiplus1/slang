@@ -313,6 +313,15 @@
           sdl2Support = false;
           glfwSupport = false;
         }).overrideAttrs (old: {
+          prePatch = "";
+          postPatch = "";
+          patchPhase = ''
+            substituteInPlace "subprojects/libdisplay-info/tool/gen-search-table.py" \
+              --replace "/usr/bin/env python3" "${
+                self.lib.getBin self.pkgsBuildHost.python3
+              }/bin/python3"
+          '';
+
           src = self.fetchFromGitHub {
             owner = "doitsujin";
             repo = "dxvk";
