@@ -224,7 +224,6 @@
                 # glslang
                 directx-shader-compiler
                 renderdoc
-                vulkan-tools
                 spirv-cross
                 # Build utilities from this flake
                 make-helper
@@ -256,7 +255,6 @@
                     "etc/vulkan/implicit_layer.d"
                   ]);
               in makeVkLayerPath ([
-                vulkan-validation-layers
                 vulkan-tools-lunarg
                 renderdoc
               ])
