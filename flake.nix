@@ -442,6 +442,7 @@
           # };
           slang = (pkgs.shader-slang.override {
             stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
+            enableDirectX = true;
           }).overrideAttrs (old: {
             CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
             CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
