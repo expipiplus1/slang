@@ -60,7 +60,7 @@
             rm -rf ./build
 
             cmake --preset default \
-              -DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM \
+              $cmakeFlags \
               -DSLANG_EMBED_STDLIB=1 \
               -DSLANG_EMBED_STDLIB_SOURCE=0 \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
@@ -68,10 +68,10 @@
               -DCMAKE_C_COMPILER=clang \
               --fresh
             cp build/compile_commands.json .
+            cmake --build --preset debug --target spirv-dis --target spirv-val --target spirv-opt --target glslang-standalone
             cmake --preset default \
-              -DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM \
-              --fresh \
-              -DSLANG_ENABLE_DX_ON_VK=0
+              $cmakeFlags \
+              --fresh
             mk "$@"
           '';
 
@@ -183,6 +183,11 @@
           NIX_LDFLAGS =
             lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
           autoPatchelfIgnoreMissingDeps = lib.optional enableCuda "libcuda.so";
+
+          cmakeFlags = [
+            "-DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM"
+            "-DSLANG_ENABLE_DX_ON_VK=${if enableDirectX then "1" else "0"}"
+          ];
 
           buildInputs = [ spirv-tools libX11 llvm libclang zlib libxml2 ] ++ [
             # For any cross build of llvm
