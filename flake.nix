@@ -237,6 +237,7 @@
                 pkgsCross.aarch64-multiplatform.buildPackages.gcc
               ]
             }"
+            export PATH="build/external/spirv-tools/tools/Debug:build/external/glslang/StandAlone/Debug:$PATH"
 
             export LD_LIBRARY_PATH="${testsRuntimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 
