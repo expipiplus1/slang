@@ -214,8 +214,16 @@ namespace Slang
 
         return addresses;
     }
-    
-    static void checkCallUsage(List<IRInst*>& stores, List<IRInst*>& loads, IRCall* call, IRInst* inst)
+
+    enum InstructionUsageType
+    {
+        None,           // Instruction neither stores nor loads from the soruce (e.g. meta operations)
+        Store,          // Instruction acts as a write to the source
+        StoreParent,    // Instruction's parent acts as a write to the source
+        Load            // Instruciton acts as a load from the source
+    };
+
+    static InstructionUsageType getCallUsageType(IRCall* call, IRInst* inst)
     {
         IRInst* callee = call->getCallee();
 
@@ -224,10 +232,13 @@ namespace Slang
         IRFuncType* ftype = nullptr;
         if (auto spec = as<IRSpecialize>(callee))
             ftn = as<IRFunc>(resolveSpecialization(spec));
-        else if (auto fwd = as<IRForwardDifferentiate>(callee))
-            ftn = as<IRFunc>(fwd->getBaseFn());
-        else if (auto rev = as<IRBackwardDifferentiate>(callee))
-            ftn = as<IRFunc>(rev->getBaseFn());
+    
+        // Differentiable functions are mostly ignored, treated as having inout parameters
+        else if (as<IRForwardDifferentiate>(callee))
+            return Store;
+        else if (as<IRBackwardDifferentiate>(callee))
+            return Store;
+
         else if (auto wit = as<IRLookupWitnessMethod>(callee))
             ftype = as<IRFuncType>(wit->getFullType());
         else
@@ -250,15 +261,64 @@ namespace Slang
             ftype = as<IRFuncType>(ftn->getFullType());
 
         if (!ftype)
-            return;
+            return None;
 
         // Consider it as a store if its passed
         // as an out/inout/ref parameter
-        IRType* type = ftype->getParamType(index);
-        if (as<IROutType>(type) || as<IRInOutType>(type) || as<IRRefType>(type))
-            stores.add(call);
-        else
-            loads.add(call);
+        auto type = unwrapAttributedType(ftype->getParamType(index));
+        return (as<IROutType>(type) || as<IRInOutType>(type) || as<IRRefType>(type)) ? Store : Load;
+    }
+
+    static InstructionUsageType getInstructionUsageType(IRInst* user, IRInst* inst)
+    {
+        // Meta intrinsics (which evaluate on type) do nothing
+        if (isMetaOp(user))
+            return None;
+
+        // Ignore instructions generating more aliases
+        if (isAliasable(user))
+            return None;
+
+        switch (user->getOp())
+        {
+        case kIROp_loop:
+        case kIROp_unconditionalBranch:
+            // TODO: Ignore branches for now
+            return None;
+        
+        case kIROp_Call:
+            // Function calls can be either
+            // stores or loads depending on
+            // whether the callee takes it
+            // in as a out parameter or not
+            return getCallUsageType(as<IRCall>(user), inst);
+
+        // These instructions will store data...
+        case kIROp_Store:
+        case kIROp_SwizzledStore:
+        case kIROp_SPIRVAsm:
+        case kIROp_AtomicStore:
+            return Store;
+
+        case kIROp_SPIRVAsmOperandInst:
+            // For SPIRV asm instructions, need to check out the entire
+            // block when doing reachability checks
+            return StoreParent;
+
+        case kIROp_MakeExistential:
+        case kIROp_MakeExistentialWithRTTI:
+            // For specializing generic structs
+            return Store;
+        
+        // Miscellaenous cases
+        case kIROp_ManagedPtrAttach:
+        case kIROp_Unmodified:
+            return Store;
+
+        // ... and the rest will load/use them
+        default:
+            return Load;
+        }
     }
 
     static void collectSpecialCaseInstructions(List<IRInst*>& stores, IRBlock* block)
@@ -270,59 +330,14 @@ namespace Slang
         }
     }
 
-    static void collectLoadStore(List<IRInst*>& stores, List<IRInst*>& loads, IRInst* user, IRInst* inst)
+    static void collectInstructionByUsage(List<IRInst*>& stores, List<IRInst*>& loads, IRInst* user, IRInst* inst)
     {
-        // Meta intrinsics (which evaluate on type) do nothing
-        if (isMetaOp(user))
-            return;
-
-        // Ignore instructions generating more aliases
-        if (isAliasable(user))
-            return;
-
-        switch (user->getOp())
+        InstructionUsageType usage = getInstructionUsageType(user, inst);
+        switch (usage)
         {
-        case kIROp_loop:
-        case kIROp_unconditionalBranch:
-            // TODO: Ignore branches for now
-            return;
-        
-        case kIROp_Call:
-            // Function calls can be either
-            // stores or loads depending on
-            // whether the callee takes it
-            // in as a out parameter or not
-            return checkCallUsage(stores, loads, as<IRCall>(user), inst);
-
-        // These instructions will store data...
-        case kIROp_Store:
-        case kIROp_SwizzledStore:
-        case kIROp_SPIRVAsm:
-            stores.add(user);
-            break;
-
-        case kIROp_SPIRVAsmOperandInst:
-            // For SPIRV asm instructions, need to check out the entire
-            // block when doing reachability checks
-            stores.add(user->getParent());
-            break;
-
-        case kIROp_MakeExistential:
-        case kIROp_MakeExistentialWithRTTI:
-            // For specializing generic structs
-            stores.add(user);
-            break;
-        
-        // Miscellaenous cases
-        case kIROp_ManagedPtrAttach:
-        case kIROp_Unmodified:
-            stores.add(user);
-            break;
-
-        // ... and the rest will load/use them
-        default:
-            loads.add(user);
-            break;
+        case Load: return loads.add(user);
+        case Store: return stores.add(user);
+        case StoreParent: return stores.add(user->getParent());
         }
     }
 
@@ -349,10 +364,7 @@ namespace Slang
         {
             // TODO: Mark specific parts assigned to for partial initialization checks
             for (auto use = alias->firstUse; use; use = use->nextUse)
-            {
-                IRInst* user = use->getUser();
-                collectLoadStore(stores, loads, user, alias);
-            }
+                collectInstructionByUsage(stores, loads, use->getUser(), alias);
         }
     }
 
@@ -400,10 +412,7 @@ namespace Slang
         for (auto alias : getAliasableInstructions(inst))
         {
             for (auto use = alias->firstUse; use; use = use->nextUse)
-            {
-                IRInst* user = use->getUser();
-                collectLoadStore(stores, loads, user, alias);
-            }
+                collectInstructionByUsage(stores, loads, use->getUser(), alias);
         }
 
         for (auto store : stores)
@@ -430,7 +439,25 @@ namespace Slang
             IRInst* user = use->getUser();
             if (as<IRReturn>(user))
                 return true;
+            
+            // Loading from a Ptr type should be
+            // treated as an aliased path to any return
+            IRLoad *load = as<IRLoad>(user);
+            if (load && isReturnedValue(load))
+                return true;
         }
+        return false;
+    }
+
+    static bool isDirectlyWrittenTo(IRInst* inst)
+    {
+        for (auto use = inst->firstUse; use; use = use->nextUse)
+        {
+            InstructionUsageType usage = getInstructionUsageType(use->getUser(), inst);
+            if (usage == Store || usage == StoreParent)
+                return true;
+        }
+
         return false;
     }
 
@@ -440,6 +467,10 @@ namespace Slang
 
         // We don't want to warn on delegated construction
         if (!isUninitializedValue(origin))
+            return {};
+        
+        // Check if the origin instruction is ever written to
+        if (isDirectlyWrittenTo(origin))
             return {};
 
         // Now we can look for all references to fields
@@ -535,49 +566,6 @@ namespace Slang
         }
     }
 
-    static void checkParameterAsInOut(IRParam* param, IRFunc* func, bool isThis, DiagnosticSink* sink)
-    {
-        // If the inout is used for the sake of interface conformance, let it be
-        for (auto use = func->firstUse; use; use = use->nextUse)
-        {
-            if (as<IRWitnessTableEntry>(use->getUser()))
-                return;
-        }
-
-        // If there is at least one write...
-        List<IRInst*> stores;
-        List<IRInst*> loads;
-
-        for (auto alias : getAliasableInstructions(param))
-        {
-            for (auto use = alias->firstUse; use; use = use->nextUse)
-            {
-                IRInst* user = use->getUser();
-                collectLoadStore(stores, loads, user, alias);
-
-                // ...we will ignore the rest...
-                if (stores.getCount())
-                    return;
-            }
-        }
-
-        // ...or if there is an intrinsic_asm instruction
-        for (const auto& b : func->getBlocks())
-        {
-            for (auto inst = b->getFirstInst(); inst; inst = inst->next)
-            {
-                if (as<IRGenericAsm>(inst))
-                    return;
-            }
-        }
-
-        sink->diagnose(param,
-            isThis
-            ? Diagnostics::methodNeverMutates
-            : Diagnostics::inOutNeverStoredInto,
-            param);
-    }
-
     static void checkUninitializedValues(IRFunc* func, DiagnosticSink* sink)
     {
         // Differentiable functions will generate undefined values
@@ -599,22 +587,15 @@ namespace Slang
         if (auto entry = func->findDecoration<IREntryPointDecoration>())
             stage = entry->getProfile().getStage();
 
-        bool structMethod = func->findDecoration<IRMethodDecoration>();
-
         // Check out parameters
         if (!isUnmodifying(func))
         {
             int index = 0;
             for (auto param : firstBlock->getParams())
             {
-                bool isThis = structMethod && (index == 0);
-
                 ParameterCheckType checkType = isPotentiallyUnintended(param, stage, index);
                 if (checkType == AsOut)
                     checkParameterAsOut(reachability, func, param, sink);
-                else if (checkType == AsInOut)
-                    checkParameterAsInOut(param, func, isThis, sink);
-
                 index++;
             }
         }
@@ -672,22 +653,17 @@ namespace Slang
         
         auto addresses = getAliasableInstructions(variable);
         
-        List<IRInst*> stores;
         List<IRInst*> loads;
-
         for (auto alias : addresses)
         {
             for (auto use = alias->firstUse; use; use = use->nextUse)
             {
-                IRInst* user = use->getUser();
-                collectLoadStore(stores, loads, user, alias);
-
-                // Disregard if there is at least one store,
-                // since we cannot tell what the control flow is
-                if (stores.getCount())
+                InstructionUsageType usage = getInstructionUsageType(use->getUser(), alias);
+                if (usage == Store || usage == StoreParent)
                     return;
 
-                // TODO: see if we can do better here (another kind of reachability check?)
+                if (usage == Load)
+                    loads.add(use->getUser());
             }
         }
 

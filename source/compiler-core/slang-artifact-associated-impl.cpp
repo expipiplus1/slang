@@ -308,4 +308,29 @@ Slice<ShaderBindingRange> ArtifactPostEmitMetadata::getUsedBindingRanges()
     return Slice<ShaderBindingRange>(m_usedBindings.getBuffer(), m_usedBindings.getCount()); 
 }
 
+Slice<String> ArtifactPostEmitMetadata::getExportedFunctionMangledNames()
+{
+    return Slice<String>(m_exportedFunctionMangledNames.getBuffer(), m_exportedFunctionMangledNames.getCount());
+}
+
+SlangResult ArtifactPostEmitMetadata::isParameterLocationUsed(
+    SlangParameterCategory category,
+    SlangUInt spaceIndex,
+    SlangUInt registerIndex,
+    bool& outUsed)
+{
+    for (const auto& range : getUsedBindingRanges())
+    {
+        if (range.containsBinding((slang::ParameterCategory)category, spaceIndex, registerIndex))
+        {
+            outUsed = true;
+            return SLANG_OK;
+        }
+    }
+
+    outUsed = false;
+    return SLANG_OK;
+}
+
+
 } // namespace Slang

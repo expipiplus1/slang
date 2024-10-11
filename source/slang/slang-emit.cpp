@@ -31,8 +31,10 @@
 #include "slang-ir-glsl-legalize.h"
 #include "slang-ir-hlsl-legalize.h"
 #include "slang-ir-metal-legalize.h"
+#include "slang-ir-wgsl-legalize.h"
 #include "slang-ir-insts.h"
 #include "slang-ir-inline.h"
+#include "slang-ir-layout.h"
 #include "slang-ir-legalize-array-return-type.h"
 #include "slang-ir-legalize-mesh-outputs.h"
 #include "slang-ir-legalize-varying-params.h"
@@ -58,8 +60,10 @@
 #include "slang-ir-metadata.h"
 #include "slang-ir-optix-entry-point-uniforms.h"
 #include "slang-ir-pytorch-cpp-binding.h"
+#include "slang-ir-redundancy-removal.h"
 #include "slang-ir-restructure.h"
 #include "slang-ir-restructure-scoping.h"
+#include "slang-ir-resolve-texture-format.h"
 #include "slang-ir-sccp.h"
 #include "slang-ir-specialize.h"
 #include "slang-ir-specialize-arrays.h"
@@ -100,6 +104,7 @@
 #include "slang-emit-glsl.h"
 #include "slang-emit-hlsl.h"
 #include "slang-emit-metal.h"
+#include "slang-emit-wgsl.h"
 #include "slang-emit-cpp.h"
 #include "slang-emit-cuda.h"
 #include "slang-emit-torch.h"
@@ -209,6 +214,68 @@ static void dumpIRIfEnabled(
         dumpIR(irModule, codeGenContext->getIRDumpOptions(), label, codeGenContext->getSourceManager(), &writer);
         //fclose(f);
     }
+}
+
+static void reportCheckpointIntermediates(CodeGenContext* codeGenContext, DiagnosticSink* sink, IRModule* irModule)
+{
+    // Report checkpointing information
+    CompilerOptionSet& optionSet = codeGenContext->getTargetProgram()->getOptionSet();
+    SourceManager* sourceManager = sink->getSourceManager();
+    
+    SourceWriter typeWriter(sourceManager, LineDirectiveMode::None, nullptr);
+
+    CLikeSourceEmitter::Desc description;
+    description.codeGenContext = codeGenContext;
+    description.sourceWriter = &typeWriter;
+
+    CPPSourceEmitter emitter(description);
+
+    int nonEmptyStructs = 0;
+    for (auto inst : irModule->getGlobalInsts())
+    {
+        IRStructType *structType = as<IRStructType>(inst);
+        if (!structType)
+            continue;
+
+        auto checkpointDecoration = structType->findDecoration<IRCheckpointIntermediateDecoration>();
+        if (!checkpointDecoration)
+            continue;
+
+        IRSizeAndAlignment structSize;
+        getNaturalSizeAndAlignment(optionSet, structType, &structSize);
+
+        // Reporting happens before empty structs are optimized out
+        // and we still want to keep the checkpointing decorations,
+        // so we end up needing to check for non-zero-ness
+        if (structSize.size == 0)
+            continue;
+
+        auto func = checkpointDecoration->getSourceFunction();
+        sink->diagnose(structType, Diagnostics::reportCheckpointIntermediates, func, structSize.size);
+        nonEmptyStructs++;
+
+        for (auto field : structType->getFields())
+        {
+            IRType *fieldType = field->getFieldType();
+            IRSizeAndAlignment fieldSize;
+            getNaturalSizeAndAlignment(optionSet, fieldType, &fieldSize);
+            if (fieldSize.size == 0)
+                continue;
+
+            typeWriter.clearContent();
+            emitter.emitType(fieldType);
+
+            sink->diagnose(field->sourceLoc,
+                field->findDecoration<IRLoopCounterDecoration>()
+                    ? Diagnostics::reportCheckpointCounter
+                    : Diagnostics::reportCheckpointVariable,
+                fieldSize.size,
+                typeWriter.getContent());
+        }
+    }
+
+    if (nonEmptyStructs == 0)
+        sink->diagnose(SourceLoc(), Diagnostics::reportCheckpointNone);
 }
 
 struct LinkingAndOptimizationOptions
@@ -413,6 +480,53 @@ bool checkStaticAssert(IRInst* inst, DiagnosticSink* sink)
     }
 
     return false;
+}
+
+static void unexportNonEmbeddableIR(CodeGenTarget target, IRModule* irModule)
+{
+    for (auto inst : irModule->getGlobalInsts())
+    {
+        if (inst->getOp() == kIROp_Func)
+        {
+            bool remove = false;
+            if (target == CodeGenTarget::HLSL)
+            {
+                // DXIL does not permit HLSLStructureBufferType in exported functions
+                // or sadly Matrices (https://github.com/shader-slang/slang/issues/4880)
+                auto type = as<IRFuncType>(inst->getFullType());
+                auto argCount = type->getOperandCount();
+                for (UInt aa = 0; aa < argCount; ++aa)
+                {
+                    auto operand = type->getOperand(aa);
+                    if (operand->getOp() == kIROp_HLSLStructuredBufferType ||
+                        operand->getOp() == kIROp_MatrixType)
+                    {
+                        remove = true;
+                        break;
+                    }
+                }
+            }
+            else if (target == CodeGenTarget::SPIRV)
+            {
+                // SPIR-V does not allow exporting entry points
+                if (inst->findDecoration<IREntryPointDecoration>())
+                {
+                    remove = true;
+                }
+            }
+            if (remove)
+            {
+                if (auto dec = inst->findDecoration<IRPublicDecoration>())
+                {
+                    dec->removeAndDeallocate();
+                }
+                if (auto dec = inst->findDecoration<IRDownstreamModuleExportDecoration>())
+                {
+                    dec->removeAndDeallocate();
+                }
+            }
+        }
+    }
 }
 
 Result linkAndOptimizeIR(
@@ -637,6 +751,13 @@ Result linkAndOptimizeIR(
     default:
         break;
     }
+
+    if (requiredLoweringPassSet.autodiff)
+    {
+        // Generate warnings for potentially incorrect or badly-performing autodiff patterns.
+        checkAutodiffPatterns(targetProgram, irModule, sink);
+    }
+    
     // Next, we need to ensure that the code we emit for
     // the target doesn't contain any operations that would
     // be illegal on the target platform. For example,
@@ -710,12 +831,14 @@ Result linkAndOptimizeIR(
             break;
     }
 
-    if (requiredLoweringPassSet.autodiff)
-        finalizeAutoDiffPass(targetProgram, irModule);
+    // Report checkpointing information
+    if (codeGenContext->shouldReportCheckpointIntermediates())
+        reportCheckpointIntermediates(codeGenContext, sink, irModule);
 
-    // Remove auto-diff related decorations.
-    // We may have an autodiff decoration regardless of if autodiff is being used.
-    stripAutoDiffDecorations(irModule);
+    // Finalization is always run so AD-related instructions can be removed,
+    // even the AD pass itself is not run.
+    // 
+    finalizeAutoDiffPass(targetProgram, irModule);
 
     finalizeSpecialization(irModule);
 
@@ -737,6 +860,11 @@ Result linkAndOptimizeIR(
         break;
     default:
         break;
+    }
+
+    if (codeGenContext->removeAvailableInDownstreamIR)
+    {
+        removeAvailableInDownstreamModuleDecorations(target, irModule);
     }
 
     if (targetProgram->getOptionSet().shouldRunNonEssentialValidation())
@@ -778,6 +906,10 @@ Result linkAndOptimizeIR(
     if (!fastIRSimplificationOptions.minimalOptimization)
     {
         simplifyIR(targetProgram, irModule, fastIRSimplificationOptions, sink);
+    }
+    else if (requiredLoweringPassSet.generics)
+    {
+        eliminateDeadCode(irModule, fastIRSimplificationOptions.deadCodeElimOptions);
     }
 
     if (!ArtifactDescUtil::isCpuLikeTarget(artifactDesc) &&
@@ -840,8 +972,9 @@ Result linkAndOptimizeIR(
     case CodeGenTarget::Metal:
     case CodeGenTarget::MetalLib:
     case CodeGenTarget::MetalLibAssembly:
+    case CodeGenTarget::WGSL:
         if (requiredLoweringPassSet.combinedTextureSamplers)
-            lowerCombinedTextureSamplers(irModule, sink);
+            lowerCombinedTextureSamplers(codeGenContext, irModule, sink);
         break;
     }
 
@@ -1119,6 +1252,15 @@ Result linkAndOptimizeIR(
         break;
     }
 
+    switch (target)
+    {
+    case CodeGenTarget::GLSL:
+    case CodeGenTarget::SPIRV:
+    case CodeGenTarget::WGSL:
+        resolveTextureFormat(irModule);
+        break;
+    }
+
     // For GLSL only, we will need to perform "legalization" of
     // the entry point and any entry-point parameters.
     //
@@ -1136,6 +1278,10 @@ Result linkAndOptimizeIR(
         GLSLExtensionTracker* glslExtensionTrackerPtr = options.sourceEmitter
             ? as<GLSLExtensionTracker>(options.sourceEmitter->getExtensionTracker())
             : &glslExtensionTracker;
+
+#if 0
+            dumpIRIfEnabled(codeGenContext, irModule, "PRE GLSL LEGALIZED");
+#endif
 
         legalizeEntryPointsForGLSL(
             session,
@@ -1169,6 +1315,14 @@ Result linkAndOptimizeIR(
             legalizeEntryPointVaryingParamsForCUDA(irModule, codeGenContext->getSink());
         }
         break;
+
+    case CodeGenTarget::WGSL:
+    case CodeGenTarget::WGSLSPIRV:
+    case CodeGenTarget::WGSLSPIRVAssembly:
+    {
+        legalizeIRForWGSL(irModule, sink);
+    }
+    break;
 
     default:
         break;
@@ -1442,6 +1596,11 @@ Result linkAndOptimizeIR(
     auto metadata = new ArtifactPostEmitMetadata;
     outLinkedIR.metadata = metadata;
 
+    if (targetProgram->getOptionSet().getBoolOption(CompilerOptionName::EmbedDownstreamIR))
+    {
+        unexportNonEmbeddableIR(target, irModule);
+    }
+
     collectMetadata(irModule, *metadata);
 
     outLinkedIR.metadata = metadata;
@@ -1466,15 +1625,30 @@ SlangResult CodeGenContext::emitEntryPointsSourceFromIR(ComPtr<IArtifact>& outAr
     auto targetProgram = getTargetProgram();
 
     auto lineDirectiveMode = targetProgram->getOptionSet().getEnumOption<LineDirectiveMode>(CompilerOptionName::LineDirectiveMode);
-    // To try to make the default behavior reasonable, we will
-    // always use C-style line directives (to give the user
-    // good source locations on error messages from downstream
-    // compilers) *unless* they requested raw GLSL as the
-    // output (in which case we want to maximize compatibility
-    // with downstream tools).
-    if (lineDirectiveMode ==  LineDirectiveMode::Default && targetRequest->getTarget() == CodeGenTarget::GLSL)
+    // We will generally use C-style line directives in order to give the user good
+    // source locations on error messages from downstream compilers, but there are
+    // a few exceptions.
+    if (lineDirectiveMode == LineDirectiveMode::Default)
     {
-        lineDirectiveMode = LineDirectiveMode::GLSL;
+
+        switch(targetRequest->getTarget())
+        {
+
+        case CodeGenTarget::GLSL:
+            // We want to maximize compatibility with downstream tools.
+            lineDirectiveMode = LineDirectiveMode::GLSL;
+            break;
+
+        case CodeGenTarget::WGSLSPIRVAssembly:
+        case CodeGenTarget::WGSLSPIRV:
+        case CodeGenTarget::WGSL:
+            // WGSL doesn't support line directives.
+            // See https://github.com/gpuweb/gpuweb/issues/606.
+            lineDirectiveMode = LineDirectiveMode::None;
+            break;
+
+        }
+
     }
 
     ComPtr<IBoxValue<SourceMap>> sourceMap;
@@ -1539,6 +1713,11 @@ SlangResult CodeGenContext::emitEntryPointsSourceFromIR(ComPtr<IArtifact>& outAr
             case SourceLanguage::Metal:
             {
                 sourceEmitter = new MetalSourceEmitter(desc);
+                break;
+            }
+            case SourceLanguage::WGSL:
+            {
+                sourceEmitter = new WGSLSourceEmitter(desc);
                 break;
             }
             default: break;

@@ -95,6 +95,10 @@ struct CLikeSourceEmitter::ComputeEmitActionsContext
         {
             return SourceLanguage::Metal;
         }
+        case CodeGenTarget::WGSL:
+        {
+            return SourceLanguage::WGSL;
+        }
     }
 }
 
@@ -151,7 +155,7 @@ void CLikeSourceEmitter::ensureTypePrelude(IRType* type)
     }
 }
 
-void CLikeSourceEmitter::emitDeclarator(DeclaratorInfo* declarator)
+void CLikeSourceEmitter::emitDeclaratorImpl(DeclaratorInfo* declarator)
 {
     if (!declarator) return;
 
@@ -341,13 +345,18 @@ void CLikeSourceEmitter::_emitPostfixTypeAttr(IRAttr* attr)
     // we may need to handle it here.
 }
 
+void CLikeSourceEmitter::emitSimpleTypeAndDeclaratorImpl(IRType* type, DeclaratorInfo* declarator)
+{
+    emitSimpleType(type);
+    emitDeclarator(declarator);
+}
+
 void CLikeSourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
 {
     switch (type->getOp())
     {
     default:
-        emitSimpleType(type);
-        emitDeclarator(declarator);
+        emitSimpleTypeAndDeclarator(type, declarator);
         break;
 
     case kIROp_RateQualifiedType:
@@ -491,32 +500,6 @@ void CLikeSourceEmitter::defaultEmitInstStmt(IRInst* inst)
 {
     switch (inst->getOp())
     {
-    case kIROp_AtomicCounterIncrement:
-        {
-            auto oldValName = getName(inst);
-            m_writer->emit("int ");
-            m_writer->emit(oldValName);
-            m_writer->emit(";\n");
-            m_writer->emit("InterlockedAdd(");
-            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
-            m_writer->emit(", 1, ");
-            m_writer->emit(oldValName);
-            m_writer->emit(");\n");
-        }
-        break;
-    case kIROp_AtomicCounterDecrement:
-        {
-            auto oldValName = getName(inst);
-            m_writer->emit("int ");
-            m_writer->emit(oldValName);
-            m_writer->emit(";\n");
-            m_writer->emit("InterlockedAdd(");
-            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
-            m_writer->emit(", -1, ");
-            m_writer->emit(oldValName);
-            m_writer->emit(");\n");
-        }
-        break;
     case kIROp_StructuredBufferGetDimensions:
         {
             auto count = _generateUniqueName(UnownedStringSlice("_elementCount"));
@@ -648,7 +631,7 @@ bool CLikeSourceEmitter::maybeEmitParens(EmitOpInfo& outerPrec, const EmitOpInfo
     bool needParens = (prec.leftPrecedence <= outerPrec.leftPrecedence)
         || (prec.rightPrecedence <= outerPrec.rightPrecedence);
 
-    // While Slang correctly removes some of parentheses, DXC prints warnings
+    // While Slang correctly removes some of parentheses, many compilers print warnings
     // for common mistakes when parentheses are not used with certain combinations
     // of the operations. We emit parentheses to avoid the warnings.
     //
@@ -673,6 +656,12 @@ bool CLikeSourceEmitter::maybeEmitParens(EmitOpInfo& outerPrec, const EmitOpInfo
     // a + b << c => (a + b) << c
     else if (prec.rightPrecedence == EPrecedence::kEPrecedence_Additive_Right
         && outerPrec.rightPrecedence == EPrecedence::kEPrecedence_Shift_Left)
+    {
+        needParens = true;
+    }
+    // a + b & c => (a + b) & c
+    else if (prec.rightPrecedence == EPrecedence::kEPrecedence_Additive_Right
+        && outerPrec.rightPrecedence == EPrecedence::kEPrecedence_BitAnd_Left)
     {
         needParens = true;
     }
@@ -1842,7 +1831,7 @@ void CLikeSourceEmitter::emitInstResultDecl(IRInst* inst)
 
     emitRateQualifiers(inst);
 
-    if(as<IRModuleInst>(inst->getParent()))
+    if (as<IRModuleInst>(inst->getParent()))
     {
         // "Ordinary" instructions at module scope are constants
 
@@ -1857,12 +1846,17 @@ void CLikeSourceEmitter::emitInstResultDecl(IRInst* inst)
         case SourceLanguage::Metal:
             m_writer->emit("constant ");
             break;
+        case SourceLanguage::WGSL:
+            // This is handled by emitVarKeyword, below
+            break;
         default:
             m_writer->emit("const ");
             break;
         }
 
     }
+
+    emitVarKeyword(type, inst);
 
     emitType(type, getName(inst));
     m_writer->emit(" = ");
@@ -2004,6 +1998,11 @@ void CLikeSourceEmitter::emitIntrinsicCallExprImpl(
     }
 }
 
+void CLikeSourceEmitter::emitCallArg(IRInst* inst)
+{
+    emitOperand(inst, getInfo(EmitOp::General));
+}
+
 void CLikeSourceEmitter::_emitCallArgList(IRCall* inst, int startingOperandIndex)
 {
     bool isFirstArg = true;
@@ -2024,7 +2023,7 @@ void CLikeSourceEmitter::_emitCallArgList(IRCall* inst, int startingOperandIndex
             m_writer->emit(", ");
         else
             isFirstArg = false;
-        emitOperand(inst->getOperand(aa), getInfo(EmitOp::General));
+        emitCallArg(inst->getOperand(aa));
     }
     m_writer->emit(")");
 }
@@ -2894,8 +2893,19 @@ void CLikeSourceEmitter::_emitInst(IRInst* inst)
 
         // Insts that needs to be emitted as code blocks.
     case kIROp_CudaKernelLaunch:
-    case kIROp_AtomicCounterIncrement:
-    case kIROp_AtomicCounterDecrement:
+    case kIROp_AtomicLoad:
+    case kIROp_AtomicStore:
+    case kIROp_AtomicInc:
+    case kIROp_AtomicDec:
+    case kIROp_AtomicAdd:
+    case kIROp_AtomicSub:
+    case kIROp_AtomicAnd:
+    case kIROp_AtomicOr:
+    case kIROp_AtomicXor:
+    case kIROp_AtomicMin:
+    case kIROp_AtomicMax:
+    case kIROp_AtomicExchange:
+    case kIROp_AtomicCompareExchange:
     case kIROp_StructuredBufferGetDimensions:
     case kIROp_MetalAtomicCast:
         emitInstStmt(inst);
@@ -3117,6 +3127,8 @@ void CLikeSourceEmitter::_emitStoreImpl(IRStore* store)
 
 void CLikeSourceEmitter::_emitInstAsDefaultInitializedVar(IRInst* inst, IRType* type)
 {
+    emitVarKeyword(type, inst);
+
     emitType(type, getName(inst));
 
     // On targets that support empty initializers, we will emit it.
@@ -3176,6 +3188,20 @@ void CLikeSourceEmitter::emitDecorationLayoutSemantics(IRInst* inst, char const*
 void CLikeSourceEmitter::emitLayoutSemantics(IRInst* inst, char const* uniformSemanticSpelling)
 {
     emitLayoutSemanticsImpl(inst, uniformSemanticSpelling, EmitLayoutSemanticOption::kPostType);
+}
+
+void CLikeSourceEmitter::emitSwitchCaseSelectorsImpl(IRBasicType *const /* switchCondition */, const SwitchRegion::Case *const currentCase, const bool isDefault)
+{
+    for(auto caseVal : currentCase->values)
+    {
+        m_writer->emit("case ");
+        emitOperand(caseVal, getInfo(EmitOp::General));
+        m_writer->emit(":\n");
+    }
+    if(isDefault)
+    {
+        m_writer->emit("default:\n");
+    }
 }
 
 void CLikeSourceEmitter::emitRegion(Region* inRegion)
@@ -3333,17 +3359,9 @@ void CLikeSourceEmitter::emitRegion(Region* inRegion)
                 auto defaultCase = switchRegion->defaultCase;
                 for(auto currentCase : switchRegion->cases)
                 {
-                    for(auto caseVal : currentCase->values)
-                    {
-                        m_writer->emit("case ");
-                        emitOperand(caseVal, getInfo(EmitOp::General));
-                        m_writer->emit(":\n");
-                    }
-                    if(currentCase.Ptr() == defaultCase)
-                    {
-                        m_writer->emit("default:\n");
-                    }
-
+                    const bool isDefault {currentCase.Ptr() == defaultCase};
+                    IRBasicType *const switchConditionType {as<IRBasicType>(switchRegion->getCondition()->getDataType())};
+                    emitSwitchCaseSelectors(switchConditionType, currentCase.Ptr(), isDefault);
                     m_writer->indent();
                     m_writer->emit("{\n");
                     m_writer->indent();
@@ -3449,9 +3467,16 @@ void CLikeSourceEmitter::emitSimpleFuncParamsImpl(IRFunc* func)
     m_writer->emit(")");
 }
 
-void CLikeSourceEmitter::emitSimpleFuncImpl(IRFunc* func)
+void CLikeSourceEmitter::emitFuncHeaderImpl(IRFunc* func)
 {
     auto resultType = func->getResultType();
+    auto name = getName(func);
+    emitType(resultType, name);
+    emitSimpleFuncParamsImpl(func);
+}
+
+void CLikeSourceEmitter::emitSimpleFuncImpl(IRFunc* func)
+{
 
     // Deal with decorations that need
     // to be emitted as attributes
@@ -3467,12 +3492,8 @@ void CLikeSourceEmitter::emitSimpleFuncImpl(IRFunc* func)
 
     emitFunctionPreambleImpl(func);
 
-    auto name = getName(func);
-
     emitFuncDecorations(func);
-
-    emitType(resultType, name);
-    emitSimpleFuncParamsImpl(func);
+    emitFuncHeader(func);
     emitSemantics(func);
 
     // TODO: encode declaration vs. definition
@@ -3520,7 +3541,7 @@ void CLikeSourceEmitter::emitParamTypeImpl(IRType* type, String const& name)
     {
         type = constRefType->getValueType();
     }
-
+    emitParamTypeModifier(type);
     emitType(type, name);
 }
 
@@ -3688,6 +3709,11 @@ void CLikeSourceEmitter::emitStruct(IRStructType* structType)
     m_writer->emit(";\n\n");
 }
 
+void CLikeSourceEmitter::emitStructDeclarationSeparatorImpl()
+{
+    m_writer->emit(";");
+}
+
 void CLikeSourceEmitter::emitStructDeclarationsBlock(IRStructType* structType, bool allowOffsetLayout)
 {
     m_writer->emit("\n{\n");
@@ -3716,11 +3742,13 @@ void CLikeSourceEmitter::emitStructDeclarationsBlock(IRStructType* structType, b
                 emitPackOffsetModifier(fieldKey, fieldType, packOffsetDecoration);
             }
         }
+        emitStructFieldAttributes(structType, ff);
         emitMemoryQualifiers(fieldKey);
         emitType(fieldType, getName(fieldKey));
         emitSemantics(fieldKey, allowOffsetLayout);
         emitPostDeclarationAttributesForType(fieldType);
-        m_writer->emit(";\n");
+        emitStructDeclarationSeparator();
+        m_writer->emit("\n");
     }
 
     m_writer->dedent();
@@ -3862,7 +3890,7 @@ void CLikeSourceEmitter::emitVarModifiers(IRVarLayout* layout, IRInst* varDecl, 
     if (!layout)
         return;
 
-    emitMatrixLayoutModifiersImpl(layout);
+    emitMatrixLayoutModifiersImpl(varType);
 
     // Target specific modifier output
     emitImageFormatModifierImpl(varDecl, varType);
@@ -3931,6 +3959,8 @@ void CLikeSourceEmitter::emitParameterGroup(IRGlobalParam* varDecl, IRUniformPar
     emitParameterGroupImpl(varDecl, type);
 }
 
+void CLikeSourceEmitter::emitVarKeywordImpl(IRType * /* type */, IRInst* /* varDecl */) {}
+
 void CLikeSourceEmitter::emitVar(IRVar* varDecl)
 {
     auto allocatedType = varDecl->getDataType();
@@ -3968,6 +3998,8 @@ void CLikeSourceEmitter::emitVar(IRVar* varDecl)
     }
 #endif
     emitRateQualifiersAndAddressSpace(varDecl);
+
+    emitVarKeyword(varType, varDecl);
 
     emitType(varType, getName(varDecl));
 
@@ -4099,6 +4131,7 @@ void CLikeSourceEmitter::emitGlobalVar(IRGlobalVar* varDecl)
     emitVarModifiers(layout, varDecl, varType);
 
     emitRateQualifiersAndAddressSpace(varDecl);
+    emitVarKeyword(varType, varDecl);
     emitType(varType, getName(varDecl));
 
     // TODO: These shouldn't be needed for ordinary
@@ -4172,11 +4205,15 @@ void CLikeSourceEmitter::emitGlobalParam(IRGlobalParam* varDecl)
     emitDecorationLayoutSemantics(varDecl, "register");
 
     emitRateQualifiersAndAddressSpace(varDecl);
+    emitVarKeyword(varType, varDecl);
     emitType(varType, getName(varDecl));
 
     emitSemantics(varDecl);
 
     emitLayoutSemantics(varDecl, "register");
+
+    // If the parameter has a default value, we may need to emit it.
+    emitGlobalParamDefaultVal(varDecl);
 
     // A shader parameter cannot have an initializer,
     // so we do need to consider emitting one here.

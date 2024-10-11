@@ -918,6 +918,51 @@ struct SPIRVEmitContext
     };
     Dictionary<ConstantValueKey<IRIntegerValue>, SpvInst*> m_spvIntConstants;
     Dictionary<ConstantValueKey<IRFloatingPointValue>, SpvInst*> m_spvFloatConstants;
+
+    // Get an SpvLiteralBits from an IRConstant.
+    SpvLiteralBits getLiteralBits(IRInst* type, IRInst* inst)
+    {
+        switch (type->getOp())
+        {
+        case kIROp_DoubleType:
+        {
+            if (auto fval = as<IRFloatLit>(inst))
+                return SpvLiteralBits::from64(DoubleAsInt64(fval->getValue()));
+            break;
+        }
+        case kIROp_HalfType:
+        {
+            if (auto fval = as<IRFloatLit>(inst))
+                return SpvLiteralBits::from32(uint32_t(FloatToHalf((float)fval->getValue())));
+            break;
+        }
+        case kIROp_FloatType:
+        {
+            if (auto fval = as<IRFloatLit>(inst))
+                return SpvLiteralBits::from32(FloatAsInt((float)fval->getValue()));
+            break;
+        }
+        case kIROp_Int64Type:
+        case kIROp_UInt64Type:
+#if SLANG_PTR_IS_64
+        case kIROp_PtrType:
+        case kIROp_UIntPtrType:
+#endif
+        {
+            if (auto val = as<IRIntLit>(inst))
+                return SpvLiteralBits::from64(uint64_t(val->getValue()));
+            break;
+        }
+        default:
+        {
+            if (auto val = as<IRIntLit>(inst))
+                return SpvLiteralBits::from32(uint32_t(val->getValue()));
+            break;
+        }
+        }
+        return SpvLiteralBits::from32(0);
+    }
+
     SpvInst* emitIntConstant(IRIntegerValue val, IRType* type, IRInst* inst = nullptr)
     {
         ConstantValueKey<IRIntegerValue> key;
@@ -1269,6 +1314,7 @@ struct SPIRVEmitContext
             return SpvStorageClassPhysicalStorageBuffer;
         case AddressSpace::Global:
         case AddressSpace::MetalObjectData:
+        case AddressSpace::SpecializationConstant:
             // msvc is limiting us from putting the UNEXPECTED macro here, so
             // just fall out
             ;
@@ -1613,6 +1659,12 @@ struct SPIRVEmitContext
                     arrayType,
                     SpvLiteralInteger::from32(stride));
                 return arrayType;
+            }
+        case kIROp_AtomicType:
+            {
+                auto result = ensureInst(as<IRAtomicType>(inst)->getElementType());
+                registerInst(inst, result);
+                return result;
             }
         case kIROp_SubpassInputType:
             return ensureSubpassInputType(inst, cast<IRSubpassInputType>(inst));
@@ -2403,9 +2455,88 @@ struct SPIRVEmitContext
         }
     }
 
+        /// Emit a specialization constant.
+    SpvInst* emitSpecializationConstant(IRGlobalParam* param, IRVarOffsetAttr* offset)
+    {
+        IRInst* defaultVal = nullptr;
+        if (auto defaultValDecor = param->findDecoration<IRDefaultValueDecoration>())
+        {
+            defaultVal = defaultValDecor->getOperand(0);
+        }
+        else
+        {
+            IRBuilder builder(param);
+            builder.setInsertBefore(param);
+            defaultVal = builder.emitDefaultConstruct(param->getDataType());
+        }
+
+        SpvInst* result = nullptr;
+        if (as<IRBoolType>(defaultVal->getDataType()))
+        {
+            bool value = false;
+            if (auto boolLit = as<IRBoolLit>(defaultVal))
+            {
+                value = boolLit->getValue();
+            }
+            if (value)
+            {
+                result = emitOpSpecConstantTrue(
+                    getSection(SpvLogicalSectionID::ConstantsAndTypes),
+                    param,
+                    param->getDataType());
+            }
+            else
+            {
+                result = emitOpSpecConstantFalse(
+                    getSection(SpvLogicalSectionID::ConstantsAndTypes),
+                    param,
+                    param->getDataType());
+            }
+        }
+        else if (auto type = as<IRBasicType>(defaultVal->getDataType()))
+        {
+            result = emitOpSpecConstant(
+                getSection(SpvLogicalSectionID::ConstantsAndTypes),
+                param,
+                param->getDataType(),
+                getLiteralBits(type, defaultVal));
+        }
+        else if (as<IRVectorType>(defaultVal->getDataType()))
+        {
+            List<IRInst*> operands;
+            auto makeVector = as<IRMakeVector>(defaultVal);
+            for (UInt i = 0; i < makeVector->getOperandCount(); i++)
+            {
+                operands.add(makeVector->getOperand(i));
+            }
+            result = emitOpSpecConstantComposite(
+                getSection(SpvLogicalSectionID::ConstantsAndTypes),
+                param,
+                param->getDataType(),
+                operands);
+        }
+
+        emitOpDecorateSpecId(
+            getSection(SpvLogicalSectionID::Annotations),
+            nullptr,
+            result,
+            SpvLiteralInteger::from32((uint32_t)offset->getOffset()));
+
+        maybeEmitName(result, param);
+        return result;
+    }
+
         /// Emit a global parameter definition.
     SpvInst* emitGlobalParam(IRGlobalParam* param)
     {
+        auto layout = getVarLayout(param);
+        if (layout)
+        {
+            if (auto offset = layout->findOffsetAttr(LayoutResourceKind::SpecializationConstant))
+            {
+                return emitSpecializationConstant(param, offset);
+            }
+        }
         auto storageClass = SpvStorageClassUniform;
         if (auto ptrType = as<IRPtrTypeBase>(param->getDataType()))
         {
@@ -2425,7 +2556,7 @@ struct SPIRVEmitContext
             storageClass
         );
         maybeEmitPointerDecoration(varInst, param);
-        if (auto layout = getVarLayout(param))
+        if (layout)
             emitVarLayout(param, varInst, layout);
         emitDecorations(param, getID(varInst));
         return varInst;
@@ -2733,6 +2864,115 @@ struct SPIRVEmitContext
     bool shouldEmitDiscardAsDemote()
     {
         return (isSpirv16OrLater() || m_useDemoteToHelperInvocationExtension);
+    }
+
+    SpvInst* emitMemorySemanticMask(IRInst* inst)
+    {
+        IRBuilder builder(inst);
+        auto memoryOrder = (IRMemoryOrder)getIntVal(inst);
+        switch (memoryOrder)
+        {
+        case kIRMemoryOrder_Relaxed:
+            return emitIntConstant(IRIntegerValue{ SpvMemorySemanticsMaskNone }, builder.getUIntType());
+        case kIRMemoryOrder_Acquire:
+            return emitIntConstant(IRIntegerValue{ SpvMemorySemanticsAcquireMask }, builder.getUIntType());
+        case kIRMemoryOrder_Release:
+            return emitIntConstant(IRIntegerValue{ SpvMemorySemanticsReleaseMask }, builder.getUIntType());
+        case kIRMemoryOrder_AcquireRelease:
+            return emitIntConstant(IRIntegerValue{ SpvMemorySemanticsAcquireReleaseMask }, builder.getUIntType());
+        case kIRMemoryOrder_SeqCst:
+            return emitIntConstant(IRIntegerValue{ SpvMemorySemanticsSequentiallyConsistentMask }, builder.getUIntType());
+        default:
+            SLANG_UNEXPECTED("unhandled memory order");
+            UNREACHABLE_RETURN(nullptr);
+        }
+    }
+
+    SpvOp getSpvAtomicOp(IRInst* atomicInst, bool& outNegateOperand)
+    {
+        auto typeSelect = [&](SpvOp sop, SpvOp uop, SpvOp fop)
+            {
+                auto scalarType = getVectorElementType(atomicInst->getDataType());
+                if (isIntegralType(scalarType))
+                {
+                    auto intInfo = getIntTypeInfo(scalarType);
+                    if (intInfo.isSigned)
+                        return sop;
+                    return uop;
+                }
+                return fop;
+            };
+        outNegateOperand = false;
+        switch (atomicInst->getOp())
+        {
+        case kIROp_AtomicAdd:
+            return typeSelect(SpvOpAtomicIAdd, SpvOpAtomicIAdd, SpvOpAtomicFAddEXT);
+        case kIROp_AtomicSub:
+            if (isFloatingType(getVectorElementType(atomicInst->getDataType())))
+                outNegateOperand = true;
+            return typeSelect(SpvOpAtomicISub, SpvOpAtomicISub, SpvOpAtomicFAddEXT);
+        case kIROp_AtomicMin:
+            return typeSelect(SpvOpAtomicSMin, SpvOpAtomicUMin, SpvOpAtomicFMinEXT);
+        case kIROp_AtomicMax:
+            return typeSelect(SpvOpAtomicSMax, SpvOpAtomicUMax, SpvOpAtomicFMaxEXT);
+        case kIROp_AtomicAnd:
+            return SpvOpAtomicAnd;
+        case kIROp_AtomicOr:
+            return SpvOpAtomicOr;
+        case kIROp_AtomicXor:
+            return SpvOpAtomicXor;
+        default:
+            SLANG_UNEXPECTED("unhandled atomic op");
+            UNREACHABLE_RETURN(SpvOpNop);
+        }
+    }
+
+    void ensureAtomicCapability(IRInst* atomicInst, SpvOp op)
+    {
+        switch (op)
+        {
+        case SpvOpAtomicFAddEXT:
+        {
+            auto typeOp = getVectorElementType(atomicInst->getDataType())->getOp();
+            switch (typeOp)
+            {
+            case kIROp_FloatType:
+                ensureExtensionDeclaration(toSlice("SPV_EXT_shader_atomic_float_add"));
+                requireSPIRVCapability(SpvCapabilityAtomicFloat32AddEXT);
+                break;
+            case kIROp_DoubleType:
+                ensureExtensionDeclaration(toSlice("SPV_EXT_shader_atomic_float_add"));
+                requireSPIRVCapability(SpvCapabilityAtomicFloat64AddEXT);
+                break;
+            case kIROp_HalfType:
+                ensureExtensionDeclaration(toSlice("SPV_EXT_shader_atomic_float16_add"));
+                requireSPIRVCapability(SpvCapabilityAtomicFloat16AddEXT);
+                break;
+            }
+        }
+        break;
+        case SpvOpAtomicFMinEXT:
+        case SpvOpAtomicFMaxEXT:
+        {
+            auto typeOp = getVectorElementType(atomicInst->getDataType())->getOp();
+            switch (typeOp)
+            {
+            case kIROp_FloatType:
+                ensureExtensionDeclaration(toSlice("SPV_EXT_shader_atomic_float_min_max"));
+                requireSPIRVCapability(SpvCapabilityAtomicFloat32MinMaxEXT);
+                break;
+            case kIROp_DoubleType:
+                ensureExtensionDeclaration(toSlice("SPV_EXT_shader_atomic_float_min_max"));
+                requireSPIRVCapability(SpvCapabilityAtomicFloat64MinMaxEXT);
+                break;
+            case kIROp_HalfType:
+                ensureExtensionDeclaration(toSlice("SPV_EXT_shader_atomic_float_min_max"));
+                requireSPIRVCapability(SpvCapabilityAtomicFloat16MinMaxEXT);
+                break;
+            }
+        }
+        break;
+        }
     }
 
     // The instructions that appear inside the basic blocks of
@@ -3075,20 +3315,80 @@ struct SPIRVEmitContext
         case kIROp_ImageSubscript:
             result = emitImageSubscript(parent, as<IRImageSubscript>(inst));
             break;
-        case kIROp_AtomicCounterIncrement:
+        case kIROp_AtomicInc:
             {
                 IRBuilder builder{inst};
-                const auto memoryScope =  emitIntConstant(IRIntegerValue{SpvScopeDevice}, builder.getUIntType());
-                const auto memorySemantics =  emitIntConstant(IRIntegerValue{SpvMemorySemanticsMaskNone}, builder.getUIntType());
+                const auto memoryScope = emitIntConstant(IRIntegerValue{SpvScopeDevice}, builder.getUIntType());
+                const auto memorySemantics = emitMemorySemanticMask(inst->getOperand(1));
                 result = emitOpAtomicIIncrement(parent, inst, inst->getFullType(), inst->getOperand(0), memoryScope, memorySemantics);
             }
             break;
-        case kIROp_AtomicCounterDecrement:
+        case kIROp_AtomicDec:
             {
-                IRBuilder builder{inst};
-                const auto memoryScope =  emitIntConstant(IRIntegerValue{SpvScopeDevice}, builder.getUIntType());
-                const auto memorySemantics =  emitIntConstant(IRIntegerValue{SpvMemorySemanticsMaskNone}, builder.getUIntType());
+                IRBuilder builder{ inst };
+                const auto memoryScope = emitIntConstant(IRIntegerValue{ SpvScopeDevice }, builder.getUIntType());
+                const auto memorySemantics = emitMemorySemanticMask(inst->getOperand(1));
                 result = emitOpAtomicIDecrement(parent, inst, inst->getFullType(), inst->getOperand(0), memoryScope, memorySemantics);
+            }
+            break;
+        case kIROp_AtomicLoad:
+            {
+                IRBuilder builder{ inst };
+                const auto memoryScope = emitIntConstant(IRIntegerValue{ SpvScopeDevice }, builder.getUIntType());
+                const auto memorySemantics = emitMemorySemanticMask(inst->getOperand(1));
+                result = emitOpAtomicLoad(parent, inst, inst->getFullType(), inst->getOperand(0), memoryScope, memorySemantics);
+            }
+            break;
+        case kIROp_AtomicStore:
+            {
+                IRBuilder builder{ inst };
+                const auto memoryScope = emitIntConstant(IRIntegerValue{ SpvScopeDevice }, builder.getUIntType());
+                const auto memorySemantics = emitMemorySemanticMask(inst->getOperand(2));
+                result = emitOpAtomicStore(parent, inst, inst->getOperand(0), memoryScope, memorySemantics, inst->getOperand(1));
+            }
+            break;
+        case kIROp_AtomicExchange:
+            {
+                IRBuilder builder{ inst };
+                const auto memoryScope = emitIntConstant(IRIntegerValue{ SpvScopeDevice }, builder.getUIntType());
+                const auto memorySemantics = emitMemorySemanticMask(inst->getOperand(2));
+                result = emitOpAtomicExchange(parent, inst, inst->getFullType(), inst->getOperand(0), memoryScope, memorySemantics, inst->getOperand(1));
+            }
+            break;
+        case kIROp_AtomicCompareExchange:
+            {
+                IRBuilder builder{ inst };
+                const auto memoryScope = emitIntConstant(IRIntegerValue{ SpvScopeDevice }, builder.getUIntType());
+                const auto memorySemanticsEqual = emitMemorySemanticMask(inst->getOperand(3));
+                const auto memorySemanticsUnequal = emitMemorySemanticMask(inst->getOperand(4));
+                result = emitOpAtomicCompareExchange(
+                    parent, inst, inst->getFullType(), inst->getOperand(0),
+                    memoryScope, memorySemanticsEqual, memorySemanticsUnequal,
+                    inst->getOperand(2), inst->getOperand(1));
+            }
+            break;
+        case kIROp_AtomicAdd:
+        case kIROp_AtomicSub:
+        case kIROp_AtomicMax:
+        case kIROp_AtomicMin:
+        case kIROp_AtomicAnd:
+        case kIROp_AtomicOr:
+        case kIROp_AtomicXor:
+            {
+                IRBuilder builder{ inst };
+                const auto memoryScope = emitIntConstant(IRIntegerValue{ SpvScopeDevice }, builder.getUIntType());
+                const auto memorySemantics = emitMemorySemanticMask(inst->getOperand(2));
+                bool negateOperand = false;
+                auto spvOp = getSpvAtomicOp(inst, negateOperand);
+                auto operand = inst->getOperand(1);
+                if (negateOperand)
+                {
+                    builder.setInsertBefore(inst);
+                    auto negatedOperand = builder.emitNeg(inst->getDataType(), operand);
+                    operand = negatedOperand;
+                }
+                result = emitOpAtomicOp(parent, inst, spvOp, inst->getFullType(), inst->getOperand(0), memoryScope, memorySemantics, operand);
+                ensureAtomicCapability(inst, spvOp);
             }
             break;
         case kIROp_ControlBarrier:
@@ -3419,8 +3719,20 @@ struct SPIRVEmitContext
                                     }
                                 }
                                 paramsSet.add(spvGlobalInst);
-                                params.add(spvGlobalInst);
                                 referencedBuiltinIRVars.add(globalInst);
+
+                                // Don't add a global param to the interface if it is a specialization constant.
+                                switch (spvGlobalInst->opcode)
+                                {
+                                case SpvOpSpecConstant:
+                                case SpvOpSpecConstantFalse:
+                                case SpvOpSpecConstantTrue:
+                                case SpvOpSpecConstantComposite:
+                                    break;
+                                default:
+                                    params.add(spvGlobalInst);
+                                    break;
+                                }
                             }
                         }
                         break;
@@ -3796,6 +4108,17 @@ struct SPIRVEmitContext
             }
             break;
         }
+        case kIROp_DownstreamModuleExportDecoration:
+        {
+            requireSPIRVCapability(SpvCapabilityLinkage);
+            auto name = decoration->getParent()->findDecoration<IRExportDecoration>()->getMangledName();
+            emitInst(getSection(SpvLogicalSectionID::Annotations),
+                decoration,
+                SpvOpDecorate,
+                dstID,
+            SpvDecorationLinkageAttributes, name, SpvLinkageTypeExport);
+            break;
+        }
         // ...
         }
 
@@ -3993,7 +4316,7 @@ struct SPIRVEmitContext
                 auto rule = IRTypeLayoutRules::get(layoutRuleName);
                 IRSizeAndAlignment elementSizeAlignment;
                 getSizeAndAlignment(m_targetProgram->getOptionSet(), rule, matrixType->getElementType(), &elementSizeAlignment);
-
+                IRIntegerValue matrixMinorVectorCount = 0;
                 // Reminder: the meaning of row/column major layout
                 // in our semantics is the *opposite* of what GLSL/SPIRV
                 // calls them, because what they call "columns"
@@ -4007,10 +4330,7 @@ struct SPIRVEmitContext
                         spvStructID,
                         SpvLiteralInteger::from32(id),
                         SpvDecorationRowMajor);
-
-                    auto vectorSize = rule->getVectorSizeAndAlignment(elementSizeAlignment, getIntVal(matrixType->getRowCount()));
-                    vectorSize = rule->alignCompositeElement(vectorSize);
-                    matrixStride = vectorSize.getStride();
+                    matrixMinorVectorCount = getIntVal(matrixType->getRowCount());
                 }
                 else
                 {
@@ -4020,12 +4340,15 @@ struct SPIRVEmitContext
                         spvStructID,
                         SpvLiteralInteger::from32(id),
                         SpvDecorationColMajor);
-
-                    auto vectorSize = rule->getVectorSizeAndAlignment(elementSizeAlignment, getIntVal(matrixType->getColumnCount()));
-                    vectorSize = rule->alignCompositeElement(vectorSize);
-                    matrixStride = vectorSize.getStride();
+                    matrixMinorVectorCount = getIntVal(matrixType->getColumnCount());
                 }
 
+                // We need the size of our vector. To get the stride we need to know how 'big'
+                // each vector element is inside an array, due to this we align our vector
+                // as if a composite.
+                auto vectorSize = rule->getVectorSizeAndAlignment(elementSizeAlignment, matrixMinorVectorCount);
+                vectorSize = rule->alignCompositeElement(vectorSize);
+                matrixStride = vectorSize.getStride();
                 emitOpMemberDecorateMatrixStride(
                     getSection(SpvLogicalSectionID::Annotations),
                     nullptr,
@@ -4435,7 +4758,7 @@ struct SPIRVEmitContext
                     getSection(SpvLogicalSectionID::Annotations),
                     nullptr,
                     varInst,
-                    (as<IRVar>(inst) ? SpvDecorationAliasedPointer : SpvDecorationAliased)
+                    (inst->getOp() == kIROp_GlobalVar || inst->getOp() == kIROp_Var ? SpvDecorationAliasedPointer : SpvDecorationAliased)
                 );
             }
         }
@@ -6710,12 +7033,27 @@ SlangResult emitSPIRVFromIR(
 #endif
 
     auto shouldPreserveParams = codeGenContext->getTargetProgram()->getOptionSet().getBoolOption(CompilerOptionName::PreserveParameters);
+    auto generateWholeProgram = codeGenContext->getTargetProgram()->getOptionSet().getBoolOption(CompilerOptionName::GenerateWholeProgram);
     for (auto inst : irModule->getGlobalInsts())
     {
         if (as<IRDebugSource>(inst))
+        {
             context.ensureInst(inst);
+        }
         if (shouldPreserveParams && as<IRGlobalParam>(inst))
+        {
             context.ensureInst(inst);
+        }
+        if (generateWholeProgram)
+        {
+            if (auto func = as<IRFunc>(inst))
+            {
+                if (func->findDecoration<IRDownstreamModuleExportDecoration>())
+                {
+                    context.ensureInst(inst);
+                }
+            }
+        }
     }
 
     // Emit source language info.

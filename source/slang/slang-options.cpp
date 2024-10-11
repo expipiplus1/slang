@@ -339,6 +339,7 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::InputFilesRemain, "--", nullptr, "Treat the rest of the command line as input files."},
         { OptionKind::ReportDownstreamTime, "-report-downstream-time", nullptr, "Reports the time spent in the downstream compiler." },
         { OptionKind::ReportPerfBenchmark, "-report-perf-benchmark", nullptr, "Reports compiler performance benchmark results." },
+        { OptionKind::ReportCheckpointIntermediates, "-report-checkpoint-intermediates", nullptr, "Reports information about checkpoint contexts used for reverse-mode automatic differentiation." },
         { OptionKind::SkipSPIRVValidation, "-skip-spirv-validation", nullptr, "Skips spirv validation." },
         { OptionKind::SourceEmbedStyle, "-source-embed-style", "-source-embed-style <source-embed-style>",
         "If source embedding is enabled, defines the style used. When enabled (with any style other than `none`), "
@@ -354,8 +355,6 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::DisableShortCircuit, "-disable-short-circuit", nullptr, "Disable short-circuiting for \"&&\" and \"||\" operations" },
         { OptionKind::UnscopedEnum, "-unscoped-enum", nullptr, "Treat enums types as unscoped by default."},
         { OptionKind::PreserveParameters, "-preserve-params", nullptr, "Preserve all resource parameters in the output code, even if they are not used by the shader."},
-        { OptionKind::EmbedDXIL, "-embed-dxil", nullptr,
-        "Embed DXIL into emitted slang-modules for faster linking" },
     };
 
     _addOptions(makeConstArrayView(generalOpts), options);
@@ -400,6 +399,7 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::GLSLForceScalarLayout,
          "-force-glsl-scalar-layout,-fvk-use-scalar-layout", nullptr,
          "Make data accessed through ConstantBuffer, ParameterBlock, StructuredBuffer, ByteAddressBuffer and general pointers follow the 'scalar' layout when targeting GLSL or SPIRV."},
+        { OptionKind::ForceDXLayout, "-fvk-use-dx-layout", nullptr, "Pack members using FXCs member packing rules when targeting GLSL or SPIRV." },
         { OptionKind::VulkanBindShift, vkShiftNames.getBuffer(), "-fvk-<vulkan-shift>-shift <N> <space>", 
         "For example '-fvk-b-shift <N> <space>' shifts by N the inferred binding numbers for all resources in 'b' registers of space <space>. "
         "For a resource attached with :register(bX, <space>) but not [vk::binding(...)], "
@@ -411,7 +411,9 @@ void initCommandOptions(CommandOptions& options)
         "* [DXC description](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/SPIR-V.rst#implicit-binding-number-assignment)\n" 
         "* [GLSL wiki](https://github.com/KhronosGroup/glslang/wiki/HLSL-FAQ#auto-mapped-binding-numbers)\n" },
         { OptionKind::VulkanBindGlobals, "-fvk-bind-globals", "-fvk-bind-globals <N> <descriptor-set>",
-        "Places the $Globals cbuffer at descriptor set <descriptor-set> and binding <N>."},
+        "Places the $Globals cbuffer at descriptor set <descriptor-set> and binding <N>.\n"
+        "It lets you specify the descriptor for the source at a certain register.\n"
+        "* [DXC description](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/SPIR-V.rst#implicit-binding-number-assignment)\n" },
         { OptionKind::VulkanInvertY, "-fvk-invert-y", nullptr, "Negates (additively inverts) SV_Position.y before writing to stage output."},
         { OptionKind::VulkanUseDxPositionW, "-fvk-use-dx-position-w", nullptr, "Reciprocates (multiplicatively inverts) SV_Position.w after reading from stage input. For use in fragment shaders only."},
         { OptionKind::VulkanUseEntryPointName, "-fvk-use-entrypoint-name", nullptr, "Uses the entrypoint name from the source instead of 'main' in the spirv output."},
@@ -423,11 +425,12 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::EmitSpirvViaGLSL, "-emit-spirv-via-glsl", nullptr,
         "Generate SPIR-V output by compiling generated GLSL with glslang" },
         { OptionKind::EmitSpirvDirectly, "-emit-spirv-directly", nullptr,
-        "Generate SPIR-V output direclty (default)" },
+        "Generate SPIR-V output directly (default)" },
         { OptionKind::SPIRVCoreGrammarJSON, "-spirv-core-grammar", nullptr,
         "A path to a specific spirv.core.grammar.json to use when generating SPIR-V output" },
         { OptionKind::IncompleteLibrary, "-incomplete-library", nullptr,
         "Allow generating code from incomplete libraries with unresolved external functions" },
+        { OptionKind::EmbedDownstreamIR, "-embed-downstream-ir", nullptr, "Embed downstream IR into emitted slang IR" },
     };
 
     _addOptions(makeConstArrayView(targetOpts), options);
@@ -701,8 +704,6 @@ struct OptionsParser
     void setProfile(RawTarget* rawTarget, Profile profile);
     void addCapabilityAtom(RawTarget* rawTarget, CapabilityName atom);
 
-    SlangResult addEmbeddedLibrary(const CodeGenTarget format, CompilerOptionName option);
-    
     void setFloatingPointMode(RawTarget* rawTarget, FloatingPointMode mode);
     
     SlangResult parse(
@@ -930,8 +931,9 @@ SlangSourceLanguage findSourceLanguageFromPath(const String& path, Stage& outImp
 
         { ".c",    SLANG_SOURCE_LANGUAGE_C,     SLANG_STAGE_NONE },
         { ".cpp",  SLANG_SOURCE_LANGUAGE_CPP,   SLANG_STAGE_NONE },
-        { ".cu",   SLANG_SOURCE_LANGUAGE_CUDA,  SLANG_STAGE_NONE }
+        { ".cu",   SLANG_SOURCE_LANGUAGE_CUDA,  SLANG_STAGE_NONE },
 
+        { ".wgsl", SLANG_SOURCE_LANGUAGE_WGSL, SLANG_STAGE_NONE },
     };
 
     for (Index i = 0; i < SLANG_COUNT_OF(entries); ++i)
@@ -1639,23 +1641,6 @@ SlangResult OptionsParser::_parseProfile(const CommandLineArg& arg)
     return SLANG_OK;
 }
 
-// Creates a target of the specified type whose output will be embedded as IR metadata
-SlangResult OptionsParser::addEmbeddedLibrary(const CodeGenTarget format, CompilerOptionName option)
-{
-    RawTarget rawTarget;
-    rawTarget.format = format;
-    // Silently allow redundant targets if it is the same as the last specified target.
-    if (m_rawTargets.getCount() == 0 || m_rawTargets.getLast().format != rawTarget.format)
-    {
-        m_rawTargets.add(rawTarget);
-    }
-
-    getCurrentTarget()->optionSet.add(option, true);
-    getCurrentTarget()->optionSet.add(CompilerOptionName::GenerateWholeProgram, true);
-
-    return SLANG_OK;
-}
-
 SlangResult OptionsParser::_parse(
     int             argc,
     char const* const* argv)
@@ -1720,6 +1705,7 @@ SlangResult OptionsParser::_parse(
             case OptionKind::DumpReproOnError:
             case OptionKind::ReportDownstreamTime:
             case OptionKind::ReportPerfBenchmark:
+            case OptionKind::ReportCheckpointIntermediates:
             case OptionKind::SkipSPIRVValidation:
             case OptionKind::DisableSpecialization:
             case OptionKind::DisableDynamicDispatch:
@@ -1947,7 +1933,11 @@ SlangResult OptionsParser::_parse(
                 linkage->m_optionSet.set(optionKind, compressionType);
                 break;
             }
-            case OptionKind::EmbedDXIL: SLANG_RETURN_ON_FAIL(addEmbeddedLibrary(CodeGenTarget::DXIL, CompilerOptionName::EmbedDXIL)); break;
+            case OptionKind::EmbedDownstreamIR:
+            {
+                getCurrentTarget()->optionSet.add(CompilerOptionName::EmbedDownstreamIR, true);
+                break;
+            }
             case OptionKind::Target:
             {
                 CommandLineArg name;
@@ -2052,6 +2042,11 @@ SlangResult OptionsParser::_parse(
             case OptionKind::GLSLForceScalarLayout:
             {
                 getCurrentTarget()->optionSet.add(CompilerOptionName::GLSLForceScalarLayout, true);
+                break;
+            }
+            case OptionKind::ForceDXLayout:
+            {
+                getCurrentTarget()->optionSet.add(CompilerOptionName::ForceDXLayout, true);
                 break;
             }
             case OptionKind::EnableEffectAnnotations:
@@ -2780,15 +2775,21 @@ SlangResult OptionsParser::_parse(
                 m_compileRequest->setTargetForceGLSLScalarBufferLayout(targetID, true);
             }
 
+            if (rawTarget.optionSet.shouldUseDXLayout())
+            {
+                m_compileRequest->setTargetForceDXLayout(targetID, true);
+            }
+
             if (rawTarget.optionSet.getBoolOption(CompilerOptionName::GenerateWholeProgram))
             {
                 m_compileRequest->setTargetGenerateWholeProgram(targetID, true);
             }
 
-            if (rawTarget.optionSet.getBoolOption(CompilerOptionName::EmbedDXIL))
+            if (rawTarget.optionSet.getBoolOption(CompilerOptionName::EmbedDownstreamIR))
             {
-                m_compileRequest->setTargetEmbedDXIL(targetID, true);
+                m_compileRequest->setTargetEmbedDownstreamIR(targetID, true);
             }
+
         }
 
         // Next we need to sort out the output files specified with `-o`, and

@@ -34,6 +34,7 @@ namespace SlangRecord
         CASE(SLANG_METAL_LIB);
         CASE(SLANG_METAL_LIB_ASM);
         CASE(SLANG_HOST_SHARED_LIBRARY);
+        CASE(SLANG_WGSL);
         CASE(SLANG_TARGET_COUNT_OF);
         default:
             Slang::StringBuilder str;
@@ -148,6 +149,7 @@ namespace SlangRecord
         CASE(EmitIr);
         CASE(ReportDownstreamTime);
         CASE(ReportPerfBenchmark);
+        CASE(ReportCheckpointIntermediates);
         CASE(SkipSPIRVValidation);
         CASE(SourceEmbedStyle);
         CASE(SourceEmbedName);
@@ -175,6 +177,7 @@ namespace SlangRecord
         CASE(VulkanUseGLLayout);
         CASE(VulkanEmitReflection);
         CASE(GLSLForceScalarLayout);
+        CASE(ForceDXLayout);
         CASE(EnableEffectAnnotations);
         CASE(EmitSpirvViaGLSL);
         CASE(EmitSpirvDirectly);
@@ -387,24 +390,6 @@ namespace SlangRecord
             return str.toString();
         }
     }
-    // enum SlangStage : SlangStageIntegral
-    // {
-    //     SLANG_STAGE_NONE,
-    //     SLANG_STAGE_VERTEX,
-    //     SLANG_STAGE_HULL,
-    //     SLANG_STAGE_DOMAIN,
-    //     SLANG_STAGE_GEOMETRY,
-    //     SLANG_STAGE_FRAGMENT,
-    //     SLANG_STAGE_COMPUTE,
-    //     SLANG_STAGE_RAY_GENERATION,
-    //     SLANG_STAGE_INTERSECTION,
-    //     SLANG_STAGE_ANY_HIT,
-    //     SLANG_STAGE_CLOSEST_HIT,
-    //     SLANG_STAGE_MISS,
-    //     SLANG_STAGE_CALLABLE,
-    //     SLANG_STAGE_MESH,
-    //     SLANG_STAGE_AMPLIFICATION,
-    // };
 
     static Slang::String SlangStageToString(const SlangStage stage)
     {
@@ -433,5 +418,22 @@ namespace SlangRecord
             return str.toString();
         }
 #undef CASE
+    }
+
+    static Slang::String ContainerTypeToString(const slang::ContainerType type)
+    {
+        using namespace slang;
+        switch(type)
+        {
+        case ContainerType::None: return "None";
+        case ContainerType::UnsizedArray: return "UnsizedArray";
+        case ContainerType::StructuredBuffer: return "StructuredBuffer";
+        case ContainerType::ConstantBuffer: return "ConstantBuffer";
+        case ContainerType::ParameterBlock: return "ParameterBlock";
+        default:
+            Slang::StringBuilder str;
+            str << "Unknown ContainerType: " << static_cast<uint32_t>(type);
+            return str.toString();
+        }
     }
 }

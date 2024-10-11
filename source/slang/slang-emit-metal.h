@@ -26,6 +26,7 @@ protected:
 
     void ensurePrelude(const char* preludeText);
 
+    void emitMemoryOrderOperand(IRInst* inst);
     virtual void emitParameterGroupImpl(IRGlobalParam* varDecl, IRUniformParameterGroupType* type) SLANG_OVERRIDE;
     virtual void emitEntryPointAttributesImpl(IRFunc* irFunc, IREntryPointDecoration* entryPointDecor) SLANG_OVERRIDE;
     
@@ -44,7 +45,7 @@ protected:
     virtual void emitParamTypeImpl(IRType* type, String const& name) SLANG_OVERRIDE;
     virtual void emitVectorTypeNameImpl(IRType* elementType, IRIntegerValue elementCount) SLANG_OVERRIDE;
     virtual void emitVarDecorationsImpl(IRInst* varDecl) SLANG_OVERRIDE;
-    virtual void emitMatrixLayoutModifiersImpl(IRVarLayout* layout) SLANG_OVERRIDE;
+    virtual void emitMatrixLayoutModifiersImpl(IRType* varType) SLANG_OVERRIDE;
 
     virtual bool tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOuterPrec) SLANG_OVERRIDE;
     virtual bool tryEmitInstStmtImpl(IRInst* inst) SLANG_OVERRIDE;

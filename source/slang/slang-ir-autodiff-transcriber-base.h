@@ -91,11 +91,7 @@ struct AutoDiffTranscriberBase
 
     void maybeMigrateDifferentiableDictionaryFromDerivativeFunc(IRBuilder* builder, IRInst* origFunc);
 
-    // Get or construct `:IDifferentiable` conformance for a DifferentiablePair.
-    IRWitnessTable* getDifferentialPairWitness(IRBuilder* builder, IRInst* inOriginalDiffPairType, IRInst* inPrimalDiffPairType);
-    IRWitnessTable* getArrayWitness(IRBuilder* builder, IRInst* inOriginalArrayType, IRInst* inPrimalArrayType);
-
-    IRInst* tryGetDifferentiableWitness(IRBuilder* builder, IRInst* originalType);
+    IRInst* tryGetDifferentiableWitness(IRBuilder* builder, IRInst* originalType, DiffConformanceKind kind);
 
     IRType* getOrCreateDiffPairType(IRBuilder* builder, IRInst* primalType, IRInst* witness);
 
@@ -156,6 +152,10 @@ struct AutoDiffTranscriberBase
     virtual InstPair transcribeInstImpl(IRBuilder* builder, IRInst* origInst) = 0;
 
     virtual IROp getInterfaceRequirementDerivativeDecorationOp() = 0;
+
+    void markDiffTypeInst(IRBuilder* builder, IRInst* inst, IRType* primalType);
+
+    void markDiffPairTypeInst(IRBuilder* builder, IRInst* inst, IRType* primalType);
 };
 
 }

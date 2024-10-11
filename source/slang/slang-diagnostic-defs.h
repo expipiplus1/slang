@@ -283,6 +283,7 @@ DIAGNOSTIC(30012, Error, noApplicationUnaryOperator, "no overload found for oper
 DIAGNOSTIC(30012, Error, noOverloadFoundForBinOperatorOnTypes, "no overload found for operator $0  ($1, $2).")
 DIAGNOSTIC(30013, Error, subscriptNonArray, "no subscript operation found for type '$0'")
 DIAGNOSTIC(30014, Error, subscriptIndexNonInteger, "index expression must evaluate to int.")
+DIAGNOSTIC(30016, Error, callOperatorNotFound, "no call operation found for type '$0'")
 DIAGNOSTIC(30015, Error, undefinedIdentifier2, "undefined identifier '$0'.")
 DIAGNOSTIC(30019, Error, typeMismatch, "expected an expression of type '$0', got '$1'")
 DIAGNOSTIC(30021, Error, noApplicationFunction, "$0: no overload takes arguments ($1)")
@@ -328,6 +329,7 @@ DIAGNOSTIC(30068, Warning, mutatingMethodOnFunctionInputParameterWarning, "mutat
 
 DIAGNOSTIC(30070, Error, unsizedMemberMustAppearLast, "member with unknown size at compile time can only appear as the last member in a composite type.")
 DIAGNOSTIC(30071, Error, varCannotBeUnsized, "cannot instantiate a variable of unsized type.")
+DIAGNOSTIC(30072, Error, paramCannotBeUnsized, "function parameter cannot be unsized.")
 
 DIAGNOSTIC(30075, Error, cannotSpecializeGeneric, "cannot specialize generic '$0' with the provided arguments.")
 
@@ -389,8 +391,8 @@ DIAGNOSTIC(30604, Error, useOfLessVisibleType, "'$0' references less visible typ
 DIAGNOSTIC(36005, Error, invalidVisibilityModifierOnTypeOfDecl, "visibility modifier is not allowed on '$0'.")
 
 // Capability
-DIAGNOSTIC(36100, Error, conflictingCapabilityDueToUseOfDecl, "'$0' requires capability '$1' that is conflicting with the '$2''s current capability requirement '$3'.")
-DIAGNOSTIC(36101, Error, conflictingCapabilityDueToStatement, "statement requires capability '$0' that is conflicting with the '$1''s current capability requirement '$2'.")
+DIAGNOSTIC(36100, Error, conflictingCapabilityDueToUseOfDecl, "'$0' requires capability '$1' that is conflicting with the '$2's current capability requirement '$3'.")
+DIAGNOSTIC(36101, Error, conflictingCapabilityDueToStatement, "statement requires capability '$0' that is conflicting with the '$1's current capability requirement '$2'.")
 DIAGNOSTIC(36102, Error, conflictingCapabilityDueToStatementEnclosingFunc, "statement requires capability '$0' that is conflicting with the current function's capability requirement '$1'.")
 DIAGNOSTIC(36103, Warning, missingCapabilityRequirementOnPublicDecl, "public symbol '$0' is missing capability requirement declaration, the symbol is assumed to require inferred capabilities '$1'.")
 DIAGNOSTIC(36104, Error, useOfUndeclaredCapability, "'$0' uses undeclared capability '$1'.")
@@ -403,9 +405,10 @@ DIAGNOSTIC(36109, Error, invalidTargetSwitchCase, "'$0' cannot be used as a targ
 DIAGNOSTIC(36110, Error, stageIsIncompatibleWithCapabilityDefinition, "'$0' is defined for stage '$1', which is incompatible with the declared capability set '$2'.")
 DIAGNOSTIC(36111, Error, unexpectedCapability, "'$0' resolves into a disallowed `$1` Capability.")
 DIAGNOSTIC(36112, Warning, entryPointAndProfileAreIncompatible, "'$0' is defined for stage '$1', which is incompatible with the declared profile '$2'.")
-DIAGNOSTIC(36113, Warning, usingInternalCapabilityName, "'$0' resolves into a '_Internal' `_$1' Capability, use '$1' instead.")
+DIAGNOSTIC(36113, Warning, usingInternalCapabilityName, "'$0' resolves into a '_Internal' '_$1' Capability, use '$1' instead.")
 DIAGNOSTIC(36114, Warning, incompatibleWithPrecompileLib, "Precompiled library requires '$0', has `$1`, implicitly upgrading capabilities.")
 DIAGNOSTIC(36115, Error, incompatibleWithPrecompileLibRestrictive, "Precompiled library requires '$0', has `$1`.")
+DIAGNOSTIC(36116, Error, capabilityHasMultipleStages, "Capability '$0' is targeting stages '$1', only allowed to use 1 unique stage here.")
 
 
 // Attributes
@@ -461,8 +464,11 @@ DIAGNOSTIC(31151, Error, cannotResolveGenericArgumentForDerivativeFunction,
     "[BackwardDerivativeOf], and [PrimalSubstituteOf] attributes are not supported when the generic arguments to the derivatives cannot be automatically deduced.")
 DIAGNOSTIC(31152, Error, cannotAssociateInterfaceRequirementWithDerivative, "cannot associate an interface requirement with a derivative.")
 DIAGNOSTIC(31153, Error, cannotUseInterfaceRequirementAsDerivative, "cannot use an interface requirement as a derivative.")
-DIAGNOSTIC(31154, Error, customDerivativeSignatureThisParamMismatch, "custom derivative does not match expected signature on `this`. Either both the original and the derivative function are static, or they must have the same `this` type.")
+DIAGNOSTIC(31154, Error, customDerivativeSignatureThisParamMismatch, "custom derivative does not match expected signature on `this`. Both original and derivative function must have the same `this` type.")
 DIAGNOSTIC(31155, Error, customDerivativeNotAllowedForMemberFunctionsOfDifferentiableType, "custom derivative is not allowed for non-static member functions of a differentiable type.")
+DIAGNOSTIC(31156, Error, customDerivativeExpectedStatic, "expected a static definition for the custom derivative.")
+DIAGNOSTIC(31157, Error, overloadedFuncUsedWithDerivativeOfAttributes, "cannot resolve overloaded functions for derivative-of attributes.")
+
 DIAGNOSTIC(31200, Warning, deprecatedUsage, "$0 has been deprecated: $1")
 DIAGNOSTIC(31201, Error, modifierNotAllowed, "modifier '$0' is not allowed here.")
 DIAGNOSTIC(31202, Error, duplicateModifier, "modifier '$0' is redundant or conflicting with existing modifier '$1'")
@@ -517,6 +523,7 @@ DIAGNOSTIC(39901, Fatal , cannotProcessInclude, "internal compiler error: cannot
 // 304xx: generics
 DIAGNOSTIC(30400, Error, genericTypeNeedsArgs, "generic type '$0' used without argument")
 DIAGNOSTIC(30401, Error, invalidTypeForConstraint, "type '$0' cannot be used as a constraint.")
+DIAGNOSTIC(30402, Error, invalidConstraintSubType, "type '$0' is not a valid left hand side of a type constraint.")
 
 // 305xx: initializer lists
 DIAGNOSTIC(30500, Error, tooManyInitializers, "too many initializers (expected $0, got $1)")
@@ -540,6 +547,7 @@ DIAGNOSTIC(30811, Error, baseOfStructMustBeStructOrInterface, "struct '$0' canno
 DIAGNOSTIC(30812, Error, baseOfEnumMustBeIntegerOrInterface, "enum '$0' cannot inherit from type '$1' that is neither an interface not a builtin integer type")
 DIAGNOSTIC(30813, Error, baseOfExtensionMustBeInterface, "extension cannot inherit from non-interface type '$1'")
 DIAGNOSTIC(30814, Error, baseOfClassMustBeClassOrInterface, "class '$0' cannot inherit from type '$1' that is neither a class nor an interface")
+DIAGNOSTIC(30815, Error, circularityInExtension, "circular extension is not allowed.")
 
 DIAGNOSTIC(30820, Error, baseStructMustBeListedFirst, "a struct type may only inherit from one other struct type, and that type must appear first in the list of bases")
 DIAGNOSTIC(30821, Error, tagTypeMustBeListedFirst, "an unum type may only have a single tag type, and that type must be listed first in the list of bases")
@@ -550,7 +558,8 @@ DIAGNOSTIC(30831, Error, cannotInheritFromImplicitlySealedDeclarationInAnotherMo
 DIAGNOSTIC(30832, Error, invalidTypeForInheritance, "type '$0' cannot be used for inheritance")
 
 DIAGNOSTIC(30850, Error, invalidExtensionOnType, "type '$0' cannot be extended. `extension` can only be used to extend a nominal type.")
-DIAGNOSTIC(30851, Error, invalidMemberTypeInExtension, "$0 cannot be apart of an `extension`")
+DIAGNOSTIC(30851, Error, invalidMemberTypeInExtension, "$0 cannot be a part of an `extension`")
+DIAGNOSTIC(30852, Error, invalidExtensionOnInterface, "cannot extend interface type '$0'. consider using a generic extension: `extension<T:$0> T {...}`.")
 
 // 309xx: subscripts
 DIAGNOSTIC(30900, Error, multiDimensionalArrayNotSupported, "multi-dimensional array is not supported.")
@@ -785,6 +794,8 @@ DIAGNOSTIC(41904, Error, unableToAlignOf, "alignof could not be performed for ty
 
 DIAGNOSTIC(42001, Error, invalidUseOfTorchTensorTypeInDeviceFunc, "invalid use of TorchTensor type in device/kernel functions. use `TensorView` instead.")
 
+DIAGNOSTIC(42050, Warning, potentialIssuesWithPreferRecomputeOnSideEffectMethod, "$0 has [PreferRecompute] and may have side effects. side effects may execute multiple times. use [PreferRecompute(SideEffectBehavior.Allow)], or mark function with [__NoSideEffect]")
+
 DIAGNOSTIC(45001, Error, unresolvedSymbol, "unresolved external symbol '$0'.")
 
 DIAGNOSTIC(41201, Warning, expectDynamicUniformArgument, "argument for '$0' might not be a dynamic uniform, use `asDynamicUniform()` to silence this warning.")
@@ -887,6 +898,15 @@ DIAGNOSTIC(58001, Error, entryPointMustReturnVoidWhenGlobalOutputPresent, "entry
 DIAGNOSTIC(58002, Error, unhandledGLSLSSBOType, "Unhandled GLSL Shader Storage Buffer Object contents, unsized arrays as a final parameter must be the only parameter")
 
 DIAGNOSTIC(58003, Error, inconsistentPointerAddressSpace, "'$0': use of pointer with inconsistent address space.")
+
+// Autodiff checkpoint reporting
+DIAGNOSTIC(-1, Note, reportCheckpointIntermediates, "checkpointing context of $1 bytes associated with function: '$0'")
+DIAGNOSTIC(-1, Note, reportCheckpointVariable, "$0 bytes ($1) used to checkpoint the following item:")
+DIAGNOSTIC(-1, Note, reportCheckpointCounter, "$0 bytes ($1) used for a loop counter here:")
+DIAGNOSTIC(-1, Note, reportCheckpointNone, "no checkpoint contexts to report")
+
+// 9xxxx - Documentation generation
+DIAGNOSTIC(90001, Warning, ignoredDocumentationOnOverloadCandidate, "documentation comment on overload candidate '$0' is ignored")
 
 //
 // 8xxxx - Issues specific to a particular library/technology/platform/etc.

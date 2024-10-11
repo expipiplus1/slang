@@ -16,6 +16,7 @@
 .gdb_history
 .vimspector
 .vimspector.json
+compile_commands.json
 
 bin/
 intermediate/
@@ -66,6 +67,7 @@ prelude/*.h.cpp
 /docs/_site
 /docs/Gemfile.lock
 /docs/Gemfile
+/docs/stdlib-reference
 /source/slang/slang-stdlib-generated.h
 
 /examples/heterogeneous-hello-world/shader.cpp
@@ -86,3 +88,8 @@ vkd3d-proton.cache
 vkd3d-proton.cache.write
 *_d3d11.log
 *_dxgi.log
+
+# Vim temporary files
+*~
+.*.swp
+.*.swo

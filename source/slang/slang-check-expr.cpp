@@ -326,10 +326,11 @@ namespace Slang
     }
 
     DeclRefExpr* SemanticsVisitor::ConstructDeclRefExpr(
-        DeclRef<Decl>   declRef,
-        Expr*    baseExpr,
+        DeclRef<Decl> declRef,
+        Expr* baseExpr,
+        Name* name,
         SourceLoc loc,
-        Expr*    originalExpr)
+        Expr* originalExpr)
     {
         // Compute the type that this declaration reference will have in context.
         //
@@ -382,7 +383,7 @@ namespace Slang
                 expr->loc = loc;
                 expr->type = type;
                 expr->baseExpression = baseExpr;
-                expr->name = declRef.getName();
+                expr->name = name;
                 expr->declRef = declRef;
                 expr->memberOperatorLoc = _getMemberOpLoc(originalExpr);
                 return expr;
@@ -399,7 +400,7 @@ namespace Slang
                 expr->loc = loc;
                 expr->type = type;
                 expr->baseExpression = baseTypeExpr;
-                expr->name = declRef.getName();
+                expr->name = name;
                 expr->declRef = declRef;
                 expr->memberOperatorLoc = _getMemberOpLoc(originalExpr);
                 return expr;
@@ -413,7 +414,7 @@ namespace Slang
                 expr->loc = loc;
                 expr->type = type;
                 expr->baseExpression = baseExpr;
-                expr->name = declRef.getName();
+                expr->name = name;
                 expr->declRef = declRef;
                 expr->memberOperatorLoc = _getMemberOpLoc(originalExpr);
 
@@ -435,6 +436,26 @@ namespace Slang
                     // of a GLSL buffer interface block which isn't marked as
                     // read_only
                     expr->type.isLeftValue = isMutableGLSLBufferBlockVarExpr(baseExpr) && (expr->type.hasReadOnlyOnTarget == false);
+
+                    // Another exception is if we are accessing a property
+                    // that provides a [nonmutating] setter.
+                    if (!expr->type.isLeftValue &&
+                        as<PropertyDecl>(declRef.getDecl()))
+                    {
+                        bool isLValue = false;
+                        for (auto member : as<ContainerDecl>(declRef.getDecl())->members)
+                        {
+                            if (as<SetterDecl>(member) || as< RefAccessorDecl>(member))
+                            {
+                                if (member->findModifier<NonmutatingAttribute>())
+                                {
+                                    isLValue = true;
+                                }
+                                break;
+                            }
+                        }
+                        expr->type.isLeftValue = isLValue;
+                    }
                 }
                 else
                 {
@@ -464,7 +485,7 @@ namespace Slang
             //
             auto expr = m_astBuilder->create<VarExpr>();
             expr->loc = loc;
-            expr->name = declRef.getName();
+            expr->name = name;
             expr->type = type;
             expr->declRef = declRef;
             // Keep a reference to the original expr if it was a genericApp/member.
@@ -666,13 +687,15 @@ namespace Slang
         return ConstructDeclRefExpr(
             synthDeclMemberRef,
             nullptr,
+            item.declRef.getName(),
             originalExpr ? originalExpr->loc : SourceLoc(),
             originalExpr);
     }
 
     Expr* SemanticsVisitor::ConstructLookupResultExpr(
         LookupResultItem const& item,
-        Expr*            baseExpr,
+        Expr* baseExpr,
+        Name* name,
         SourceLoc loc,
         Expr* originalExpr)
     {
@@ -696,7 +719,7 @@ namespace Slang
             switch (breadcrumb->kind)
             {
             case LookupResultItem::Breadcrumb::Kind::Member:
-                bb = ConstructDeclRefExpr(breadcrumb->declRef, bb, loc, originalExpr);
+                bb = ConstructDeclRefExpr(breadcrumb->declRef, bb, name, loc, originalExpr);
                 break;
 
             case LookupResultItem::Breadcrumb::Kind::Deref:
@@ -827,7 +850,7 @@ namespace Slang
             }
         }
 
-        return ConstructDeclRefExpr(item.declRef, bb, loc, originalExpr);
+        return ConstructDeclRefExpr(item.declRef, bb, name, loc, originalExpr);
     }
 
     void SemanticsVisitor::suggestCompletionItems(
@@ -844,9 +867,9 @@ namespace Slang
 
 
     Expr* SemanticsVisitor::createLookupResultExpr(
-        Name*                   name,
-        LookupResult const&     lookupResult,
-        Expr*            baseExpr,
+        Name* name,
+        LookupResult const& lookupResult,
+        Expr* baseExpr,
         SourceLoc loc,
         Expr* originalExpr)
     {
@@ -864,7 +887,7 @@ namespace Slang
         }
         else
         {
-            return ConstructLookupResultExpr(lookupResult.item, baseExpr, loc, originalExpr);
+            return ConstructLookupResultExpr(lookupResult.item, baseExpr, name, loc, originalExpr);
         }
     }
 
@@ -1058,7 +1081,7 @@ namespace Slang
             // expression.
             //
             return ConstructLookupResultExpr(
-                lookupResult.item, overloadedExpr->base, overloadedExpr->loc, overloadedExpr);
+                lookupResult.item, overloadedExpr->base, overloadedExpr->name, overloadedExpr->loc, overloadedExpr);
         }
 
         // Otherwise, we weren't able to resolve the overloading given
@@ -1128,7 +1151,8 @@ namespace Slang
         {
             if (auto builtinRequirement = declRefType->getDeclRef().getDecl()->findModifier<BuiltinRequirementModifier>())
             {
-                if (builtinRequirement->kind == BuiltinRequirementKind::DifferentialType)
+                if (builtinRequirement->kind == BuiltinRequirementKind::DifferentialType
+                    || builtinRequirement->kind == BuiltinRequirementKind::DifferentialPtrType)
                 {
                     // We are trying to get differential type from a differential type.
                     // The result is itself.
@@ -1136,7 +1160,10 @@ namespace Slang
                 }
             }
             type = resolveType(type);
-            if (const auto witness = as<SubtypeWitness>(tryGetInterfaceConformanceWitness(type, builder->getDifferentiableInterfaceType())))
+            auto witness = as<SubtypeWitness>(tryGetInterfaceConformanceWitness(type, builder->getDifferentiableInterfaceType()));
+            if (!witness)
+                witness = as<SubtypeWitness>(tryGetInterfaceConformanceWitness(type, builder->getDifferentiableRefInterfaceType()));
+            if (witness)
             {
                 auto diffTypeLookupResult = lookUpMember(
                     getASTBuilder(),
@@ -1166,6 +1193,7 @@ namespace Slang
                     auto diffTypeExpr = ConstructLookupResultExpr(
                         diffTypeLookupResult.item,
                         baseTypeExpr,
+                        declRefType->getDeclRef().getName(),
                         declRefType->getDeclRef().getLoc(),
                         baseTypeExpr);
 
@@ -1174,6 +1202,23 @@ namespace Slang
             }
         }
 
+        if (auto typePack = as<ConcreteTypePack>(type))
+        {
+            bool anyDifferentiableElement = false;
+            List<Type*> diffTypes;
+            for (Index i = 0; i < typePack->getTypeCount(); i++)
+            {
+                auto t = typePack->getElementType(i);
+                auto diffType = tryGetDifferentialType(builder, t);
+                if (!diffType)
+                    diffType = m_astBuilder->getVoidType();
+                else
+                    anyDifferentiableElement = true;
+                diffTypes.add(diffType);
+            }
+            if (anyDifferentiableElement)
+                return builder->getTypePack(diffTypes.getArrayView());
+        }
         return nullptr;
     }
 
@@ -1346,6 +1391,13 @@ namespace Slang
             {
                 addDifferentiableTypeToDiffTypeRegistry((DeclRefType*)type, subtypeWitness);
             }
+
+            if (auto subtypeWitness = as<SubtypeWitness>(
+                tryGetInterfaceConformanceWitness(type, getASTBuilder()->getDifferentiableRefInterfaceType())))
+            {
+                addDifferentiableTypeToDiffTypeRegistry((DeclRefType*)type, subtypeWitness);
+            }
+
             if (auto aggTypeDeclRef = declRefType->getDeclRef().as<AggTypeDecl>())
             {
                 foreachDirectOrExtensionMemberOfType<InheritanceDecl>(this, aggTypeDeclRef, [&](DeclRef<InheritanceDecl> member)
@@ -1368,12 +1420,27 @@ namespace Slang
                 });
             return;
         }
+
+        if (auto typePack = as<ConcreteTypePack>(type))
+        {
+            for (Index i = 0; i < typePack->getTypeCount(); i++)
+                maybeRegisterDifferentiableTypeImplRecursive(builder, typePack->getElementType(i));
+            return;
+        }
     }
 
 
     Expr* SemanticsVisitor::CheckTerm(Expr* term)
     {
+        // If we have already checked the expr, don't check again.
+        if (term->checked)
+        {
+            return term;
+        }
+        
         auto checkedTerm = _CheckTerm(term);
+        checkedTerm->checked = true;
+
         // Differentiable type checking.
         // TODO: This can be super slow.
         if (this->m_parentFunc &&
@@ -1954,8 +2021,58 @@ namespace Slang
             // We can return as an IntVal
             return getASTBuilder()->getIntVal(expr.getExpr()->type, value);
         }
-        
+        else if (auto indexExpr = expr.as<IndexExpr>())
+        {
+            return tryFoldIndexExpr(indexExpr.getExpr(), kind, circularityInfo);
+        }
         return nullptr;
+    }
+
+    IntVal* SemanticsVisitor::tryFoldIndexExpr(
+        SubstExpr<IndexExpr>            expr,
+        ConstantFoldingKind             kind,
+        ConstantFoldingCircularityInfo* circularityInfo)
+    {
+        // Ad-hoc constant folding for index expressions.
+        // TOOD: we should generalize this by extending `Val` to support compile-time constants that are
+        // not just integers, but also arrays and structs etc, so that we can independently fold
+        // the base expression and the index expression, and then form a ElementExtractVal() from an
+        // index expr.
+        // For now we just specialize case for array expression that is an initialization list.
+        // And this won't work if the array is a link-time constant.
+        //
+        auto declRefExpr = as<DeclRefExpr>(expr.getExpr()->baseExpression);
+        if (!declRefExpr)
+            return nullptr;
+        auto varDecl = as<VarDecl>(declRefExpr->declRef.getDecl());
+        if (!varDecl)
+            return nullptr;
+        auto type = varDecl->getType();
+        if (!type)
+            return nullptr;
+        auto arrayType = as<ArrayExpressionType>(type);
+        if (!arrayType)
+            return nullptr;
+        if (!varDecl->hasModifier<ConstModifier>())
+            return nullptr;
+        if (isGlobalDecl(varDecl) && !varDecl->hasModifier<HLSLStaticModifier>())
+            return nullptr;
+        if (!varDecl->initExpr)
+            return nullptr;
+        auto arrayContentExpr = as<InitializerListExpr>(varDecl->initExpr);
+        if (!arrayContentExpr)
+            return nullptr;
+        if (expr.getExpr()->indexExprs.getCount() != 1)
+            return nullptr;
+        auto indexVal = as<ConstantIntVal>(tryFoldIntegerConstantExpression(
+            expr.getExpr()->indexExprs[0], kind, circularityInfo));
+        if (!indexVal)
+            return nullptr;
+        auto index = indexVal->getValue();
+        if (index < 0 || index >= arrayContentExpr->args.getCount())
+            return nullptr;
+        auto elementExpr = arrayContentExpr->args[Index(index)];
+        return tryFoldIntegerConstantExpression(elementExpr, kind, circularityInfo);
     }
 
     IntVal* SemanticsVisitor::tryFoldIntegerConstantExpression(
@@ -2227,10 +2344,14 @@ namespace Slang
 
         expr->left = maybeOpenRef(expr->left);
         auto type = expr->left->type;
+        if (auto atomicType = as<AtomicType>(type))
+        {
+            type = atomicType->getElementType();
+        }
         auto right = maybeOpenRef(expr->right);
         expr->right = coerce(CoercionSite::Assignment, type, right);
 
-        if (!type.isLeftValue)
+        if (!expr->left->type.isLeftValue)
         {
             if (as<ErrorType>(type))
             {
@@ -2669,6 +2790,42 @@ namespace Slang
             return newExpr;
 
         expr->functionExpr = CheckTerm(expr->functionExpr);
+
+        if (auto baseType = as<DeclRefType>(expr->functionExpr->type))
+        {
+            // If callee is a value of DeclRefType, then it is a functor.
+            // We need to look for `operator()` member within the type and
+            // call that instead.
+            auto operatorName = getName("()");
+
+            bool needDeref = false;
+            expr->functionExpr = maybeInsertImplicitOpForMemberBase(expr->functionExpr, needDeref);
+
+            LookupResult lookupResult = lookUpMember(
+                m_astBuilder,
+                this,
+                operatorName,
+                expr->functionExpr->type,
+                m_outerScope,
+                LookupMask::Default,
+                LookupOptions::NoDeref);
+            bool diagnosed = false;
+            lookupResult = filterLookupResultByVisibilityAndDiagnose(lookupResult, expr->loc, diagnosed);
+            if (!lookupResult.isValid())
+            {
+                if (!diagnosed)
+                    getSink()->diagnose(expr, Diagnostics::callOperatorNotFound, baseType);
+                return CreateErrorExpr(expr);
+            }
+            auto callFuncExpr = createLookupResultExpr(
+                operatorName,
+                lookupResult,
+                expr->functionExpr,
+                expr->loc,
+                expr->functionExpr);
+            expr->functionExpr = callFuncExpr;
+        }
+
         m_treatAsDifferentiableExpr = treatAsDifferentiableExpr;
 
         // If we are in a differentiable function, register differential witness tables involved in
@@ -2797,18 +2954,55 @@ namespace Slang
                 return modifiedType->getBase();
         }
 
+        if (auto typePack = as<ConcreteTypePack>(primalType))
+        {
+            // The differential pair of a type pack should be a type pack of differential pairs.
+            List<Type*> diffTypes;
+            for (Index i = 0; i < typePack->getTypeCount(); i++)
+            {
+                auto t = typePack->getElementType(i);
+                diffTypes.add(getDifferentialPairType(t));
+            }
+            return m_astBuilder->getTypePack(diffTypes.getArrayView());
+        }
+        else if (isAbstractTypePack(primalType))
+        {
+            // The differential pair of an abstract type pack P should be `expand DifferentialPair<each P>`.
+            auto eachType = m_astBuilder->getEachType(primalType);
+            auto diffPairEachType = getDifferentialPairType(eachType);
+            if (auto expandType = as<ExpandType>(primalType))
+            {
+                List<Type*> capturedTypePacks;
+                for (Index i = 0; i < expandType->getCapturedTypePackCount(); i++)
+                {
+                    capturedTypePacks.add(expandType->getCapturedTypePack(i));
+                }
+                return m_astBuilder->getExpandType(diffPairEachType, capturedTypePacks.getArrayView());
+            }
+            else
+            {
+                return m_astBuilder->getExpandType(diffPairEachType, makeArrayViewSingle(primalType));
+            }
+        }
+
         // Get a reference to the builtin 'IDifferentiable' interface
         auto differentiableInterface = getASTBuilder()->getDifferentiableInterfaceType();
+        auto differentiableRefInterface = getASTBuilder()->getDifferentiableRefInterfaceType();
 
-        auto conformanceWitness = as<Witness>(isSubtype(primalType, differentiableInterface, IsSubTypeOptions::None));
         // Check if the provided type inherits from IDifferentiable.
         // If not, return the original type.
-        if (conformanceWitness)
+        if (auto conformanceWitness = isTypeDifferentiable(primalType))
         {
-            return m_astBuilder->getDifferentialPairType(primalType, conformanceWitness);
+            if (conformanceWitness->getSup() == differentiableInterface)
+            {
+                return m_astBuilder->getDifferentialPairType(primalType, conformanceWitness);
+            }
+            else if (conformanceWitness->getSup() == differentiableRefInterface)
+            {
+                return m_astBuilder->getDifferentialPtrPairType(primalType, conformanceWitness);
+            }
         }
-        else
-            return primalType;
+        return primalType;
     }
 
     Type* SemanticsVisitor::getForwardDiffFuncType(FuncType* originalType)
@@ -3055,6 +3249,7 @@ namespace Slang
             {
                 auto lookupResultExpr = semantics->ConstructLookupResultExpr(item,
                     nullptr,
+                    overloadedExpr->name,
                     overloadedExpr->loc,
                     nullptr);
                 auto candidateExpr = actions->createHigherOrderInvokeExpr(semantics);
@@ -3188,6 +3383,13 @@ namespace Slang
         return expr;
     }
 
+    Expr* SemanticsExprVisitor::visitDetachExpr(DetachExpr* expr)
+    {
+        expr->inner = CheckTerm(expr->inner);
+        expr->type = expr->inner->type;
+        return expr;
+    }
+
 
     static bool _isSizeOfType(Type* type)
     {
@@ -3241,6 +3443,7 @@ namespace Slang
     Expr* SemanticsExprVisitor::visitSizeOfLikeExpr(SizeOfLikeExpr* sizeOfLikeExpr)
     {
         auto valueExpr = dispatch(sizeOfLikeExpr->value);
+        sizeOfLikeExpr->type = m_astBuilder->getIntType();
         
         Type* type = nullptr;
 
@@ -3598,6 +3801,10 @@ namespace Slang
             if (!isTypePack(baseType) && !as<TupleType>(baseType))
                 goto error;
         }
+        
+        if (auto tupleType = as<TupleType>(baseType))
+            baseType = tupleType->getTypePack();
+
         {
             SLANG_ASSERT(m_capturedTypePacks);
             if (auto baseExpandType = as<ExpandType>(baseType))
@@ -3954,7 +4161,7 @@ namespace Slang
             {
                 types.add(baseTupleType->getMember(index));
             }
-            swizExpr->type = QualType(m_astBuilder->getTupleType(types));
+            swizExpr->type = QualType(m_astBuilder->getTupleType(types.getArrayView()));
         }
 
         // A swizzle can be used as an l-value as long as there
@@ -4335,12 +4542,8 @@ namespace Slang
         return expr;
     }
 
-    Expr* SemanticsVisitor::checkBaseForMemberExpr(Expr* inBaseExpr, bool& outNeedDeref)
+    Expr* SemanticsVisitor::maybeInsertImplicitOpForMemberBase(Expr* baseExpr, bool& outNeedDeref)
     {
-        auto baseExpr = inBaseExpr;
-
-        baseExpr = CheckTerm(baseExpr);
-
         auto derefExpr = MaybeDereference(baseExpr);
 
         if (derefExpr != baseExpr)
@@ -4392,6 +4595,13 @@ namespace Slang
         }
 
         return baseExpr;
+    }
+
+    Expr* SemanticsVisitor::checkBaseForMemberExpr(Expr* inBaseExpr, bool& outNeedDeref)
+    {
+        auto baseExpr = inBaseExpr;
+        baseExpr = CheckTerm(baseExpr);
+        return maybeInsertImplicitOpForMemberBase(baseExpr, outNeedDeref);
     }
 
     Expr* SemanticsVisitor::checkGeneralMemberLookupExpr(MemberExpr* expr, Type* baseType)
@@ -4594,7 +4804,9 @@ namespace Slang
             scope = scope->parent;
         }
 
-        getSink()->diagnose(expr, Diagnostics::thisExpressionOutsideOfTypeDecl);
+        if (auto sink = getSink())
+            sink->diagnose(expr, Diagnostics::thisExpressionOutsideOfTypeDecl);
+            
         return CreateErrorExpr(expr);
     }
 
@@ -4804,7 +5016,7 @@ namespace Slang
         types.reserve(expr->members.getCount());
         for(auto t : expr->members)
             types.add(t.type);
-        auto tupleType = m_astBuilder->getTupleType(types);
+        auto tupleType = m_astBuilder->getTupleType(types.getArrayView());
         expr->type = m_astBuilder->getTypeType(tupleType);
 
         return expr;

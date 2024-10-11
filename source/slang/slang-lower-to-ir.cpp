@@ -11,6 +11,7 @@
 #include "slang-check.h"
 #include "slang-ir-bit-field-accessors.h"
 #include "slang-ir-loop-inversion.h"
+#include "slang-ir-lower-expand-type.h"
 #include "slang-ir.h"
 #include "slang-ir-util.h"
 #include "slang-ir-constexpr.h"
@@ -1752,6 +1753,15 @@ struct ValLoweringVisitor : ValVisitor<ValLoweringVisitor, LoweredValInfo, Lower
                 lowerType(context, val->getSup())));
     }
 
+    LoweredValInfo visitTypeEqualityWitness(TypeEqualityWitness* val)
+    {
+        auto subType = lowerType(context, val->getSub());
+        auto supType = lowerType(context, val->getSup());
+        auto witnessType = context->irBuilder->getWitnessTableType(
+            lowerType(context, val->getSup()));
+        return LoweredValInfo::simple(context->irBuilder->getTypeEqualityWitness(witnessType, subType, supType));
+    }
+
     LoweredValInfo visitTransitiveSubtypeWitness(
         TransitiveSubtypeWitness* val)
     {
@@ -1987,7 +1997,7 @@ struct ValLoweringVisitor : ValVisitor<ValLoweringVisitor, LoweredValInfo, Lower
         }
         else
         {
-            return lowerType(context, type->getTypePack());
+            return context->irBuilder->getTupleType(lowerType(context, type->getTypePack()));
         }
     }
 
@@ -3928,6 +3938,16 @@ struct ExprLoweringVisitorBase : public ExprVisitor<Derived, LoweredValInfo>
                 baseVal.val));
     }
 
+    LoweredValInfo visitDetachExpr(DetachExpr* expr)
+    {
+        auto baseVal = lowerRValueExpr(context, expr->inner);
+
+        return LoweredValInfo::simple(
+            getBuilder()->emitDetachDerivative(
+                lowerType(context, expr->type),
+                getSimpleVal(context, baseVal)));
+    }
+
     LoweredValInfo visitPrimalSubstituteExpr(PrimalSubstituteExpr* expr)
     {
         auto baseVal = lowerSubExpr(expr->baseFunction);
@@ -4978,6 +4998,19 @@ struct ExprLoweringVisitorBase : public ExprVisitor<Derived, LoweredValInfo>
         auto superType = lowerType(context, expr->type);
         auto value = lowerRValueExpr(context, expr->valueArg);
 
+        // First, we check if the witness is a type equality witness.
+        // If so, we can simply emit a bit cast to the target type that should eventually
+        // fold out to a no-op.
+        // Note: if we are going to equivalent but not identical types in the future,
+        // then the cast between equivalent types shouldn't be as simple as a bit cast
+        // and will require actual coercion logic between the two types.
+        // For now, we don't support type equivalence witness so this is safe for
+        // equal types.
+        if (isTypeEqualityWitness(expr->witnessArg))
+        {
+            return LoweredValInfo::simple(getBuilder()->emitBitCast(superType, getSimpleVal(context, value)));
+        }
+
         // The actual operation that we need to perform here
         // depends on the kind of subtype relationship we
         // are making use of.
@@ -5028,7 +5061,6 @@ struct ExprLoweringVisitorBase : public ExprVisitor<Derived, LoweredValInfo>
                 return emitCastToConcreteSuperTypeRec(value, superType, expr->witnessArg);
             }
         }
-
         SLANG_UNEXPECTED("unexpected case of subtype relationship");
         UNREACHABLE_RETURN(LoweredValInfo());
     }
@@ -5390,6 +5422,8 @@ struct LValueExprLoweringVisitor : ExprLoweringVisitorBase<LValueExprLoweringVis
             }
         };
 
+        LoweredValInfo result;
+
         // As required by the implementation of 'assign' and as a small
         // optimization, we will detect if the base expression has also lowered
         // into a swizzle and only return a single swizzle instead of nested
@@ -5424,7 +5458,7 @@ struct LValueExprLoweringVisitor : ExprLoweringVisitorBase<LValueExprLoweringVis
                 swizzledLValue->elementIndices);
 
             context->shared->extValues.add(swizzledLValue);
-            return LoweredValInfo::swizzledLValue(swizzledLValue);
+            result = LoweredValInfo::swizzledLValue(swizzledLValue);
         }
         else if(loweredBase.flavor == LoweredValInfo::Flavor::SwizzledMatrixLValue)
         {
@@ -5444,7 +5478,7 @@ struct LValueExprLoweringVisitor : ExprLoweringVisitorBase<LValueExprLoweringVis
                 swizzledLValue->elementCoords);
 
             context->shared->extValues.add(swizzledLValue);
-            return LoweredValInfo::swizzledMatrixLValue(swizzledLValue);
+            result = LoweredValInfo::swizzledMatrixLValue(swizzledLValue);
         }
         else
         {
@@ -5453,8 +5487,20 @@ struct LValueExprLoweringVisitor : ExprLoweringVisitorBase<LValueExprLoweringVis
             swizzledLValue->base = loweredBase;
             swizzledLValue->elementIndices = expr->elementIndices;
             context->shared->extValues.add(swizzledLValue);
-            return LoweredValInfo::swizzledLValue(swizzledLValue);
+            result = LoweredValInfo::swizzledLValue(swizzledLValue);
         }
+
+        // For a one-element swizzle on a tuple, we can just return the pointer to the member
+        // instead of a SwizzledLValue because they can't follow the same folding logic as
+        // vectors and matrices.
+        //
+        bool shouldUseSimpleLVal = elementCount == 1 && as<TupleType>(expr->base->type) != nullptr;
+        if (shouldUseSimpleLVal)
+        {
+            auto addr = getAddress(context, result, expr->loc);
+            return LoweredValInfo::ptr(addr);
+        }
+        return result;
     }
 };
 
@@ -6576,8 +6622,13 @@ struct StmtLoweringVisitor : StmtVisitor<StmtLoweringVisitor>
         }
         context->shared->breakLabels.remove(stmt);
         builder->setInsertInto(initialBlock);
+    
+        auto parentFunc = initialBlock->getParent();
+        parentFunc->addBlock(breakLabel);
+
         builder->emitIntrinsicInst(nullptr, kIROp_TargetSwitch, (UInt)args.getCount(), args.getBuffer());
-        insertBlock(breakLabel);
+
+        builder->setInsertInto(breakLabel);
     }
 
     void visitTargetCaseStmt(TargetCaseStmt*)
@@ -7084,9 +7135,19 @@ top:
             // The `left` value is just a pointer, so we can emit
             // a store to it directly.
             //
-            builder->emitStore(
-                left.val,
-                getSimpleVal(context, right));
+            if (as<IRAtomicType>(tryGetPointedToType(builder, left.val->getDataType())))
+            {
+                builder->emitAtomicStore(
+                    left.val,
+                    getSimpleVal(context, right),
+                    builder->getIntValue(builder->getIntType(), kIRMemoryOrder_Relaxed));
+            }
+            else
+            {
+                builder->emitStore(
+                    left.val,
+                    getSimpleVal(context, right));
+            }
         }
         break;
 
@@ -7996,13 +8057,32 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         }
 
         addTargetIntrinsicDecorations(nullptr, irParam, decl);
-        if (decl->findModifier<HLSLLayoutSemantic>())
+        
+        bool hasLayoutSemantic = false;
+        bool isSpecializationConstant = false;
+        for (auto modifier : decl->modifiers)
         {
-            builder->addHasExplicitHLSLBindingDecoration(irParam);
+            if (as<HLSLLayoutSemantic>(modifier))
+            {
+                hasLayoutSemantic = true;
+            }
+            else if (as<SpecializationConstantAttribute>(modifier) || as<VkConstantIdAttribute>(modifier))
+            {
+                isSpecializationConstant = true;
+            }
         }
+        if (hasLayoutSemantic)
+            builder->addHasExplicitHLSLBindingDecoration(irParam);
+
         // A global variable's SSA value is a *pointer* to
         // the underlying storage.
         context->setGlobalValue(decl, paramVal);
+
+        if (isSpecializationConstant && decl->initExpr)
+        {
+            auto initVal = getSimpleVal(context, lowerRValueExpr(context, decl->initExpr));
+            builder->addDefaultValueDecoration(irParam, initVal);
+        }
 
         irParam->moveToEnd();
 
@@ -8356,8 +8436,8 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         for (auto constraintDecl : decl->getMembersOfType<GenericTypeConstraintDecl>())
         {
             auto baseType = lowerType(context, constraintDecl->sup.type);
-            SLANG_ASSERT(baseType && baseType->getOp() == kIROp_InterfaceType);
-            constraintInterfaces.add((IRInterfaceType*)baseType);
+            if (baseType && baseType->getOp() == kIROp_InterfaceType)
+                constraintInterfaces.add((IRInterfaceType*)baseType);
         }
         auto assocType = context->irBuilder->getAssociatedType(
             constraintInterfaces.getArrayView().arrayView);
@@ -8541,7 +8621,7 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
                     {
                         auto constraintKey = getInterfaceRequirementKey(constraintDeclRef.getDecl());
                         auto constraintInterfaceType =
-                            lowerType(context, getSup(subContext->astBuilder, constraintDeclRef));
+                            lowerType(subContext, getSup(subContext->astBuilder, constraintDeclRef));
                         auto witnessTableType =
                             getBuilder()->getWitnessTableType(constraintInterfaceType);
 
@@ -8858,6 +8938,8 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
         {
             if (as<NonCopyableTypeAttribute>(modifier))
                 subBuilder->addNonCopyableTypeDecoration(irAggType);
+            else if (as<AutoDiffBuiltinAttribute>(modifier))
+                subBuilder->addAutoDiffBuiltinDecoration(irAggType);
         }
      
 
@@ -10192,9 +10274,14 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
             {
                 getBuilder()->addDecoration(irFunc, kIROp_PreferCheckpointDecoration);
             }
-            else if (as<PreferRecomputeAttribute>(modifier))
+            else if (auto attr = as<PreferRecomputeAttribute>(modifier))
             {
-                getBuilder()->addDecoration(irFunc, kIROp_PreferRecomputeDecoration);
+                getBuilder()->addDecoration(
+                    irFunc,
+                    kIROp_PreferRecomputeDecoration,
+                    getBuilder()->getIntValue(
+                        getBuilder()->getIntType(),
+                        attr->sideEffectBehavior));
             }
             else if (auto extensionMod = as<RequiredGLSLExtensionModifier>(modifier))
                 getBuilder()->addRequireGLSLExtensionDecoration(irFunc, extensionMod->extensionNameToken.getContent());
@@ -10635,7 +10722,8 @@ LoweredValInfo emitDeclRef(
         for (auto argVal : genericSubst->getArgs())
         {
             auto irArgVal = lowerSimpleVal(context, argVal);
-            SLANG_ASSERT(irArgVal);
+            if (!irArgVal)
+                continue;
 
             // It is possible that some of the arguments to the generic
             // represent conformances to conjunction types like `A & B`.
@@ -11079,6 +11167,13 @@ RefPtr<IRModule> generateIRForTranslationUnit(
 
     // Synthesize some code we want to make sure is inlined and simplified
     synthesizeBitFieldAccessors(module);
+
+    // Lower `IRExpandType` types to use `IRExpand`, where the pattern type
+    // is nested inside the `IRExpand` as its children, instead of being same
+    // level entities as the ExpandType itself.
+    // This will unify the specialization logic for both type and value level
+    // expansion.
+    lowerExpandType(module);
 
     // Generate DebugValue insts to store values into debug variables,
     // if debug symbols are enabled.

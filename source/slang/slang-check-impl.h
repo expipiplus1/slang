@@ -22,8 +22,10 @@ namespace Slang
     enum class IsSubTypeOptions
     {
         None = 0,
-        /// Type may not be finished 'DeclCheckState::ReadyForLookup`
-        NotReadyForLookup = 1 << 0,
+
+        /// A type may not be finished 'DeclCheckState::ReadyForLookup` while `isSubType` is called.
+        /// We should not cache any negative results when this flag is set.
+        NoCaching = 1 << 0,
     };
 
         /// Should the given `decl` be treated as a static rather than instance declaration?
@@ -35,6 +37,10 @@ namespace Slang
     bool isUnsafeForceInlineFunc(FunctionDeclBase* funcDecl);
 
     bool isUniformParameterType(Type* type);
+
+        /// Create a new component type based on `inComponentType`, but with all its requiremetns filled.
+    RefPtr<ComponentType> fillRequirements(
+        ComponentType* inComponentType);
 
     Type* checkProperType(
         Linkage*        linkage,
@@ -596,7 +602,7 @@ namespace Slang
     };
 
         /// Shared state for a semantics-checking session.
-    struct SharedSemanticsContext
+    struct SharedSemanticsContext : public RefObject
     {
         Linkage*        m_linkage   = nullptr;
 
@@ -686,11 +692,37 @@ namespace Slang
         FunctionDifferentiableLevel _getFuncDifferentiableLevelImpl(FunctionDeclBase* func, int recurseLimit);
         FunctionDifferentiableLevel getFuncDifferentiableLevel(FunctionDeclBase* func);
 
+        struct InheritanceCircularityInfo
+        {
+            InheritanceCircularityInfo(
+                Decl* decl,
+                InheritanceCircularityInfo* next)
+                : decl(decl)
+                , next(next)
+            {}
+
+            /// A declaration whose inheritance is being calculated
+            Decl* decl = nullptr;
+
+            /// The rest of the links in the chain of declarations being processed
+            InheritanceCircularityInfo* next = nullptr;
+        };
+
             /// Get the processed inheritance information for `type`, including all its facets
-        InheritanceInfo getInheritanceInfo(Type* type);
+        InheritanceInfo getInheritanceInfo(Type* type, InheritanceCircularityInfo* circularityInfo = nullptr);
 
             /// Get the processed inheritance information for `extension`, including all its facets
-        InheritanceInfo getInheritanceInfo(DeclRef<ExtensionDecl> const& extension);
+        InheritanceInfo getInheritanceInfo(DeclRef<ExtensionDecl> const& extension, InheritanceCircularityInfo* circularityInfo = nullptr);
+
+            /// Prevent an unsupported case of
+            /// ```
+            ///     extension<T:IFoo> : IBar{};
+            ///     extesnion<T:IBar> : IFoo{};
+            /// ```
+            /// from causing infinite recursion.
+        bool _checkForCircularityInExtensionTargetType(
+            Decl* decl,
+            InheritanceCircularityInfo* circularityInfo);
 
             /// Try get subtype witness from cache, returns true if cache contains a result for the query.
         bool tryGetSubtypeWitnessFromCache(Type* sub, Type* sup, SubtypeWitness*& outWitness)
@@ -712,6 +744,10 @@ namespace Slang
             m_mapTypePairToImplicitCastMethod[key] = candidate;
         }
 
+        // Get the inner most generic decl that a decl-ref is dependent on.
+        // For example, `Foo<T>` depends on the generic decl that defines `T`.
+        //
+        DeclRef<GenericDecl> getDependentGenericParent(DeclRef<Decl> declRef);
     private:
             /// Mapping from type declarations to the known extensiosn that apply to them
         Dictionary<AggTypeDecl*, RefPtr<CandidateExtensionList>> m_mapTypeDeclToCandidateExtensions;
@@ -734,9 +770,11 @@ namespace Slang
 
         ASTBuilder* _getASTBuilder() { return m_linkage->getASTBuilder(); }
 
-        InheritanceInfo _getInheritanceInfo(DeclRef<Decl> declRef, DeclRefType* correspondingType);
-        InheritanceInfo _calcInheritanceInfo(Type* type);
-        InheritanceInfo _calcInheritanceInfo(DeclRef<Decl> declRef, DeclRefType* correspondingType);
+        InheritanceInfo _getInheritanceInfo(DeclRef<Decl> declRef, DeclRefType* correspondingType, InheritanceCircularityInfo* circularityInfo);
+        InheritanceInfo _calcInheritanceInfo(Type* type, InheritanceCircularityInfo* circularityInfo);
+        InheritanceInfo _calcInheritanceInfo(DeclRef<Decl> declRef, DeclRefType* correspondingType, InheritanceCircularityInfo* circularityInfo);
+
+        void getDependentGenericParentImpl(DeclRef<GenericDecl>& genericParent, DeclRef<Decl> declRef);
 
         struct DirectBaseInfo
         {
@@ -1191,10 +1229,11 @@ namespace Slang
         }
 
         DeclRefExpr* ConstructDeclRefExpr(
-            DeclRef<Decl>   declRef,
-            Expr*    baseExpr,
+            DeclRef<Decl> declRef,
+            Expr* baseExpr,
+            Name* name,
             SourceLoc loc,
-            Expr*    originalExpr);
+            Expr* originalExpr);
 
         Expr* ConstructDerefExpr(
             Expr*    base,
@@ -1208,16 +1247,17 @@ namespace Slang
 
         Expr* ConstructLookupResultExpr(
             LookupResultItem const& item,
-            Expr*            baseExpr,
+            Expr* baseExpr,
+            Name* name,
             SourceLoc loc,
             Expr* originalExpr);
 
         Expr* createLookupResultExpr(
-            Name*                   name,
-            LookupResult const&     lookupResult,
-            Expr*            baseExpr,
+            Name* name,
+            LookupResult const& lookupResult,
+            Expr* baseExpr,
             SourceLoc loc,
-            Expr*    originalExpr);
+            Expr* originalExpr);
 
         DeclVisibility getTypeVisibility(Type* type);
         bool isDeclVisibleFromScope(DeclRef<Decl> declRef, Scope* scope);
@@ -1615,7 +1655,9 @@ namespace Slang
 
         bool getAttributeTargetSyntaxClasses(SyntaxClass<NodeBase> & cls, uint32_t typeFlags);
 
-        bool validateAttribute(Attribute* attr, AttributeDecl* attribClassDecl, ModifiableSyntaxNode* attrTarget);
+        // Check an attribute, and return a checked modifier that represents it.
+        //
+        Modifier* validateAttribute(Attribute* attr, AttributeDecl* attribClassDecl, ModifiableSyntaxNode* attrTarget);
 
         AttributeBase* checkAttribute(
             UncheckedAttribute*     uncheckedAttr,
@@ -1697,7 +1739,7 @@ namespace Slang
         void addModifiersToSynthesizedDecl(
             ConformanceCheckingContext* context,
             DeclRef<Decl> requirement,
-            FunctionDeclBase* synthesized,
+            CallableDecl* synthesized,
             ThisExpr* &synThis);
 
         void addRequiredParamsToSynthesizedDecl(
@@ -1705,9 +1747,15 @@ namespace Slang
             CallableDecl* synthesized,
             List<Expr*>& synArgs);
 
-        FunctionDeclBase* synthesizeMethodSignatureForRequirementWitness(
+        CallableDecl* synthesizeMethodSignatureForRequirementWitnessInner(
             ConformanceCheckingContext* context,
-            DeclRef<FunctionDeclBase> requiredMemberDeclRef,
+            DeclRef<CallableDecl> requiredMemberDeclRef,
+            List<Expr*>& synArgs,
+            ThisExpr*& synThis);
+
+        CallableDecl* synthesizeMethodSignatureForRequirementWitness(
+            ConformanceCheckingContext* context,
+            DeclRef<CallableDecl> requiredMemberDeclRef,
             List<Expr*>& synArgs,
             ThisExpr*& synThis);
         
@@ -1717,6 +1765,14 @@ namespace Slang
             List<Expr*>& synArgs,
             List<Expr*>& synGenericArgs,
             ThisExpr*& synThis);
+
+        bool synthesizeAccessorRequirements(
+            ConformanceCheckingContext* context,
+            DeclRef<ContainerDecl> requiredMemberDeclRef,
+            Type* resultType,
+            Expr* synBoundStorageExpr,
+            ContainerDecl* synAccesorContainer,
+            RefPtr<WitnessTable> witnessTable);
 
         void _addMethodWitness(
             WitnessTable* witnessTable,
@@ -1753,6 +1809,17 @@ namespace Slang
         bool trySynthesizeWrapperTypePropertyRequirementWitness(
             ConformanceCheckingContext* context,
             DeclRef<PropertyDecl>       requiredMemberDeclRef,
+            RefPtr<WitnessTable>        witnessTable);
+
+        bool trySynthesizeSubscriptRequirementWitness(
+            ConformanceCheckingContext* context,
+            const LookupResult& lookupResult,
+            DeclRef<SubscriptDecl>      requiredMemberDeclRef,
+            RefPtr<WitnessTable>        witnessTable);
+
+        bool trySynthesizeWrapperTypeSubscriptRequirementWitness(
+            ConformanceCheckingContext* context,
+            DeclRef<SubscriptDecl>      requiredMemberDeclRef,
             RefPtr<WitnessTable>        witnessTable);
 
         bool trySynthesizeAssociatedTypeRequirementWitness(
@@ -2022,6 +2089,11 @@ namespace Slang
             ConstantFoldingKind             kind,
             ConstantFoldingCircularityInfo* circularityInfo);
 
+        IntVal* tryFoldIndexExpr(
+            SubstExpr<IndexExpr> expr,
+            ConstantFoldingKind             kind,
+            ConstantFoldingCircularityInfo* circularityInfo);
+
         // Enforce that an expression resolves to an integer constant, and get its value
         enum class IntegerConstantExpressionCoercionType
         {
@@ -2099,6 +2171,10 @@ namespace Slang
             // Constraints we have accumulated, which constrain
             // the possible arguments for those parameters.
             List<Constraint> constraints;
+
+            // Additional subtype witnesses available to the currentt constraint solving context.
+            Type* subTypeForAdditionalWitnesses = nullptr;
+            Dictionary<Type*, SubtypeWitness*>* additionalSubtypeWitnesses = nullptr;
         };
 
         Type* TryJoinVectorAndScalarType(
@@ -2148,7 +2224,7 @@ namespace Slang
 
         bool isValidGenericConstraintType(Type* type);
 
-        bool isTypeDifferentiable(Type* type);
+        SubtypeWitness* isTypeDifferentiable(Type* type);
 
         bool doesTypeHaveTag(Type* type, TypeTag tag);
 
@@ -2534,7 +2610,8 @@ namespace Slang
         // Is the candidate extension declaration actually applicable to the given type
         DeclRef<ExtensionDecl> applyExtensionToType(
             ExtensionDecl*  extDecl,
-            Type*    type);
+            Type*    type,
+            Dictionary<Type*, SubtypeWitness*>* additionalSubtypeWitnessesForType = nullptr);
 
             // Take a generic declaration that is being applied
             // in a context and attempt to infer any missing generic
@@ -2669,6 +2746,10 @@ namespace Slang
             /// Perform checking operations required for the "base" expression of a member-reference like `base.someField`
         Expr* checkBaseForMemberExpr(Expr* baseExpr, bool& outNeedDeref);
 
+            /// Prepare baseExpr for use as the base of a member expr.
+            /// This include inserting implicit open-existential operations as needed.
+        Expr* maybeInsertImplicitOpForMemberBase(Expr* baseExpr, bool& outNeedDeref);
+
         Expr* lookupMemberResultFailure(
             DeclRefExpr*     expr,
             QualType const& baseType,
@@ -2696,7 +2777,8 @@ namespace Slang
     DeclRef<ExtensionDecl> applyExtensionToType(
         SemanticsVisitor*   semantics,
         ExtensionDecl*      extDecl,
-        Type*               type);
+        Type*               type,
+        Dictionary<Type*, SubtypeWitness*>* additionalSubtypeWitness = nullptr);
 
 
     struct SemanticsExprVisitor
@@ -2805,6 +2887,8 @@ namespace Slang
         Expr* visitGetArrayLengthExpr(GetArrayLengthExpr* expr);
 
         Expr* visitDefaultConstructExpr(DefaultConstructExpr* expr);
+
+        Expr* visitDetachExpr(DetachExpr* expr);
 
         Expr* visitSPIRVAsmExpr(SPIRVAsmExpr*);
 

@@ -1,7 +1,7 @@
 // slang-support.h
 #pragma once
 
-#include "slang-gfx.h"
+#include <slang-rhi.h>
 
 #include "slang.h"
 
@@ -9,8 +9,6 @@
 #include "options.h"
 
 namespace renderer_test {
-
-gfx::StageType translateStage(SlangStage slangStage);
 
 struct ShaderCompileRequest
 {
@@ -71,7 +69,7 @@ struct ShaderCompilerUtil
         }
 
         ComPtr<slang::IComponentType> slangProgram;
-        IShaderProgram::Desc desc = {};
+        ShaderProgramDesc desc = {};
 
             /// Compile request that owns the lifetime of compiled kernel code.
         ComPtr<SlangCompileRequest> m_requestForKernels = nullptr;

@@ -3022,6 +3022,17 @@ namespace Slang
             operands);
     }
 
+    IRDifferentialPtrPairType* IRBuilder::getDifferentialPtrPairType(
+        IRType* valueType,
+        IRInst* witnessTable)
+    {
+        IRInst* operands[] = { valueType, witnessTable };
+        return (IRDifferentialPtrPairType*)getType(
+            kIROp_DifferentialPtrPairType,
+            sizeof(operands) / sizeof(operands[0]),
+            operands);
+    }
+
     IRDifferentialPairUserCodeType* IRBuilder::getDifferentialPairUserCodeType(
         IRType* valueType,
         IRInst* witnessTable)
@@ -3503,7 +3514,7 @@ namespace Slang
         return inst;
     }
 
-    IRInst* IRBuilder::emitMakeDifferentialPair(IRType* type, IRInst* primal, IRInst* differential)
+    IRInst* IRBuilder::emitMakeDifferentialValuePair(IRType* type, IRInst* primal, IRInst* differential)
     {
         SLANG_RELEASE_ASSERT(as<IRDifferentialPairType>(type));
         SLANG_RELEASE_ASSERT(as<IRDifferentialPairType>(type)->getValueType() != nullptr);
@@ -3512,7 +3523,100 @@ namespace Slang
         auto inst = createInstWithTrailingArgs<IRMakeDifferentialPair>(
             this, kIROp_MakeDifferentialPair, type, 2, args);
         addInst(inst);
+        inst->sourceLoc = primal->sourceLoc;
         return inst;
+    }
+
+    IRInst* IRBuilder::emitMakeDifferentialPtrPair(IRType* type, IRInst* primal, IRInst* differential)
+    {
+        SLANG_RELEASE_ASSERT(as<IRDifferentialPtrPairType>(type));
+        SLANG_RELEASE_ASSERT(as<IRDifferentialPtrPairType>(type)->getValueType() != nullptr);
+
+        IRInst* args[] = {primal, differential};
+        auto inst = createInstWithTrailingArgs<IRMakeDifferentialPtrPair>(
+            this, kIROp_MakeDifferentialPtrPair, type, 2, args);
+        addInst(inst);
+        return inst;
+    }
+    
+    IRInst* IRBuilder::emitMakeDifferentialPair(IRType* pairType, IRInst* primalVal, IRInst* diffVal)
+    {
+        if (as<IRDifferentialPairType>(pairType))
+        {
+            return emitMakeDifferentialValuePair(pairType, primalVal, diffVal);
+        }
+        else if (as<IRDifferentialPtrPairType>(pairType))
+        {
+            // Quick optimization:
+            // If primalVal and diffVal are extracted from the same pointer-pair,
+            // we can just use the pointer-pair directly.
+            //
+            if (auto primalPtrVal = as<IRDifferentialPtrPairGetPrimal>(primalVal))
+            {
+                if (auto diffPtrVal = as<IRDifferentialPtrPairGetDifferential>(diffVal))
+                {
+                    if (primalPtrVal->getBase() == diffPtrVal->getBase())
+                        return primalPtrVal->getBase();
+                }
+            }
+            return emitMakeDifferentialPtrPair(pairType, primalVal, diffVal);
+        }
+        else
+        {
+            SLANG_ASSERT(!"unreachable");
+            return nullptr;
+        }
+    }
+
+    IRInst* IRBuilder::emitDifferentialPairGetDifferential(IRType* diffType, IRInst* pairVal)
+    {
+        if (as<IRDifferentialPairType>(pairVal->getDataType()))
+        {
+            return emitDifferentialValuePairGetDifferential(diffType, pairVal);
+        }
+        else if (as<IRDifferentialPtrPairType>(pairVal->getDataType()))
+        {
+            return emitDifferentialPtrPairGetDifferential(diffType, pairVal);
+        }
+        else
+        {
+            SLANG_ASSERT(!"unreachable");
+            return nullptr;
+        }
+    }
+
+    IRInst* IRBuilder::emitDifferentialPairGetPrimal(IRInst* pairVal)
+    {
+        if (as<IRDifferentialPairType>(pairVal->getDataType()))
+        {
+            return emitDifferentialValuePairGetPrimal(pairVal);
+        }
+        else if (as<IRDifferentialPtrPairType>(pairVal->getDataType()))
+        {
+            return emitDifferentialPtrPairGetPrimal(pairVal);
+        }
+        else
+        {
+            SLANG_ASSERT(!"unreachable");
+            return nullptr;
+        }
+    }
+
+    IRInst* IRBuilder::emitDifferentialPairGetPrimal(IRType* primalType, IRInst* pairVal)
+    {
+        if (as<IRDifferentialPairType>(pairVal->getDataType()))
+        {
+            return emitDifferentialValuePairGetPrimal(primalType, pairVal);
+        }
+        else if (as<IRDifferentialPtrPairType>(pairVal->getDataType()))
+        {
+            return emitDifferentialPtrPairGetPrimal(primalType, pairVal);
+        }
+        else
+        {
+            SLANG_ASSERT(!"unreachable");
+            return nullptr;
+        }
     }
 
     IRInst* IRBuilder::emitMakeDifferentialPairUserCode(IRType* type, IRInst* primal, IRInst* differential)
@@ -3524,6 +3628,7 @@ namespace Slang
         auto inst = createInstWithTrailingArgs<IRMakeDifferentialPair>(
             this, kIROp_MakeDifferentialPairUserCode, type, 2, args);
         addInst(inst);
+        inst->sourceLoc = primal->sourceLoc;
         return inst;
     }
 
@@ -3863,11 +3968,11 @@ namespace Slang
         return nullptr;
     }
 
-    IRInst* IRBuilder::emitEmbeddedDXIL(ISlangBlob *blob)
+    IRInst* IRBuilder::emitEmbeddedDownstreamIR(CodeGenTarget target, ISlangBlob *blob)
     {
-        IRInst* args[] = { getBlobValue(blob) };
+        IRInst* args[] = { getIntValue(getIntType(), (int)target), getBlobValue(blob) };
 
-        return emitIntrinsicInst(getVoidType(), kIROp_EmbeddedDXIL, 1, args);
+        return emitIntrinsicInst(getVoidType(), kIROp_EmbeddedDownstreamIR, 2, args);
     }
 
     enum class TypeCastStyle
@@ -4114,12 +4219,17 @@ namespace Slang
         // `getTupleElement(makeTuple(a_0, a_1, ... a_N), i)` then we should
         // just return `a_i`, provided that the index is properly in range.
         //
-        if( auto makeTuple = as<IRMakeTuple>(tuple) )
+        switch(tuple->getOp())
         {
-            if( element < makeTuple->getOperandCount() )
+        case kIROp_MakeTuple:
+        case kIROp_MakeValuePack:
+        case kIROp_MakeWitnessPack:
+        case kIROp_TypePack:
+            if( element < tuple->getOperandCount() )
             {
-                return makeTuple->getOperand(element);
+                return tuple->getOperand(element);
             }
+            break;
         }
         return emitGetTupleElement(type, tuple, getIntValue(getIntType(), element));
     }
@@ -4215,7 +4325,7 @@ namespace Slang
         return emitIntrinsicInst(type, kIROp_MakeVector, argCount, args);
     }
 
-    IRInst* IRBuilder::emitDifferentialPairGetDifferential(IRType* diffType, IRInst* diffPair)
+    IRInst* IRBuilder::emitDifferentialValuePairGetDifferential(IRType* diffType, IRInst* diffPair)
     {
         SLANG_ASSERT(as<IRDifferentialPairTypeBase>(diffPair->getDataType()));
         return emitIntrinsicInst(
@@ -4225,7 +4335,18 @@ namespace Slang
             &diffPair);
     }
 
-    IRInst* IRBuilder::emitDifferentialPairGetPrimal(IRInst* diffPair)
+    
+    IRInst* IRBuilder::emitDifferentialPtrPairGetDifferential(IRType* diffType, IRInst* diffPair)
+    {
+        SLANG_ASSERT(as<IRDifferentialPtrPairType>(diffPair->getDataType()));
+        return emitIntrinsicInst(
+            diffType,
+            kIROp_DifferentialPtrPairGetDifferential,
+            1,
+            &diffPair);
+    }
+
+    IRInst* IRBuilder::emitDifferentialValuePairGetPrimal(IRInst* diffPair)
     {
         auto valueType = cast<IRDifferentialPairTypeBase>(diffPair->getDataType())->getValueType();
         return emitIntrinsicInst(
@@ -4235,11 +4356,30 @@ namespace Slang
             &diffPair);
     }
 
-    IRInst* IRBuilder::emitDifferentialPairGetPrimal(IRType* primalType, IRInst* diffPair)
+    IRInst* IRBuilder::emitDifferentialValuePairGetPrimal(IRType* primalType, IRInst* diffPair)
     {
         return emitIntrinsicInst(
             primalType,
             kIROp_DifferentialPairGetPrimal,
+            1,
+            &diffPair);
+    }
+
+    IRInst* IRBuilder::emitDifferentialPtrPairGetPrimal(IRInst* diffPair)
+    {
+        auto valueType = cast<IRDifferentialPairTypeBase>(diffPair->getDataType())->getValueType();
+        return emitIntrinsicInst(
+            valueType,
+            kIROp_DifferentialPtrPairGetPrimal,
+            1,
+            &diffPair);
+    }
+
+    IRInst* IRBuilder::emitDifferentialPtrPairGetPrimal(IRType* primalType, IRInst* diffPair)
+    {
+        return emitIntrinsicInst(
+            primalType,
+            kIROp_DifferentialPtrPairGetPrimal,
             1,
             &diffPair);
     }
@@ -4609,6 +4749,15 @@ namespace Slang
         return witness;
     }
 
+    IRInst* IRBuilder::getTypeEqualityWitness(IRType* witnessType, IRType* type1, IRType* type2)
+    {
+        IRInst* operands[2] = { type1, type2 };
+        return (IRType*)createIntrinsicInst(
+            witnessType,
+            kIROp_TypeEqualityWitness,
+            2,
+            operands);
+    }
 
     IRStructType* IRBuilder::createStructType()
     {
@@ -4935,6 +5084,23 @@ namespace Slang
         return inst;
     }
 
+    IRInst* IRBuilder::emitAtomicStore(
+        IRInst* dstPtr,
+        IRInst* srcVal,
+        IRInst* memoryOrder)
+    {
+        auto inst = createInst<IRAtomicStore>(
+            this,
+            kIROp_AtomicStore,
+            nullptr,
+            dstPtr,
+            srcVal,
+            memoryOrder);
+
+        addInst(inst);
+        return inst;
+    }
+
     /// @param params An ordered list of imageLoad parameters { image, coord, [optional] seperateArrayCoord, [optional] seperateSampleCoord }
     IRInst* IRBuilder::emitImageLoad(IRType* type, ShortList<IRInst*> params)
     {
@@ -5103,6 +5269,11 @@ namespace Slang
         {
             type = getVectorType(matrixType->getElementType(), matrixType->getColumnCount());
         }
+        else if (auto tupleType = as<IRTupleType>(base->getDataType()))
+        {
+            type = (IRType*)tupleType->getOperand(getIntVal(index));
+            return emitGetTupleElement(type, base, index);
+        }
         SLANG_RELEASE_ASSERT(type);
 
         return emitElementExtract(type, base, index);
@@ -5206,6 +5377,11 @@ namespace Slang
             // HLSL support things like float.x, in which case we just return the base pointer.
             return basePtr;
         }
+        else if (const auto tupleType = as<IRTupleType>(valueType))
+        {
+            SLANG_ASSERT(as<IRIntLit>(index));
+            type = (IRType*)tupleType->getOperand(getIntVal(index));
+        }
         SLANG_RELEASE_ASSERT(type);
         auto inst = createInst<IRGetElementPtr>(
             this,
@@ -5276,7 +5452,7 @@ namespace Slang
         return emitUpdateElement(base, getIntValue(getIntType(), index), newElement);
     }
 
-    IRInst* IRBuilder::emitUpdateElement(IRInst* base, const List<IRInst*>& accessChain, IRInst* newElement)
+    IRInst* IRBuilder::emitUpdateElement(IRInst* base, ArrayView<IRInst*> accessChain, IRInst* newElement)
     {
         List<IRInst*> args;
         args.add(base);
@@ -5286,6 +5462,12 @@ namespace Slang
             this, kIROp_UpdateElement, base->getFullType(), (Int)args.getCount(), args.getBuffer());
         addInst(inst);
         return inst;
+    }
+
+    IRInst* IRBuilder::emitGetOffsetPtr(IRInst* base, IRInst* offset)
+    {
+        IRInst* args[] = { base, offset };
+        return emitIntrinsicInst(base->getDataType(), kIROp_GetOffsetPtr, 2, args);
     }
 
     IRInst* IRBuilder::emitGetAddress(
@@ -5365,6 +5547,32 @@ namespace Slang
         return emitSwizzle(type, base, elementCount, irElementIndices);
     }
 
+    IRMetalSetVertex* IRBuilder::emitMetalSetVertex(
+        IRInst* index,
+        IRInst* vertex)
+    {
+        auto inst = createInst<IRMetalSetVertex>(this, kIROp_MetalSetVertex, getVoidType(), index, vertex);
+        addInst(inst);
+        return inst;
+    }
+
+    IRMetalSetPrimitive* IRBuilder::emitMetalSetPrimitive(
+        IRInst* index,
+        IRInst* primitive)
+    {
+        auto inst = createInst<IRMetalSetPrimitive>(this, kIROp_MetalSetVertex, getVoidType(), index, primitive);
+        addInst(inst);
+        return inst;
+    }
+
+    IRMetalSetIndices* IRBuilder::emitMetalSetIndices(
+        IRInst* index,
+        IRInst* indices)
+    {
+        auto inst = createInst<IRMetalSetIndices>(this, kIROp_MetalSetVertex, getVoidType(), index, indices);
+        addInst(inst);
+        return inst;
+    }
 
     IRInst* IRBuilder::emitSwizzleSet(
         IRType*         type,
@@ -5780,7 +5988,7 @@ namespace Slang
         auto inst = createInst<IRInst>(
             this,
             kIROp_SizeOf,
-            getUIntType(),
+            getIntType(),
             sizedType);
         addInst(inst);
         return inst;
@@ -5792,7 +6000,7 @@ namespace Slang
         auto inst = createInst<IRInst>(
             this,
             kIROp_AlignOf,
-            getUIntType(),
+            getIntType(),
             sizedType);
         addInst(inst);
         return inst;
@@ -8306,6 +8514,7 @@ namespace Slang
         case kIROp_InterfaceRequirementEntry:
         case kIROp_Block:
         case kIROp_Each:
+        case kIROp_TypeEqualityWitness:
             return false;
 
             /// Liveness markers have no side effects
@@ -8345,6 +8554,7 @@ namespace Slang
         case kIROp_DifferentialPairGetDifferential:
         case kIROp_MakeDifferentialPair:
         case kIROp_MakeTuple:
+        case kIROp_MakeValuePack:
         case kIROp_GetTupleElement:
         case kIROp_StructuredBufferLoad:
         case kIROp_RWStructuredBufferLoad:

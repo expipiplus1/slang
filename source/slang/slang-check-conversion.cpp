@@ -498,6 +498,27 @@ namespace Slang
             toInitializerListExpr->type = QualType(toType);
             toInitializerListExpr->args = coercedArgs;
 
+            // Wrap initalizer list args if we're creating a non-differentiable struct within a 
+            // differentiable function.
+            // 
+            if (auto func = getParentFuncOfVisitor())
+            {
+                if (func->findModifier<DifferentiableAttribute>() && 
+                    !isTypeDifferentiable(toType))
+                {
+                    for (auto &arg : toInitializerListExpr->args)
+                    {
+                        if (isTypeDifferentiable(arg->type.type))
+                        {
+                            auto detachedArg = m_astBuilder->create<DetachExpr>();
+                            detachedArg->inner = arg;
+                            detachedArg->type = arg->type;
+                            arg = detachedArg;
+                        }
+                    }
+                }
+            }
+
             *outToExpr = toInitializerListExpr;
         }
 
@@ -997,6 +1018,22 @@ namespace Slang
             if (outCost)
                 *outCost = kConversionCost_CastToInterface;
             return true;
+        }
+        else if (auto fromIsToWitness = tryGetSubtypeWitness(toType, fromType))
+        {
+            // Is toType and fromType the same via some type equality witness?
+            // If so there is no need to do any conversion.
+            //
+            if (isTypeEqualityWitness(fromIsToWitness))
+            {
+                if (outToExpr)
+                {
+                    *outToExpr = createCastToSuperTypeExpr(toType, fromExpr, fromIsToWitness);
+                }
+                if (outCost)
+                    *outCost = 0;
+                return true;
+            }
         }
 
         // Disallow converting to a ParameterGroupType.

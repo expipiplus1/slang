@@ -60,7 +60,7 @@ namespace Slang
             return result;
         result = checkAndConstructSubtypeWitness(subType, superType, isSubTypeOptions);
         
-        if(int(isSubTypeOptions) & int(IsSubTypeOptions::NotReadyForLookup))
+        if(!result && (int(isSubTypeOptions) & int(IsSubTypeOptions::NoCaching)))
             return result;    
         
         getShared()->cacheSubtypeWitness(subType, superType, result);
@@ -112,7 +112,7 @@ namespace Slang
         // tangling convertibility into it.
 
         // First, make sure both sub type and super type decl are ready for lookup.
-        if ( !(int(isSubTypeOptions) & int(IsSubTypeOptions::NotReadyForLookup)) )
+        if ( !(int(isSubTypeOptions) & int(IsSubTypeOptions::NoCaching)) )
         {
             if (auto subDeclRefType = as<DeclRefType>(subType))
             {
@@ -274,9 +274,14 @@ namespace Slang
         return isInterfaceType(type);
     }
 
-    bool SemanticsVisitor::isTypeDifferentiable(Type* type)
+    SubtypeWitness* SemanticsVisitor::isTypeDifferentiable(Type* type)
     {
-        return isSubtype(type, m_astBuilder->getDiffInterfaceType(), IsSubTypeOptions::None);
+        if (auto valueWitness = isSubtype(type, m_astBuilder->getDiffInterfaceType(), IsSubTypeOptions::None))
+            return valueWitness;
+        else if (auto ptrWitness = isSubtype(type, m_astBuilder->getDifferentiableRefInterfaceType(), IsSubTypeOptions::None))
+            return ptrWitness;
+        
+        return nullptr;
     }
 
     bool SemanticsVisitor::doesTypeHaveTag(Type* type, TypeTag tag)

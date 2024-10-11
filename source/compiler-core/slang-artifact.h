@@ -143,6 +143,7 @@ enum class ArtifactPayload : uint8_t
     CUDA,           ///< CUDA source
     Metal,          ///< Metal source
     Slang,          ///< Slang source
+    WGSL,           ///< WGSL source
 
     KernelLike,     ///< GPU Kernel like
 
@@ -152,6 +153,7 @@ enum class ArtifactPayload : uint8_t
     PTX,            ///< PTX. NOTE! PTX is a text format, but is handable to CUDA API.
     MetalAIR,       ///< Metal AIR 
     CuBin,          ///< CUDA binary
+    WGSL_SPIRV,     ///< SPIR-V derived via WebGPU shading language
 
     CPULike,        ///< CPU code
     

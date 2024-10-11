@@ -338,7 +338,7 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
         RefPtr<WitnessTable> result = new WitnessTable();
         result->baseType = as<Type>(newBaseType);
         result->witnessedType = as<Type>(newWitnessedType);
-        for (auto requirement : m_requirements)
+        for (auto requirement : m_requirementDictionary)
         {
             auto newRequirement = requirement.value.specialize(astBuilder, subst);
             result->add(requirement.key, newRequirement);
@@ -500,7 +500,6 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
 
     void WitnessTable::add(Decl* decl, RequirementWitness const& witness)
     {
-        m_requirements.add(KeyValuePair<Decl*, RequirementWitness>(decl, witness));
         m_requirementDictionary.add(decl, witness);
     }
 
@@ -891,10 +890,10 @@ Decl* getParentFunc(Decl* decl)
 static const ImageFormatInfo kImageFormatInfos[] =
 {
 #define SLANG_IMAGE_FORMAT_INFO(TYPE, COUNT, SIZE) SLANG_SCALAR_TYPE_##TYPE, uint8_t(COUNT), uint8_t(SIZE)
-#define FORMAT(NAME, OTHER) \
+#define SLANG_FORMAT(NAME, OTHER) \
     { SLANG_IMAGE_FORMAT_INFO OTHER, UnownedStringSlice::fromLiteral(#NAME) },
 #include "slang-image-format-defs.h"
-#undef FORMAT
+#undef SLANG_FORMAT
 #undef SLANG_IMAGE_FORMAT_INFO
 };
 

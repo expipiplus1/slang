@@ -93,6 +93,15 @@ enum IROpMask : std::underlying_type_t<IROp>
     kIROpMask_OpMask = 0x3ff, ///< Mask for just opcode
 };
 
+enum IRMemoryOrder
+{
+    kIRMemoryOrder_Relaxed = 0,
+    kIRMemoryOrder_Acquire = 1,
+    kIRMemoryOrder_Release = 2,
+    kIRMemoryOrder_AcquireRelease = 3,
+    kIRMemoryOrder_SeqCst = 4,
+};
+
 inline int32_t operator&(const IROpMask m, const IROp o)
 {
 #if defined(__cpp_lib_bit_cast)
@@ -564,6 +573,7 @@ enum class IRTypeLayoutRuleName
     Scalar = Natural,
     Std430,
     Std140,
+    D3DConstantBuffer,
     _Count,
 };
 
@@ -1549,6 +1559,15 @@ SIMPLE_IR_TYPE(VerticesType, MeshOutputType)
 SIMPLE_IR_TYPE(IndicesType, MeshOutputType)
 SIMPLE_IR_TYPE(PrimitivesType, MeshOutputType)
 
+struct IRMetalMeshType : IRType
+{
+    IRType* getVerticesType() { return (IRType*)getOperand(0); }
+    IRType* getPrimitivesType() { return (IRType*)getOperand(1); }
+    IRInst* getNumVertices() { return (IRInst*)getOperand(2); }
+    IRInst* getNumPrimitives() { return (IRInst*)getOperand(3); }
+    IRIntLit* getTopology() { return (IRIntLit*)getOperand(4); }
+};
+
 SIMPLE_IR_TYPE(MetalMeshGridPropertiesType, Type)
 
 SIMPLE_IR_TYPE(GLSLInputAttachmentType, Type)
@@ -1604,6 +1623,13 @@ struct IRArrayType: IRArrayTypeBase
 
 SIMPLE_IR_TYPE(UnsizedArrayType, ArrayTypeBase)
 
+struct IRAtomicType : IRType
+{
+    IR_LEAF_ISA(AtomicType)
+
+    IRType* getElementType() { return (IRType*)getOperand(0); }
+};
+
 SIMPLE_IR_PARENT_TYPE(Rate, Type)
 SIMPLE_IR_TYPE(ConstExprRate, Rate)
 SIMPLE_IR_TYPE(GroupSharedRate, Rate)
@@ -1648,6 +1674,11 @@ struct IRDifferentialPairTypeBase : IRType
 struct IRDifferentialPairType : IRDifferentialPairTypeBase
 {
     IR_LEAF_ISA(DifferentialPairType)
+};
+
+struct IRDifferentialPtrPairType : IRDifferentialPairTypeBase
+{
+    IR_LEAF_ISA(DifferentialPtrPairType)
 };
 
 struct IRDifferentialPairUserCodeType : IRDifferentialPairTypeBase
@@ -1933,18 +1964,22 @@ struct IRAttributedType : IRType
     IRInst* getAttr() { return getOperand(1); }
 };
 
+struct IRTupleTypeBase : IRType
+{
+    IR_PARENT_ISA(TupleTypeBase)
+};
+
 /// Represents a tuple. Tuples are created by `IRMakeTuple` and its elements
 /// are accessed via `GetTupleElement(tupleValue, IRIntLit)`.
-struct IRTupleType : IRType
+struct IRTupleType : IRTupleTypeBase
 {
     IR_LEAF_ISA(TupleType)
 };
 
-
 /// Represents a type pack. Type packs behave like tuples, but they have a
 /// "flattening" semantics, so that MakeTypePack(MakeTypePack(T1,T2), T3) is
 /// MakeTypePack(T1,T2,T3).
-struct IRTypePack : IRType
+struct IRTypePack : IRTupleTypeBase
 {
     IR_LEAF_ISA(TypePack)
 };
@@ -2375,9 +2410,6 @@ public:
     {
         return m_containerPool;
     }
-
-    // TODO: make a map with lookup by target?
-    ComPtr<ISlangBlob> precompiledDXIL;
 private:
     IRModule() = delete;
 

@@ -117,13 +117,16 @@ public:
 
 struct ShaderBindingRange;
 
-class IArtifactPostEmitMetadata : public ICastable
+class IArtifactPostEmitMetadata : public slang::IMetadata
 {
 public:
     SLANG_COM_INTERFACE(0x5d03bce9, 0xafb1, 0x4fc8, { 0xa4, 0x6f, 0x3c, 0xe0, 0x7b, 0x6, 0x1b, 0x1b });
 
         /// Get the binding ranges
     SLANG_NO_THROW virtual Slice<ShaderBindingRange> SLANG_MCALL getUsedBindingRanges() = 0;
+
+        /// Get the list of functions that were exported in the linked IR
+    SLANG_NO_THROW virtual Slice<String> SLANG_MCALL getExportedFunctionMangledNames() = 0;
 };
 
 } // namespace Slang

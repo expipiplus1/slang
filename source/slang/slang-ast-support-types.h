@@ -9,7 +9,7 @@
 
 #include "slang-profile.h"
 #include "slang-type-system-shared.h"
-#include "slang.h"
+#include "../../include/slang.h"
 
 #include "../core/slang-semantic-version.h"
 
@@ -187,8 +187,9 @@ namespace Slang
 
     enum class ImageFormat
     {
-#define FORMAT(NAME, OTHER) NAME,
+#define SLANG_FORMAT(NAME, OTHER) NAME,
 #include "slang-image-format-defs.h"
+#undef SLANG_FORMAT
     };
 
     struct ImageFormatInfo
@@ -1510,14 +1511,6 @@ namespace Slang
 
         const RequirementDictionary& getRequirementDictionary()
         {
-            if (m_requirementDictionary.getCount() != m_requirements.getCount())
-            {
-                for (Index i = m_requirementDictionary.getCount(); i < m_requirements.getCount(); i++)
-                {
-                    auto& r = m_requirements[i];
-                    m_requirementDictionary.add(r.key, r.value);
-                }
-            }
             return m_requirementDictionary;
         }
 
@@ -1532,11 +1525,8 @@ namespace Slang
         // Whether or not this witness table is an extern declaration.
         bool isExtern = false;
 
-        // Satisfying values of each requirement.
-        List<KeyValuePair<Decl*, RequirementWitness>> m_requirements;
-
         // Cached dictionary for looking up satisfying values.
-        SLANG_UNREFLECTED RequirementDictionary m_requirementDictionary;
+        RequirementDictionary m_requirementDictionary;
 
         RefPtr<WitnessTable> specialize(ASTBuilder* astBuilder, SubstitutionSet const& subst);
 
@@ -1617,6 +1607,7 @@ namespace Slang
         DefaultInitializableConstructor, ///< The `IDefaultInitializable.__init()` method
 
         DifferentialType, ///< The `IDifferentiable.Differential` associated type requirement 
+        DifferentialPtrType, ///< The `IDifferentiable.DifferentialPtr` associated type requirement
         DZeroFunc, ///< The `IDifferentiable.dzero` function requirement 
         DAddFunc, ///< The `IDifferentiable.dadd` function requirement 
         DMulFunc, ///< The `IDifferentiable.dmul` function requirement 

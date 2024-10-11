@@ -29,9 +29,12 @@ namespace gfx_test
         auto globalSession = slangSession->getGlobalSession();
         globalSession->createSession(sessionDesc, slangSession.writeRef());
 
-        Slang::ComPtr<slang::IBlob> diagnosticsBlob;
-        slang::IModule* module = slangSession->loadModule(shaderModuleName, diagnosticsBlob.writeRef());
-        diagnoseIfNeeded(diagnosticsBlob);
+        slang::IModule* module;
+        {
+            Slang::ComPtr<slang::IBlob> diagnosticsBlob;
+            module = slangSession->loadModule(shaderModuleName, diagnosticsBlob.writeRef());
+            diagnoseIfNeeded(diagnosticsBlob);
+        }
         if (!module)
             return SLANG_FAIL;
 
@@ -43,10 +46,20 @@ namespace gfx_test
             case gfx::DeviceType::DirectX12:
                 target = SLANG_DXIL;
                 break;
+            case gfx::DeviceType::Vulkan:
+                target = SLANG_SPIRV;
+                break;
             default:
                 return SLANG_FAIL;
             }
-            module->precompileForTarget(target, diagnosticsBlob.writeRef());
+
+            ComPtr<slang::IModulePrecompileService_Experimental> precompileService;
+            if (module->queryInterface(slang::SLANG_UUID_IModulePrecompileService_Experimental, (void**)precompileService.writeRef()) == SLANG_OK)
+            {
+                Slang::ComPtr<slang::IBlob> diagnosticsBlob;
+                precompileService->precompileForTarget(target, diagnosticsBlob.writeRef());
+                diagnoseIfNeeded(diagnosticsBlob);
+            }
         }
 
         // Write loaded modules to memory file system.
@@ -206,6 +219,11 @@ namespace gfx_test
     SLANG_UNIT_TEST(precompiledModule2Vulkan)
     {
         runTestImpl(precompiledModule2TestImpl, unitTestContext, Slang::RenderApiFlag::Vulkan);
+    }
+
+    SLANG_UNIT_TEST(precompiledTargetModule2Vulkan)
+    {
+        runTestImpl(precompiledTargetModule2TestImpl, unitTestContext, Slang::RenderApiFlag::Vulkan);
     }
 
 }

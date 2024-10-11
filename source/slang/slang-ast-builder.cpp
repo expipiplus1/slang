@@ -408,15 +408,29 @@ MatrixExpressionType* ASTBuilder::getMatrixType(Type* elementType, IntVal* rowCo
 
 DifferentialPairType* ASTBuilder::getDifferentialPairType(
     Type* valueType,
-    Witness* primalIsDifferentialWitness)
+    Witness* diffTypeWitness)
 {
-    Val* args[] = { valueType, primalIsDifferentialWitness };
+    Val* args[] = { valueType, diffTypeWitness };
     return as<DifferentialPairType>(getSpecializedBuiltinType(makeArrayView(args), "DifferentialPairType"));
+}
+
+DifferentialPtrPairType* ASTBuilder::getDifferentialPtrPairType(
+    Type* valueType,
+    Witness* diffRefTypeWitness)
+{
+    Val* args[] = { valueType, diffRefTypeWitness };
+    return as<DifferentialPtrPairType>(getSpecializedBuiltinType(makeArrayView(args), "DifferentialPtrPairType"));
 }
 
 DeclRef<InterfaceDecl> ASTBuilder::getDifferentiableInterfaceDecl()
 {
     DeclRef<InterfaceDecl> declRef = DeclRef<InterfaceDecl>(getBuiltinDeclRef("DifferentiableType", nullptr));
+    return declRef;
+}
+
+DeclRef<InterfaceDecl> ASTBuilder::getDifferentiableRefInterfaceDecl()
+{
+    DeclRef<InterfaceDecl> declRef = DeclRef<InterfaceDecl>(getBuiltinDeclRef("DifferentiablePtrType", nullptr));
     return declRef;
 }
 
@@ -457,6 +471,11 @@ MeshOutputType* ASTBuilder::getMeshOutputTypeFromModifier(
 Type* ASTBuilder::getDifferentiableInterfaceType()
 {
     return DeclRefType::create(this, getDifferentiableInterfaceDecl());
+}
+
+Type* ASTBuilder::getDifferentiableRefInterfaceType()
+{
+    return DeclRefType::create(this, getDifferentiableRefInterfaceDecl());
 }
 
 DeclRef<Decl> ASTBuilder::getBuiltinDeclRef(const char* builtinMagicTypeName, Val* genericArg)
@@ -523,7 +542,7 @@ FuncType* ASTBuilder::getFuncType(ArrayView<Type*> parameters, Type* result, Typ
     return getOrCreate<FuncType>(parameters, result, errorType);
 }
 
-TupleType* ASTBuilder::getTupleType(List<Type*>& types)
+TupleType* ASTBuilder::getTupleType(ArrayView<Type*> types)
 {
     // The canonical form of a tuple type is always a DeclRefType(GenAppDeclRef(TupleDecl, ConcreteTypePack(types...))).
     // If `types` is already a single ConcreteTypePack, then we can use that directly.
@@ -536,7 +555,7 @@ TupleType* ASTBuilder::getTupleType(List<Type*>& types)
     }
 
     // Otherwise, we need to create a ConcreteTypePack to hold the types.
-    auto typePack = getTypePack(types.getArrayView());
+    auto typePack = getTypePack(types);
     return as<TupleType>(getSpecializedBuiltinType(typePack, "TupleType"));
 }
 

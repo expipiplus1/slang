@@ -26,6 +26,7 @@ __attributeTarget(FunctionDeclBase)
 attribute_syntax [NoDiffThis] : NoDiffThisAttribute;
 
 // A 'none-type' that acts as a run-time sentinel for zero differentials.
+[__AutoDiffBuiltin]
 export struct NullDifferential : IDifferentiable
 { 
     // for now, we'll use at least one field to make sure the type is non-empty
@@ -274,9 +275,10 @@ struct TensorView
     {
         [ForceInline] [__NoSideEffect] get { return load(index); }
         
-        [ForceInline] set
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(index, newValue);
         }
 
@@ -294,9 +296,10 @@ struct TensorView
     {
         [ForceInline] [__NoSideEffect] get { return load(i1, i2); }
 
-        [ForceInline] set
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i1, i2, newValue);
         }
         
@@ -314,13 +317,15 @@ struct TensorView
     {
         [ForceInline] [__NoSideEffect] get { return load(i.x, i.y); }
 
-        [ForceInline] set
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i.x, i.y, newValue);
         }
 
         [__NoSideEffect]
+        [nonmutating]
         ref
         {
             __target_switch
@@ -333,14 +338,16 @@ struct TensorView
     __subscript(uint i1, uint i2, uint i3) -> T
     {
         [ForceInline] [__NoSideEffect] get { return load(i1, i2, i3); }
-        
-        [ForceInline] set
+
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i1, i2, i3, newValue);
         }
 
         [__NoSideEffect]
+        [nonmutating]
         ref
         {
             __target_switch
@@ -354,13 +361,15 @@ struct TensorView
     {
         [ForceInline] [__NoSideEffect] get { return load(i.x, i.y, i.z); }
 
-        [ForceInline] set
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i.x, i.y, i.z, newValue);
         }
 
         [__NoSideEffect]
+        [nonmutating]
         ref
         {
             __target_switch
@@ -372,11 +381,14 @@ struct TensorView
     }
     __subscript(uint i1, uint i2, uint i3, uint i4) -> T
     {
-        [ForceInline] [__NoSideEffect] get { return load(i1, i2, i3, i4); }
+        [ForceInline]
+        [__NoSideEffect]
+        get { return load(i1, i2, i3, i4); }
 
-        [ForceInline] set
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i1, i2, i3, i4, newValue);
         }
 
@@ -394,9 +406,10 @@ struct TensorView
     {
         [__NoSideEffect][ForceInline] get { return load(i.x, i.y, i.z, i.w); }
 
-        [ForceInline] set
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i.x, i.y, i.z, i.w, newValue);
         }
 
@@ -413,14 +426,16 @@ struct TensorView
     __subscript(uint i1, uint i2, uint i3, uint i4, uint i5) -> T
     {
         [ForceInline] [__NoSideEffect] get { return load(i1, i2, i3, i4, i5); }
-        
-        [ForceInline] set
+
+        [ForceInline]
+        [nonmutating]
+        set
         {
-            unmodified(this);
             store(i1, i2, i3, i4, i5, newValue);
         }
 
         [__NoSideEffect]
+        [nonmutating]
         ref
         {
             __target_switch
@@ -893,63 +908,70 @@ struct DiffTensorView
     __subscript(uint index)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(index); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(index, newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(index, newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
     __subscript(uint2 index)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(index); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(index, newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(index, newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
     __subscript(uint x, uint y)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(uint2(x, y)); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(uint2(x, y), newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(uint2(x, y), newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
     __subscript(uint3 index)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(index); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(index, newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(index, newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
     __subscript(uint x, uint y, uint z)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(uint3(x, y, z)); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(uint3(x, y, z), newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(uint3(x, y, z), newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
     __subscript(uint4 index)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(index); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(index, newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(index, newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
     __subscript(uint x, uint y, uint z, uint w)->T
     {
         [__unsafeForceInlineEarly] [Differentiable] [__NoSideEffect] get { return load(uint4(x, y, z, w)); }
-        [__unsafeForceInlineEarly] [Differentiable] set { store(uint4(x, y, z, w), newValue); }
+        [__unsafeForceInlineEarly] [Differentiable] [nonmutating] set { store(uint4(x, y, z, w), newValue); }
 
         [__NoSideEffect]
+        [nonmutating]
         ref;
     }
 
@@ -1207,6 +1229,31 @@ extension Array<T, N> : IDifferentiable
         for (int i = 0; i < N; i++)
             result[i] = T.dmul<U>(a, b[i]);
         return result;
+    }
+}
+
+__generic<each T : IDifferentiable>
+extension Tuple<T> : IDifferentiable
+{
+    typealias Differential = Tuple<expand(each T).Differential>;
+
+    [__unsafeForceInlineEarly]
+    static Differential dzero()
+    {
+        return makeTuple(expand (each T).dzero());
+    }
+
+    [__unsafeForceInlineEarly]
+    static Differential dadd(Differential a, Differential b)
+    {
+        return makeTuple(expand(each T).dadd(each a, each b));
+    }
+
+    __generic<U : __BuiltinRealType>
+    [__unsafeForceInlineEarly]
+    static Differential dmul(U a, Differential b)
+    {
+        return makeTuple(expand(each T).dmul(a, each b));
     }
 }
 

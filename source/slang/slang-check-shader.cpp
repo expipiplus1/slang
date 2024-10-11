@@ -235,75 +235,26 @@ namespace Slang
         Name*                   name,
         DiagnosticSink*         sink)
     {
-        auto translationUnitSyntax = translationUnit->getModuleDecl();
         FuncDecl* entryPointFuncDecl = nullptr;
 
-        for (auto globalScope = translationUnit->getModuleDecl()->ownedScope; globalScope; globalScope = globalScope->nextSibling)
+        auto expr = translationUnit->findDeclFromString(getText(name), sink);   
+        if (auto declRefExpr = as<DeclRefExpr>(expr))
         {
-            if (globalScope->containerDecl != translationUnitSyntax && globalScope->containerDecl->parentDecl != translationUnitSyntax)
-                continue; // Skip scopes that aren't part of the current module.
+            auto declRef = declRefExpr->declRef;
+            entryPointFuncDecl = declRef.as<FuncDecl>().getDecl();
 
-            // We will look up any global-scope declarations in the translation
-            // unit that match the name of our entry point.
-            Decl* firstDeclWithName = nullptr;
-            if (!globalScope->containerDecl->getMemberDictionary().tryGetValue(name, firstDeclWithName))
-            {
-                // If there doesn't appear to be any such declaration, then we are done with this scope.
-                continue;
-            }
-
-            // We found at least one global-scope declaration with the right name,
-            // but (1) it might not be a function, and (2) there might be
-            // more than one function.
-            //
-            // We'll walk the linked list of declarations with the same name,
-            // to see what we find. Along the way we'll keep track of the
-            // first function declaration we find, if any:
-            for (auto ee = firstDeclWithName; ee; ee = ee->nextInContainerWithSameName)
-            {
-                // Is this declaration a function?
-                if (auto funcDecl = as<FuncDecl>(ee))
-                {
-                    // Skip non-primary declarations, so that
-                    // we don't give an error when an entry
-                    // point is forward-declared.
-                    if (!isPrimaryDecl(funcDecl))
-                        continue;
-
-                    // is this the first one we've seen?
-                    if (!entryPointFuncDecl)
-                    {
-                        // If so, this is a candidate to be
-                        // the entry point function.
-                        entryPointFuncDecl = funcDecl;
-                    }
-                    else
-                    {
-                        // Uh-oh! We've already seen a function declaration with this
-                        // name before, so the whole thing is ambiguous. We need
-                        // to diagnose and bail out.
-
-                        sink->diagnose(translationUnitSyntax, Diagnostics::ambiguousEntryPoint, name);
-
-                        // List all of the declarations that the user *might* mean
-                        for (auto ff = firstDeclWithName; ff; ff = ff->nextInContainerWithSameName)
-                        {
-                            if (auto candidate = as<FuncDecl>(ff))
-                            {
-                                sink->diagnose(candidate, Diagnostics::entryPointCandidate, candidate->getName());
-                            }
-                        }
-
-                        // Bail out.
-                        return nullptr;
-                    }
-                }
-            }
+            if (entryPointFuncDecl && getModule(entryPointFuncDecl) != translationUnit)
+                entryPointFuncDecl = nullptr;
         }
 
-        if (!entryPointFuncDecl)
-            sink->diagnose(translationUnitSyntax, Diagnostics::entryPointFunctionNotFound, name);
+        if (entryPointFuncDecl && getModule(entryPointFuncDecl) != translationUnit)
+            entryPointFuncDecl = nullptr;
 
+        if (!entryPointFuncDecl)
+        {
+            auto translationUnitSyntax = translationUnit->getModuleDecl();
+            sink->diagnose(translationUnitSyntax, Diagnostics::entryPointFunctionNotFound, name);
+        }
         return entryPointFuncDecl;
     }
 
@@ -557,7 +508,7 @@ namespace Slang
         for (auto target : linkage->targets)
         {
             auto targetCaps = target->getTargetCaps();
-            auto stageCapabilitySet = CapabilitySet(entryPoint->getProfile().getCapabilityName());
+            auto stageCapabilitySet = entryPoint->getProfile().getCapabilityName();
             targetCaps.join(stageCapabilitySet);
             if (targetCaps.isIncompatibleWith(entryPointFuncDecl->inferredCapabilityRequirements))
             {
@@ -613,20 +564,23 @@ namespace Slang
         if (auto entryPointAttr = entryPointFuncDecl->findModifier<EntryPointAttribute>())
         {
             auto entryPointProfileStage = entryPointProfile.getStage();
-            // Ensure every target is specifying the same stage as an entry` point
+            auto entryPointStage = getStageFromAtom(entryPointAttr->capabilitySet.getTargetStage());
+
+            // Ensure every target is specifying the same stage as an entry-point
             // if a profile+stage was set, else user will not be aware that their
             // code is requiring `fragment` on a `vertex` shader
             for (auto target : targets)
             {
                 auto targetProfile = target->getOptionSet().getProfile();
                 auto profileStage = targetProfile.getStage();
-                if (profileStage != Stage::Unknown && profileStage != entryPointAttr->stage)
-                    maybeDiagnose(sink, optionSet, DiagnosticCategory::Capability, entryPointAttr, Diagnostics::entryPointAndProfileAreIncompatible, entryPointFuncDecl, entryPointAttr->stage, targetProfile.getName());
+                if (profileStage != Stage::Unknown && profileStage != entryPointStage)
+                    maybeDiagnose(sink, optionSet, DiagnosticCategory::Capability, entryPointAttr, Diagnostics::entryPointAndProfileAreIncompatible, entryPointFuncDecl, entryPointStage, targetProfile.getName());
             }
             if (entryPointProfileStage == Stage::Unknown)
-                entryPointProfile.setStage(entryPointAttr->stage);
-            else if (entryPointProfileStage != Stage::Unknown && entryPointProfileStage != entryPointAttr->stage)
-                maybeDiagnose(sink, optionSet, DiagnosticCategory::Capability, entryPointFuncDecl, Diagnostics::specifiedStageDoesntMatchAttribute, entryPointFuncDecl->getName(), entryPointProfileStage, entryPointAttr->stage);
+                entryPointProfile = Profile(entryPointStage);
+            else if (entryPointProfileStage != Stage::Unknown && entryPointProfileStage != entryPointStage)
+                maybeDiagnose(sink, optionSet, DiagnosticCategory::Capability, entryPointFuncDecl, Diagnostics::specifiedStageDoesntMatchAttribute, entryPointFuncDecl->getName(), entryPointProfileStage, entryPointStage);
+            entryPointProfile.additionalCapabilities.add(entryPointAttr->capabilitySet);
             return true;
         }
         return false;
