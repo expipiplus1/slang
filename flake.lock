@@ -1,5 +1,18 @@
 {
   "nodes": {
+    "dxc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1728027032,
+        "narHash": "sha256-RQJOXD0H5SX0CyzgAkDZu1qFgS78AbyP2ZoKpFMhXeU=",
+        "path": "/home/e/work/DirectXShaderCompiler",
+        "type": "path"
+      },
+      "original": {
+        "path": "/home/e/work/DirectXShaderCompiler",
+        "type": "path"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1724224976,
@@ -18,6 +31,7 @@
     },
     "root": {
       "inputs": {
+        "dxc": "dxc",
         "nixpkgs": "nixpkgs"
       }
     }

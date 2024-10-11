@@ -1,9 +1,13 @@
 {
   description = "The Slang compiler";
 
-  inputs = { nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; };
+  inputs = { nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; 
+  dxc = {
+    url = "/home/e/work/DirectXShaderCompiler";
+    flake = false;
+  };};
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, dxc }:
     let
       shader-slang = {
         # build tools
@@ -61,17 +65,17 @@
 
             cmake --preset default \
               $cmakeFlags \
-              -DSLANG_EMBED_STDLIB=1 \
-              -DSLANG_EMBED_STDLIB_SOURCE=0 \
+              -DSLANG_EMBED_STDLIB=0 \
+              -DSLANG_EMBED_STDLIB_SOURCE=1 \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
               -DCMAKE_CXX_COMPILER=clang++ \
               -DCMAKE_C_COMPILER=clang \
               --fresh
             cp build/compile_commands.json .
-            cmake --build --preset debug --target spirv-dis --target spirv-val --target spirv-opt --target glslang-standalone
             cmake --preset default \
               $cmakeFlags \
               --fresh
+            cmake --build --preset debug --target spirv-dis --target spirv-val --target spirv-opt --target glslang-standalone
             mk "$@"
           '';
 
@@ -224,6 +228,7 @@
                 # glslang
                 directx-shader-compiler
                 renderdoc
+                # vulkan-tools
                 spirv-cross
                 # Build utilities from this flake
                 make-helper
@@ -256,6 +261,7 @@
                     "etc/vulkan/implicit_layer.d"
                   ]);
               in makeVkLayerPath ([
+                # vulkan-validation-layers
                 vulkan-tools-lunarg
                 renderdoc
               ])
@@ -421,6 +427,8 @@
           ];
         };
 
+        directx-shader-compiler = super.directx-shader-compiler.overrideAttrs
+          (old: { src = dxc; });
       });
     in {
       packages = nixpkgs.lib.attrsets.genAttrs [
@@ -441,8 +449,9 @@
           #   enableDXC = false;
           # };
           slang = (pkgs.shader-slang.override {
-            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
+            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
             enableDirectX = true;
+            enableCuda = false;
           }).overrideAttrs (old: {
             CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
             CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
