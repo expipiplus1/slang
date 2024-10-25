@@ -10,6 +10,11 @@ get_git_version(
     "${CMAKE_CURRENT_LIST_DIR}"
 )
 
+message(
+WARNING 
+"This is a badly formatted change"
+)
+
 #
 # Our project
 #
