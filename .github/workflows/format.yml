@@ -26,6 +26,18 @@ jobs:
 
       - run: ./extras/formatting.sh
 
+      - run: |
+          git config gpg.format ssh
+          git config user.signingkey ~/.ssh/examplekey.pub
+
+      - name: Configure Git commit signing
+        run: |
+          echo "${{ secrets.SLANGBOT_SIGNING_KEY }}" > "${{runner.temp}}"/signing_key
+          chmod 600 "${{runner.temp}}"/signing_key
+          git config commit.gpgsign true
+          git config gpg.format ssh
+          git config user.signingkey "${{runner.temp}}"/signing_key
+
       - uses: EndBug/add-and-commit@v9
         with:
           fetch: false
