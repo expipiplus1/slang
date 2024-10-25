@@ -3,8 +3,12 @@ cmake_minimum_required(VERSION 3.22)
 # Our module dir, include that now so that we can get the version automatically
 # from git describe
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
-include(                               GitVersion)
-get_git_version( SLANG_VERSION_NUMERIC SLANG_VERSION_FULL "${CMAKE_CURRENT_LIST_DIR}")
+include(GitVersion)
+get_git_version(
+    SLANG_VERSION_NUMERIC
+    SLANG_VERSION_FULL
+    "${CMAKE_CURRENT_LIST_DIR}"
+)
 
 #
 # Our project
