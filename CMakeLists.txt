@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
+# test change
+
 # Our module dir, include that now so that we can get the version automatically
 # from git describe
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
