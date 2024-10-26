@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 # test change
+# another test
 
 # Our module dir, include that now so that we can get the version automatically
 # from git describe
