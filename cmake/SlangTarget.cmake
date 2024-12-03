@@ -18,6 +18,8 @@ function(slang_add_target dir type)
         WIN32_EXECUTABLE
         # Install this target for a non-component install
         INSTALL
+        # Install debug symbols separately
+        INSTALL_DEBUG_SYMBOLS
         # Don't include any source in this target, this is a complement to
         # EXPLICIT_SOURCE, and doesn't interact with EXTRA_SOURCE_DIRS
         NO_SOURCE
@@ -171,6 +173,9 @@ function(slang_add_target dir type)
     #
     if(DEFINED ARG_OUTPUT_DIR)
         set(output_dir "${CMAKE_BINARY_DIR}/${ARG_OUTPUT_DIR}/$<CONFIG>")
+        set(debug_output_dir
+            "${CMAKE_BINARY_DIR}/${ARG_OUTPUT_DIR}/$<CONFIG>/debug-symbols"
+        )
     else()
         # Default to placing things in the cmake binary root.
         #
@@ -178,6 +183,7 @@ function(slang_add_target dir type)
         # subdirectory, Windows' inflexibility in being able to find DLLs makes
         # this tricky there.
         set(output_dir "${CMAKE_BINARY_DIR}/$<CONFIG>")
+        set(debug_output_dir "${CMAKE_BINARY_DIR}/$<CONFIG>/debug-symbols")
     endif()
     set(archive_subdir ${library_subdir})
     if(type STREQUAL "MODULE")
@@ -189,8 +195,42 @@ function(slang_add_target dir type)
             ARCHIVE_OUTPUT_DIRECTORY "${output_dir}/${archive_subdir}"
             LIBRARY_OUTPUT_DIRECTORY "${output_dir}/${library_subdir}"
             RUNTIME_OUTPUT_DIRECTORY "${output_dir}/${runtime_subdir}"
-            PDB_OUTPUT_DIRECTORY "${output_dir}/${runtime_subdir}"
     )
+
+    # Debug symbol handling
+    if(MSVC)
+        # Windows PDB handling
+        set_target_properties(
+            ${target}
+            PROPERTIES
+                COMPILE_PDB_NAME "${target}"
+                COMPILE_PDB_OUTPUT_DIRECTORY "${debug_output_dir}"
+                PDB_NAME "${target}"
+                PDB_OUTPUT_DIRECTORY "${debug_output_dir}"
+        )
+    else()
+        # Linux/Unix debug symbol handling
+        if(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")
+            target_compile_options(${target} PRIVATE -g)
+
+            add_custom_command(
+                TARGET ${target}
+                POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${debug_output_dir}
+                COMMAND
+                    objcopy --only-keep-debug $<TARGET_FILE:${target}>
+                    ${debug_output_dir}/$<TARGET_FILE_NAME:${target}>.debug
+                COMMAND
+                    strip --strip-debug --strip-unneeded
+                    $<TARGET_FILE:${target}>
+                COMMAND
+                    objcopy
+                    --add-gnu-debuglink=${debug_output_dir}/$<TARGET_FILE_NAME:${target}>.debug
+                    $<TARGET_FILE:${target}>
+                COMMENT "Extracting debug symbols for ${target}"
+            )
+        endif()
+    endif()
 
     #
     # Set common compile options and properties
@@ -412,6 +452,27 @@ function(slang_add_target dir type)
             RUNTIME DESTINATION ${runtime_subdir} ${ARGN}
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} ${ARGN}
         )
+
+        if(ARG_INSTALL_DEBUG_SYMBOLS)
+            if(MSVC)
+                # Install PDB files
+                install(
+                    FILES $<TARGET_PDB_FILE:${target}>
+                    DESTINATION ${runtime_subdir}/debug-symbols
+                    OPTIONAL
+                    ${ARGN}
+                )
+            else()
+                # Install split debug files
+                install(
+                    FILES
+                        ${debug_output_dir}/$<TARGET_FILE_NAME:${target}>.debug
+                    DESTINATION ${runtime_subdir}/debug-symbols
+                    OPTIONAL
+                    ${ARGN}
+                )
+            endif()
+        endif()
     endmacro()
     if(ARG_INSTALL)
         i()
