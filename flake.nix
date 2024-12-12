@@ -212,13 +212,15 @@
             "-DSLANG_ENABLE_DX_ON_VK=${if enableDirectX then "1" else "0"}"
           ];
 
-          buildInputs = [ spirv-tools libX11 llvm libclang zlib libxml2 ] ++ [
-            # For any cross build of llvm
-            pkgsCross.aarch64-multiplatform.ncurses
-            pkgsCross.aarch64-multiplatform.libxml2
-            pkgsCross.aarch64-multiplatform.xz
-            pkgsCross.aarch64-multiplatform.zlib
-          ] ++ lib.optional enableDirectX dxvk-native-headers
+          buildInputs = [ spirv-tools llvm libclang zlib libxml2 ]
+            ++ lib.optional stdenv.targetPlatform.isLinux libX11 ++ [
+
+              # For any cross build of llvm
+              pkgsCross.aarch64-multiplatform.ncurses
+              pkgsCross.aarch64-multiplatform.libxml2
+              pkgsCross.aarch64-multiplatform.xz
+              pkgsCross.aarch64-multiplatform.zlib
+            ] ++ lib.optional enableDirectX dxvk-native-headers
             ++ lib.optional enableCuda cudaPackages.cudatoolkit;
 
           enableParallelBuilding = true;
@@ -469,6 +471,11 @@
               enableDirectX = false;
               enableDXC = false;
             };
+          slang-mingw64 = pkgs.pkgsCross.mingwW64.shader-slang.override {
+            enableCuda = false;
+            enableDirectX = false;
+            enableDXC = false;
+          };
           slang = (pkgs.shader-slang.override {
             stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
             enableDirectX = true;
@@ -489,7 +496,7 @@
               (old: { separateDebugInfo = true; });
           });
 
-          default = slang;
+          default = slang-mingw64;
         });
     };
 }
