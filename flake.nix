@@ -1,11 +1,13 @@
 {
   description = "The Slang compiler";
 
-  inputs = { nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; 
-  dxc = {
-    url = "/home/e/work/DirectXShaderCompiler";
-    flake = false;
-  };};
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    dxc = {
+      url = "/home/e/work/DirectXShaderCompiler";
+      flake = false;
+    };
+  };
 
   outputs = { self, nixpkgs, dxc }:
     let
@@ -22,13 +24,16 @@
         , dxvk_2, vkd3d, vkd3d-proton, dxvk-native-headers
         , directx-shader-compiler
         # devtools
-        , glslang, python3, clang_16, bear, renderdoc, writeShellScriptBin
-        , swiftshader, vulkan-tools, spirv-cross, gersemi, pkgsCross
+        , glslang, python3, clang_17, bear, renderdoc, writeShellScriptBin
+        , swiftshader, vulkan-tools, spirv-cross, gersemi, pkgsCross, emscripten
+        , shfmt, nodePackages, mono, p7zip
         # "release" or "debug"
         , buildConfig ? "release"
           # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
           # optix toolkits
         , enableCuda ? true
+          # Pure emscripten in build env
+        , enableWasm ? true
           # Allow loading and running DXC to generate DXIL output
         , enableDXC ? true
           # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
@@ -65,8 +70,8 @@
 
             cmake --preset default \
               $cmakeFlags \
-              -DSLANG_EMBED_STDLIB=0 \
-              -DSLANG_EMBED_STDLIB_SOURCE=1 \
+              -DSLANG_EMBED_CORE_MODULE=0 \
+              -DSLANG_EMBED_CORE_MODULE_SOURCE=1 \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
               -DCMAKE_CXX_COMPILER=clang++ \
               -DCMAKE_C_COMPILER=clang \
@@ -180,16 +185,30 @@
         in stdenv.mkDerivation {
           name = "slang";
           src = self;
-          nativeBuildInputs =
-            [ pkg-config cmake ninja makeWrapper gersemi clang_16 premake5 ] ++
+          nativeBuildInputs = [
+            pkg-config
+            cmake
+            ninja
+            makeWrapper
+            gersemi
+            nodePackages.prettier
+            shfmt
+            clang_17
+            premake5
+            mono
+            p7zip
+          ] ++
             # So we can find libcuda.so at runtime in /run/opengl or wherever
-            lib.optional enableCuda autoAddDriverRunpath;
+            lib.optional enableCuda autoAddDriverRunpath
+            ++ lib.optional enableWasm emscripten;
           NIX_LDFLAGS =
             lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
           autoPatchelfIgnoreMissingDeps = lib.optional enableCuda "libcuda.so";
 
           cmakeFlags = [
             "-DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM"
+            "-DSLANG_EMBED_CORE_MODULE=0"
+            "-DSLANG_EMBED_CORE_MODULE_SOURCE=1"
             "-DSLANG_ENABLE_DX_ON_VK=${if enableDirectX then "1" else "0"}"
           ];
 
@@ -226,8 +245,8 @@
                 # implementation used in the compiler comes from slang-glslang
                 # above, similarly dxc is loaded via shared library
                 # glslang
-                directx-shader-compiler
-                renderdoc
+                # directx-shader-compiler
+                # renderdoc
                 # vulkan-tools
                 spirv-cross
                 # Build utilities from this flake
@@ -242,7 +261,7 @@
                 pkgsCross.aarch64-multiplatform.buildPackages.gcc
               ]
             }"
-            export PATH="build/external/spirv-tools/tools/Debug:build/external/glslang/StandAlone/Debug:$PATH"
+            export PATH="build/Debug/build/external/spirv-tools/tools/Debug:build/external/glslang/StandAlone/Debug:$PATH"
 
             export LD_LIBRARY_PATH="${testsRuntimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 
@@ -263,7 +282,7 @@
               in makeVkLayerPath ([
                 # vulkan-validation-layers
                 vulkan-tools-lunarg
-                renderdoc
+                # renderdoc
               ])
             }''${VK_LAYER_PATH:+:''${VK_LAYER_PATH}}"
 
@@ -414,21 +433,22 @@
 
         gersemi = self.python3Packages.buildPythonApplication rec {
           pname = "gersemi";
-          version = "0.9.3";
+          version = "0.17.0";
           src = self.fetchPypi {
             inherit pname version;
-            sha256 = "sha256-fNhmq9KKOwlc50iDEd9pqHCM0br9Yt+nKtrsoS1d5ng=";
+            sha256 = "sha256-MH5J4jLf0DWtbf9AH5G1Ep/kff5/pVhvhL9F9M1QXJc=";
           };
           doCheck = false;
           propagatedBuildInputs = [
             self.python3Packages.appdirs
             self.python3Packages.lark
             self.python3Packages.pyyaml
+            self.python3Packages.colorama
           ];
         };
 
-        directx-shader-compiler = super.directx-shader-compiler.overrideAttrs
-          (old: { src = dxc; });
+        # directx-shader-compiler =
+        #   super.directx-shader-compiler.overrideAttrs (old: { src = dxc; });
       });
     in {
       packages = nixpkgs.lib.attrsets.genAttrs [
@@ -443,11 +463,12 @@
             overlays = [ overlay ];
           };
         in rec {
-          # slang = pkgs.pkgsCross.aarch64-multiplatform.shader-slang.override {
-          #   enableCuda = false;
-          #   enableDirectX = false;
-          #   enableDXC = false;
-          # };
+          slang-aarch64 =
+            pkgs.pkgsCross.aarch64-multiplatform.shader-slang.override {
+              enableCuda = false;
+              enableDirectX = false;
+              enableDXC = false;
+            };
           slang = (pkgs.shader-slang.override {
             stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
             enableDirectX = true;
