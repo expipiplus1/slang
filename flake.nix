@@ -13,7 +13,7 @@
     let
       shader-slang = {
         # build tools
-        lib, stdenv, makeWrapper, cmake, ninja, pkg-config, premake5
+        lib, stdenv, makeWrapper, cmake, ninja, pkg-config, premake5, pkgs
         # external deps
         , spirv-tools, libX11, gcc, llvm, libclang, zlib, libxml2
         # cuda
@@ -24,11 +24,14 @@
         , dxvk_2, vkd3d, vkd3d-proton, dxvk-native-headers
         , directx-shader-compiler
         # devtools
-        , glslang, python3, clang_17, bear, renderdoc, writeShellScriptBin
-        , swiftshader, vulkan-tools, spirv-cross, gersemi, pkgsCross, emscripten
-        , shfmt, nodePackages, mono, p7zip
+        , glslang, python3, clang_17, llvmPackages_17, bear, renderdoc
+        , writeShellScriptBin, swiftshader, vulkan-tools, spirv-cross, gersemi
+        , pkgsCross, emscripten, valgrind, kcachegrind, shfmt, nodePackages
+        , mono, p7zip, lua
         # "release" or "debug"
         , buildConfig ? "release"
+          # Allow slang to use LLvm as a backend
+        , enableLLVM ? true
           # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
           # optix toolkits
         , enableCuda ? true
@@ -43,7 +46,9 @@
         , enableDirectX ? false
           # Put Swiftshader in the shell environment and force its usage via
           # VK_ICD_FILENAMES, again, only used for tests
-        , enableSwiftshader ? false }:
+        , enableSwiftshader ? false
+          # Embed a compiled core module instead of the source
+        , embedCoreModule ? false }:
         let
           # A script in the devshell which calls `make` with the
           # correct options for the arch, call like `mk` (for a debug
@@ -70,8 +75,12 @@
 
             cmake --preset default \
               $cmakeFlags \
-              -DSLANG_EMBED_CORE_MODULE=0 \
-              -DSLANG_EMBED_CORE_MODULE_SOURCE=1 \
+              -DSLANG_EMBED_CORE_MODULE=${
+                if embedCoreModule then "1" else "0"
+              } \
+              -DSLANG_EMBED_CORE_MODULE_SOURCE=${
+                if embedCoreModule then "0" else "1"
+              } \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
               -DCMAKE_CXX_COMPILER=clang++ \
               -DCMAKE_C_COMPILER=clang \
@@ -141,6 +150,7 @@
                   for s in compute vertex fragment; do
                     go "$s" "$s"Main
                   done
+                  go "compute" "kernelMain"
                 fi
               done
 
@@ -165,7 +175,8 @@
             fi
           '';
 
-          runtimeLibraries = lib.optional enableDXC directx-shader-compiler;
+          runtimeLibraries = lib.optional enableDXC directx-shader-compiler
+            ++ [ stdenv.cc.cc.lib ]; # Always include the compiler's runtime
           runtimeLibraryPath = lib.makeLibraryPath runtimeLibraries;
           testsRuntimeLibraryPath = lib.makeLibraryPath (runtimeLibraries
             ++ [ vulkan-loader ] ++ lib.optionals enableCuda [
@@ -186,55 +197,66 @@
           name = "slang";
           src = self;
           nativeBuildInputs = [
-            pkg-config
             cmake
             ninja
-            makeWrapper
+            lua
             gersemi
+            valgrind
+            kcachegrind
             nodePackages.prettier
             shfmt
             clang_17
-            premake5
+            llvmPackages_17.bintools
             mono
             p7zip
+            stdenv.cc
           ] ++
             # So we can find libcuda.so at runtime in /run/opengl or wherever
             lib.optional enableCuda autoAddDriverRunpath
             ++ lib.optional enableWasm emscripten;
           NIX_LDFLAGS =
             lib.optional enableCuda "-L${cudaPackages.cudatoolkit}/lib/stubs";
+          # LD_LIBRARY_PATH = "${pkgs.buildPackages.stdenv.cc.cc.lib}/lib/";
+          LD_LIBRARY_PATH = lib.makeLibraryPath [ stdenv.cc.cc.lib ];
+
           autoPatchelfIgnoreMissingDeps = lib.optional enableCuda "libcuda.so";
 
           cmakeFlags = [
-            "-DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM"
-            "-DSLANG_EMBED_CORE_MODULE=0"
-            "-DSLANG_EMBED_CORE_MODULE_SOURCE=1"
+            "-DSLANG_SLANG_LLVM_FLAVOR=${
+              if enableLLVM then "USE_SYSTEM_LLVM" else "DISABLE"
+            }"
+            "-DSLANG_EMBED_CORE_MODULE=${if embedCoreModule then "1" else "0"}"
+            "-DSLANG_EMBED_CORE_MODULE_SOURCE=${
+              if embedCoreModule then "0" else "1"
+            }"
             "-DSLANG_ENABLE_DX_ON_VK=${if enableDirectX then "1" else "0"}"
           ];
 
-          buildInputs = [ spirv-tools llvm libclang zlib libxml2 ]
+          buildInputs = [ zlib libxml2 ]
             ++ lib.optional stdenv.targetPlatform.isLinux libX11 ++ [
-
               # For any cross build of llvm
               pkgsCross.aarch64-multiplatform.ncurses
               pkgsCross.aarch64-multiplatform.libxml2
               pkgsCross.aarch64-multiplatform.xz
               pkgsCross.aarch64-multiplatform.zlib
-            ] ++ lib.optional enableDirectX dxvk-native-headers
-            ++ lib.optional enableCuda cudaPackages.cudatoolkit;
+            ] ++ lib.optionals enableLLVM [ llvm libclang ]
+            ++ lib.optional enableDirectX dxvk-native-headers
+            ++ lib.optional enableCuda cudaPackages.cudatoolkit
+            ++ lib.optional (stdenv.cc.isGNU && stdenv.cc.version == "14")
+            gcc.cc.lib; # Add this line
 
           enableParallelBuilding = true;
-          hardeningDisable = lib.optional (buildConfig == "debug") "fortify";
+          # hardeningDisable = lib.optional (buildConfig == "debug") "fortify";
 
-          postFixup = ''
+          postFixup = lib.optional stdenv.targetPlatform.isLinux ''
             for bin in $(find "$out" -executable -type f -not -name slangc); do
               if [[ $bin == */slangc ]] then
                 wrapProgram $bin \
-                  --prefix PATH : ${lib.makeBinPath [ spirv-tools gcc ]} \
+                  --prefix PATH : ${lib.makeBinPath [ gcc ]} \
                   --prefix LD_LIBRARY_PATH : ${runtimeLibraryPath}
               else
                 wrapProgram $bin \
-                  --prefix PATH : ${lib.makeBinPath [ spirv-tools gcc ]} \
+                  --prefix PATH : ${lib.makeBinPath [ gcc ]} \
                   --prefix LD_LIBRARY_PATH : ${testsRuntimeLibraryPath}
               fi
             done
@@ -247,7 +269,7 @@
                 # implementation used in the compiler comes from slang-glslang
                 # above, similarly dxc is loaded via shared library
                 # glslang
-                # directx-shader-compiler
+                directx-shader-compiler
                 # renderdoc
                 # vulkan-tools
                 spirv-cross
@@ -260,13 +282,29 @@
                 # Used in the bump-glslang.sh script
                 python3
                 # For cross builds
-                pkgsCross.aarch64-multiplatform.buildPackages.gcc
+                # pkgsCross.aarch64-multiplatform.buildPackages.gcc
               ]
             }"
             export PATH="build/Debug/build/external/spirv-tools/tools/Debug:build/external/glslang/StandAlone/Debug:$PATH"
 
-            export LD_LIBRARY_PATH="${testsRuntimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+            export LD_LIBRARY_PATH="${
+              lib.makeLibraryPath [ stdenv.cc.cc.lib ]
+            }:${testsRuntimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 
+            # Disable 'fortify' hardening as it makes warnings in debug mode
+            # Disable 'format' hardening as some of the tests generate offending output
+            export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow relro bindnow"
+          '' + lib.optionalString enableSwiftshader ''
+            export VK_ICD_FILENAMES=${swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json
+          '' + lib.optionalString enableCuda ''
+            # cuda
+            export CUDA_PATH="${cudaPackages.cudatoolkit}''${CUDA_PATH:+:''${CUDA_PATH}}"
+          '' + lib.optionalString enableDirectX ''
+            # dxvk and vkd3d-proton
+            # Make dxvk and vkd3d-proton less noisy
+            export VKD3D_DEBUG=err
+            export DXVK_LOG_LEVEL=error
+          '' + lib.optionalString stdenv.targetPlatform.isLinux ''
             # Provision several handy Vulkan tools and make them available
             export VK_LAYER_PATH="${
               let
@@ -286,22 +324,8 @@
                 vulkan-tools-lunarg
                 # renderdoc
               ])
-            }''${VK_LAYER_PATH:+:''${VK_LAYER_PATH}}"
+            }''${VK_LAYER_PATH:+:''${VK_LAYER_PATH}}"'';
 
-            # Disable 'fortify' hardening as it makes warnings in debug mode
-            # Disable 'format' hardening as some of the tests generate offending output
-            export NIX_HARDENING_ENABLE="stackprotector pic strictoverflow relro bindnow"
-          '' + lib.optionalString enableSwiftshader ''
-            export VK_ICD_FILENAMES=${swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json
-          '' + lib.optionalString enableCuda ''
-            # cuda
-            export CUDA_PATH="${cudaPackages.cudatoolkit}''${CUDA_PATH:+:''${CUDA_PATH}}"
-          '' + lib.optionalString enableDirectX ''
-            # dxvk and vkd3d-proton
-            # Make dxvk and vkd3d-proton less noisy
-            export VKD3D_DEBUG=err
-            export DXVK_LOG_LEVEL=error
-          '';
         };
 
       modifyLlvmPackages = base:
@@ -471,15 +495,17 @@
               enableDirectX = false;
               enableDXC = false;
             };
-          slang-mingw64 = pkgs.pkgsCross.mingwW64.shader-slang.override {
+          slang-ucrt64 = pkgs.pkgsCross.ucrt64.shader-slang.override {
             enableCuda = false;
             enableDirectX = false;
             enableDXC = false;
+            enableLLVM = false;
           };
           slang = (pkgs.shader-slang.override {
             stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
             enableDirectX = true;
             enableCuda = false;
+            enableLLVM = false;
           }).overrideAttrs (old: {
             CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
             CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
@@ -496,7 +522,7 @@
               (old: { separateDebugInfo = true; });
           });
 
-          default = slang-mingw64;
+          default = slang;
         });
     };
 }
