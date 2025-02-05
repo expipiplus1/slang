@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     dxc = {
-      url = "/home/e/work/DirectXShaderCompiler";
+      url = "/home/e/work/old/DirectXShaderCompiler";
       flake = false;
     };
   };
@@ -14,6 +14,7 @@
       shader-slang = {
         # build tools
         lib, stdenv, makeWrapper, cmake, ninja, pkg-config, premake5, pkgs
+        , autoPatchelfHook
         # external deps
         , spirv-tools, libX11, gcc, llvm, libclang, zlib, libxml2
         # cuda
@@ -189,7 +190,9 @@
           src = self;
           nativeBuildInputs = [
             cmake
+            autoPatchelfHook
             ninja
+            makeWrapper
             gersemi
             nodePackages.prettier
             shfmt
@@ -218,7 +221,7 @@
             "-DSLANG_ENABLE_DX_ON_VK=${if enableDirectX then "1" else "0"}"
           ];
 
-          buildInputs = [ zlib libxml2 ]
+          buildInputs = [ zlib libxml2 stdenv.cc.cc.lib ]
             ++ lib.optional stdenv.targetPlatform.isLinux libX11 ++ [
               # For any cross build of llvm
               pkgsCross.aarch64-multiplatform.ncurses
@@ -232,8 +235,12 @@
           enableParallelBuilding = true;
           # hardeningDisable = lib.optional (buildConfig == "debug") "fortify";
 
+          postInstall = lib.optional enableLLVM ''
+            cmake --install . --prefix "$out" --component slang-llvm
+          '';
+
           postFixup = lib.optional stdenv.targetPlatform.isLinux ''
-            for bin in $(find "$out" -executable -type f -not -name slangc); do
+            for bin in $(find "$out/bin" -executable -type f -not -name slangc); do
               if [[ $bin == */slangc ]] then
                 wrapProgram $bin \
                   --prefix PATH : ${lib.makeBinPath [ gcc ]} \
@@ -484,12 +491,8 @@
             enableLLVM = false;
           };
           slang = (pkgs.shader-slang.override {
-            stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
-            enableDirectX = true;
+            enableDirectX = false;
             enableCuda = false;
-          }).overrideAttrs (old: {
-            CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
-            CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
           });
           slang-debug = pkgs.enableDebugging (slang.override {
             buildConfig = "debug";
@@ -505,5 +508,36 @@
 
           default = slang;
         });
+      devShells = nixpkgs.lib.attrsets.genAttrs [
+        "x86_64-linux"
+        "i686-linux"
+        "aarch64-linux"
+      ] (system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+            overlays = [ overlay ];
+          };
+        in {
+          default = pkgs.mkShell {
+            inputsFrom = [
+              ((pkgs.shader-slang.override {
+                stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
+                enableDirectX = true;
+                enableCuda = false;
+              }).overrideAttrs (old: {
+                CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
+                CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
+              }))
+            ];
+            # Add any additional dev shell specific packages
+            nativeBuildInputs = with pkgs;
+              [
+                gcc14 # Ensure we're using GCC 14
+              ];
+          };
+        });
+
     };
 }

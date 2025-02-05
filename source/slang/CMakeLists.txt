@@ -262,7 +262,6 @@ if(NOT SLANG_EMBED_CORE_MODULE)
         ${slang_link_args}
         ${slang_interface_args}
         ${slang_public_lib_args}
-        INSTALL_COMPONENT generators
     )
     add_library(slang-without-embedded-core-module ALIAS slang)
 else()
