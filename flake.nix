@@ -9,46 +9,47 @@
     };
   };
 
-  outputs = { self, nixpkgs, dxc }:
+  outputs = { self, nixpkgs, dxc, }:
     let
       shader-slang = {
         # build tools
-        lib, stdenv, makeWrapper, cmake, ninja, pkg-config, premake5, pkgs
+        lib, stdenv, makeWrapper, cmake, ninja, pkg-config, premake5, pkgs,
         # external deps
-        , spirv-tools, libX11, gcc, llvm, libclang, zlib, libxml2
+        spirv-tools, libX11, gcc, llvm, ncurses, libclang, zlib, libxml2
+        , spirv-headers,
         # cuda
-        , cudaPackages, optix-headers, addOpenGLRunpath, autoAddDriverRunpath
+        cudaPackages, optix-headers, addOpenGLRunpath, autoAddDriverRunpath,
         # vulkan
-        , vulkan-loader, vulkan-validation-layers, vulkan-tools-lunarg
+        vulkan-loader, vulkan-validation-layers, vulkan-tools-lunarg,
         # directx
-        , dxvk_2, vkd3d, vkd3d-proton, dxvk-native-headers
-        , directx-shader-compiler
+        dxvk_2, vkd3d, vkd3d-proton, dxvk-native-headers
+        , directx-shader-compiler,
         # devtools
-        , glslang, python3, clang_17, llvmPackages_17, bear, renderdoc
+        glslang, python3, clang_17, llvmPackages_17, bear, renderdoc
         , writeShellScriptBin, swiftshader, vulkan-tools, spirv-cross, gersemi
         , pkgsCross, emscripten, valgrind, kcachegrind, shfmt, nodePackages
-        , mono, p7zip, lua
+        , mono, p7zip, lua, gdb,
         # "release" or "debug"
-        , buildConfig ? "release"
-          # Allow slang to use LLvm as a backend
-        , enableLLVM ? true
-          # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
-          # optix toolkits
-        , enableCuda ? true
-          # Pure emscripten in build env
-        , enableWasm ? true
-          # Allow loading and running DXC to generate DXIL output
-        , enableDXC ? true
-          # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
-          # very useful, as we don't have FXC so can't generate shaders, dxvk
-          # is necessary however to supply libdxgi)
-          # This is only for the test suite, not for the compiler itself
-        , enableDirectX ? false
-          # Put Swiftshader in the shell environment and force its usage via
-          # VK_ICD_FILENAMES, again, only used for tests
-        , enableSwiftshader ? false
-          # Embed a compiled core module instead of the source
-        , embedCoreModule ? false }:
+        buildConfig ? "release",
+        # Allow slang to use LLvm as a backend
+        enableLLVM ? true,
+        # Put the cuda libraries in LD_LIBRARY_PATH and build with the cuda and
+        # optix toolkits
+        enableCuda ? true,
+        # Pure emscripten in build env
+        enableWasm ? true,
+        # Allow loading and running DXC to generate DXIL output
+        enableDXC ? true,
+        # Use dxvk and vkd3d-proton for dx11 and dx12 support (dx11 is not
+        # very useful, as we don't have FXC so can't generate shaders, dxvk
+        # is necessary however to supply libdxgi)
+        # This is only for the test suite, not for the compiler itself
+        enableDirectX ? false,
+        # Put Swiftshader in the shell environment and force its usage via
+        # VK_ICD_FILENAMES, again, only used for tests
+        enableSwiftshader ? false,
+        # Embed a compiled core module instead of the source
+        embedCoreModule ? false, }:
         let
           # A script in the devshell which calls `make` with the
           # correct options for the arch, call like `mk` (for a debug
@@ -92,6 +93,94 @@
             cmake --build --preset debug --target spirv-dis --target spirv-val --target spirv-opt --target glslang-standalone
             mk "$@"
           '';
+
+          # Cross-compilation helper script
+          cross-helper = writeShellScriptBin "cross-helper" ''
+            set -e
+
+            TARGET_ARCH="''${1:-i686}"
+            echo "Cross-compiling to $TARGET_ARCH..."
+
+            # # Clean previous builds
+            # rm -rf build build-platform-generators
+            #
+            # # Build slang generators for the build platform
+            echo "Building generators for build platform..."
+            cmake --workflow --preset generators --fresh
+            mkdir -p build-platform-generators
+            cmake --install build --config Release --component generators --prefix build-platform-generators
+            #
+            # # Clean build directory for cross compilation
+            # rm -rf build
+
+            # Configure for target architecture
+            echo "Configuring for $TARGET_ARCH..."
+            case "$TARGET_ARCH" in
+              i686)
+                CROSS_STDENV="${pkgsCross.gnu32.stdenv.cc}"
+                CROSS_BINTOOLS="${pkgsCross.gnu32.stdenv.cc.bintools.bintools}"
+                TARGET_PREFIX="${pkgsCross.gnu32.stdenv.cc.targetPrefix}"
+                ;;
+              aarch64)
+                CROSS_STDENV="${pkgsCross.aarch64-multiplatform.stdenv.cc}"
+                CROSS_BINTOOLS="${pkgsCross.aarch64-multiplatform.stdenv.cc.bintools.bintools}"
+                TARGET_PREFIX="${pkgsCross.aarch64-multiplatform.stdenv.cc.targetPrefix}"
+                ;;
+              *)
+                echo "Unsupported architecture: $TARGET_ARCH"
+                exit 1
+                ;;
+            esac
+
+            # Set all the necessary cross-compilation tools
+            export CC="$CROSS_STDENV/bin/''${TARGET_PREFIX}cc"
+            export CXX="$CROSS_STDENV/bin/''${TARGET_PREFIX}c++"
+            export AR="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}ar"
+            export AS="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}as"
+            export LD="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}ld"
+            export NM="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}nm"
+            export OBJCOPY="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}objcopy"
+            export OBJDUMP="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}objdump"
+            export RANLIB="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}ranlib"
+            export STRIP="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}strip"
+            export STRINGS="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}strings"
+            export READELF="$CROSS_BINTOOLS/bin/''${TARGET_PREFIX}readelf"
+
+            # Build Slang for target architecture
+            echo "Building Slang for $TARGET_ARCH..."
+            cmake --preset default --fresh \
+              -DCMAKE_CXX_COMPILER_AR="$AR" \
+              -DCMAKE_NM="$NM" \
+              -DCMAKE_AR="$AR" \
+              -DCMAKE_NM="$NM" \
+              -DCMAKE_OBJCOPY="$OBJCOPY" \
+              -DCMAKE_OBJDUMP="$OBJDUMP" \
+              -DCMAKE_CXX_COMPILER_RANLIB="$RANLIB" \
+              -DCMAKE_STRIP="$STRIP" \
+              -DSLANG_GENERATORS_PATH="$(pwd)/build-platform-generators/bin" \
+              -DSLANG_ENABLE_EXAMPLES=OFF \
+              -DSLANG_SLANG_LLVM_FLAVOR=DISABLE \
+              $cmakeFlags
+
+            cmake --build --preset release --target slangc
+
+            echo "Cross-compilation to $TARGET_ARCH complete!"
+          '';
+
+          # CMake toolchain file for i686
+          cmake-toolchain-i686 =
+            writeShellScriptBin "cmake-toolchain-i686.cmake" ''
+              set(CMAKE_SYSTEM_NAME Linux)
+              set(CMAKE_SYSTEM_PROCESSOR i686)
+
+              set(CMAKE_C_COMPILER ${pkgsCross.gnu32.stdenv.cc}/bin/${pkgsCross.gnu32.stdenv.cc.targetPrefix}cc)
+              set(CMAKE_CXX_COMPILER ${pkgsCross.gnu32.stdenv.cc}/bin/${pkgsCross.gnu32.stdenv.cc.targetPrefix}c++)
+
+              set(CMAKE_FIND_ROOT_PATH ${pkgsCross.gnu32.stdenv.cc.libc})
+              set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+              set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+              set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+            '';
 
           worktree-helper = writeShellScriptBin "new-worktree" ''
             git worktree add ../"slang-$1" -b "slang-$1" origin/master
@@ -200,6 +289,7 @@
             cmake
             ninja
             lua
+            gdb
             gersemi
             valgrind
             kcachegrind
@@ -232,14 +322,19 @@
             "-DSLANG_ENABLE_DX_ON_VK=${if enableDirectX then "1" else "0"}"
           ];
 
-          buildInputs = [ zlib libxml2 ]
+          buildInputs = [ zlib libxml2 spirv-headers ]
             ++ lib.optional stdenv.targetPlatform.isLinux libX11 ++ [
-              # For any cross build of llvm
-              pkgsCross.aarch64-multiplatform.ncurses
-              pkgsCross.aarch64-multiplatform.libxml2
-              pkgsCross.aarch64-multiplatform.xz
-              pkgsCross.aarch64-multiplatform.zlib
-            ] ++ lib.optionals enableLLVM [ llvm libclang ]
+              # # For any cross build of llvm
+              # pkgsCross.aarch64-multiplatform.ncurses
+              # pkgsCross.aarch64-multiplatform.libxml2
+              # pkgsCross.aarch64-multiplatform.xz
+              # pkgsCross.aarch64-multiplatform.zlib
+              # # Add i686 cross dependencies
+              # pkgsCross.gnu32.ncurses
+              # pkgsCross.gnu32.libxml2
+              # pkgsCross.gnu32.xz
+              # pkgsCross.gnu32.zlib
+            ] ++ lib.optionals enableLLVM [ llvm libclang ncurses ncurses.dev ]
             ++ lib.optional enableDirectX dxvk-native-headers
             ++ lib.optional enableCuda cudaPackages.cudatoolkit
             ++ lib.optional (stdenv.cc.isGNU && stdenv.cc.version == "14")
@@ -279,10 +374,12 @@
                 worktree-helper
                 test-shader-helper
                 test-helper
+                cross-helper
                 # Used in the bump-glslang.sh script
                 python3
                 # For cross builds
                 # pkgsCross.aarch64-multiplatform.buildPackages.gcc
+                pkgsCross.gnu32.buildPackages.gcc
               ]
             }"
             export PATH="build/Debug/build/external/spirv-tools/tools/Debug:build/external/glslang/StandAlone/Debug:$PATH"
@@ -329,7 +426,7 @@
         };
 
       modifyLlvmPackages = base:
-        { toolsFunc ? final: prev: { }, libsFunc ? final: prev: { } }:
+        { toolsFunc ? final: prev: { }, libsFunc ? final: prev: { }, }:
         let
           tools = base.tools.extend toolsFunc;
           libraries = base.libraries.extend libsFunc;
@@ -342,7 +439,7 @@
         # The Slang package itself
         shader-slang = self.callPackage shader-slang {
           # inherit (self.llvmPackages_13) libclang llvm;
-          inherit (modifyLlvmPackages self.llvmPackages_13 {
+          inherit (modifyLlvmPackages self.llvmPackages_14 {
             toolsFunc = lself: lsuper: {
               libllvm =
                 lsuper.libllvm.override { enableSharedLibraries = false; };
@@ -459,10 +556,10 @@
 
         gersemi = self.python3Packages.buildPythonApplication rec {
           pname = "gersemi";
-          version = "0.17.0";
+          version = "0.21.0";
           src = self.fetchPypi {
             inherit pname version;
-            sha256 = "sha256-MH5J4jLf0DWtbf9AH5G1Ep/kff5/pVhvhL9F9M1QXJc=";
+            sha256 = "sha256-sigIA1pfG/t+lhom/rLriNZsQtS9CqtzutAXzxHYW/I=";
           };
           doCheck = false;
           propagatedBuildInputs = [
@@ -495,6 +592,12 @@
               enableDirectX = false;
               enableDXC = false;
             };
+          slang-i686 = pkgs.pkgsCross.gnu32.shader-slang.override {
+            enableCuda = false;
+            enableDirectX = false;
+            enableDXC = false;
+            enableLLVM = false;
+          };
           slang-ucrt64 = pkgs.pkgsCross.ucrt64.shader-slang.override {
             enableCuda = false;
             enableDirectX = false;
@@ -505,7 +608,8 @@
             stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.gcc14Stdenv;
             enableDirectX = true;
             enableCuda = false;
-            enableLLVM = false;
+            enableLLVM = true;
+            embedCoreModule = false;
           }).overrideAttrs (old: {
             CMAKE_CXX_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
             CMAKE_C_COMPILER_LAUNCHER = "${pkgs.sccache}/bin/sccache";
