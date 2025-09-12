@@ -914,7 +914,8 @@ typedef uint32_t SlangSizeT;
         DisableNonEssentialValidations, // bool
         DisableSourceMap,               // bool
         UnscopedEnum,                   // bool
-        PreserveParameters, // bool: preserve all resource parameters in the output code.
+        PreserveParameters,          // bool: preserve all resource parameters in the output code.
+        UseMSVCStyleBitfieldPacking, // bool
         // Target
 
         Capability,                // intValue0: CapabilityName
