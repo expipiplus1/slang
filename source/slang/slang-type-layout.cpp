@@ -31,7 +31,7 @@ static LayoutSize _roundToAlignment(LayoutSize offset, size_t alignment)
     // An invalid size remains invalid.
     if (offset.isInvalid())
         return LayoutSize::invalid();
-        
+
     // An infinite size is assumed to be maximally aligned.
     if (offset.isInfinite())
         return LayoutSize::infinite();
@@ -288,7 +288,10 @@ struct GLSLBaseLayoutRulesImpl : DefaultLayoutRulesImpl
         SLANG_RELEASE_ASSERT(elementInfo.size.isFinite());
 
         auto size = LayoutSize(elementInfo.size.getFiniteValue()) * elementCount;
-        SimpleLayoutInfo vectorInfo(LayoutResourceKind::Uniform, size, _roundUpToPowerOfTwo(size.getFiniteValue()));
+        SimpleLayoutInfo vectorInfo(
+            LayoutResourceKind::Uniform,
+            size,
+            _roundUpToPowerOfTwo(size.getFiniteValue()));
         return vectorInfo;
     }
 

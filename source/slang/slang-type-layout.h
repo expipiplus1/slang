@@ -115,7 +115,7 @@ struct LayoutSize
     {
         if (this->isInvalid() || that.isInvalid())
             return false; // Invalid values are not comparable
-            
+
         if (that.isFinite())
         {
             if (this->isFinite())
@@ -250,7 +250,7 @@ inline LayoutSize maximum(LayoutSize left, LayoutSize right)
 {
     if (left.isInvalid() || right.isInvalid())
         return LayoutSize::invalid();
-    
+
     if (left.isInfinite() || right.isInfinite())
         return LayoutSize::infinite();
 
