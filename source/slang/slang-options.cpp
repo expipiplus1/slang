@@ -11,7 +11,6 @@
 #include "../compiler-core/slang-command-line-args.h"
 #include "../compiler-core/slang-core-diagnostics.h"
 #include "../compiler-core/slang-name-convention-util.h"
-#include "slang-rich-diagnostics.h"
 #include "../compiler-core/slang-source-embed-util.h"
 #include "../core/slang-castable.h"
 #include "../core/slang-char-util.h"
@@ -26,6 +25,7 @@
 #include "slang-hlsl-to-vulkan-layout-options.h"
 #include "slang-profile.h"
 #include "slang-repro.h"
+#include "slang-rich-diagnostics.h"
 #include "slang-serialize-ir.h"
 #include "slang.h"
 
@@ -1515,8 +1515,7 @@ SlangResult OptionsParser::addInputPath(char const* inPath, SourceLanguage langO
     }
     if (sourceLanguage == SLANG_SOURCE_LANGUAGE_UNKNOWN)
     {
-        m_requestImpl->getSink()->diagnose(
-            Diagnostics::CannotDeduceSourceLanguage{.path = inPath});
+        m_requestImpl->getSink()->diagnose(Diagnostics::CannotDeduceSourceLanguage{.path = inPath});
         return SLANG_FAIL;
     }
 
@@ -2366,7 +2365,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             m_sink->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
             if (m_sink->getParentSink())
             {
-                m_sink->getParentSink()->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+                m_sink->getParentSink()->setFlag(
+                    DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
             }
             break;
         case OptionKind::ReportDetailedPerfBenchmark:
@@ -2384,7 +2384,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             m_sink->setFlag(DiagnosticSink::Flag::MachineReadableDiagnostics);
             if (m_sink->getParentSink())
             {
-                m_sink->getParentSink()->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+                m_sink->getParentSink()->setFlag(
+                    DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
                 m_sink->getParentSink()->setFlag(DiagnosticSink::Flag::MachineReadableDiagnostics);
             }
             break;
@@ -2401,8 +2402,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     colorValue = SLANG_DIAGNOSTIC_COLOR_AUTO;
                 else
                 {
-                    m_sink->diagnose(
-                        Diagnostics::UnknownCommandLineValue{.valid_values = "always, never, auto"});
+                    m_sink->diagnose(Diagnostics::UnknownCommandLineValue{
+                        .valid_values = "always, never, auto"});
                     return SLANG_FAIL;
                 }
                 linkage->m_optionSet.set(optionKind, (int)colorValue);
@@ -2769,8 +2770,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     CapabilityName atom = findCapabilityName(atomName);
                     if (atom == CapabilityName::Invalid)
                     {
-                        m_sink->diagnose(
-                            Diagnostics::UnknownProfile{.profile = atomName, .location = operand.loc});
+                        m_sink->diagnose(Diagnostics::UnknownProfile{
+                            .profile = atomName,
+                            .location = operand.loc});
                         return SLANG_FAIL;
                     }
 
@@ -2804,9 +2806,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 Stage stage = findStageByName(name.value);
                 if (stage == Stage::Unknown)
                 {
-                    m_sink->diagnose(Diagnostics::UnknownStage{
-                        .stage_name = name.value,
-                        .location = name.loc});
+                    m_sink->diagnose(
+                        Diagnostics::UnknownStage{.stage_name = name.value, .location = name.loc});
                     return SLANG_FAIL;
                 }
                 else
@@ -2884,8 +2885,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 if (sourceLanguage == SourceLanguage::Unknown)
                 {
-                    m_sink->diagnose(
-                        Diagnostics::UnknownSourceLanguage{.language = name.value, .location = name.loc});
+                    m_sink->diagnose(Diagnostics::UnknownSourceLanguage{
+                        .language = name.value,
+                        .location = name.loc});
                     return SLANG_FAIL;
                 }
                 else
@@ -2909,8 +2911,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 if (SLANG_FAILED(
                         TypeTextUtil::findPassThrough(name.value.getUnownedSlice(), passThrough)))
                 {
-                    m_sink->diagnose(
-                        Diagnostics::UnknownPassThroughTarget{.target = name.value, .location = name.loc});
+                    m_sink->diagnose(Diagnostics::UnknownPassThroughTarget{
+                        .target = name.value,
+                        .location = name.loc});
                     return SLANG_FAIL;
                 }
 
@@ -3517,8 +3520,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             {
                 if (m_rawEntryPoints.getCount() == 0)
                 {
-                    m_sink->diagnose(
-                        Diagnostics::StageSpecificationIgnoredBecauseNoEntryPoints{});
+                    m_sink->diagnose(Diagnostics::StageSpecificationIgnoredBecauseNoEntryPoints{});
                 }
                 else
                 {
@@ -3556,8 +3558,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             }
             if (anyEntryPointWithoutTranslationUnit)
             {
-                m_sink->diagnose(
-                    Diagnostics::EntryPointsNeedToBeAssociatedWithTranslationUnits{});
+                m_sink->diagnose(Diagnostics::EntryPointsNeedToBeAssociatedWithTranslationUnits{});
                 return SLANG_FAIL;
             }
         }
@@ -3597,8 +3598,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         {
             if (rawEntryPoint.conflictingStagesSet)
             {
-                m_sink->diagnose(Diagnostics::ConflictingStagesForEntryPoint{
-                    .entry_point = rawEntryPoint.name});
+                m_sink->diagnose(
+                    Diagnostics::ConflictingStagesForEntryPoint{.entry_point = rawEntryPoint.name});
             }
             else if (rawEntryPoint.redundantStageSet)
             {
@@ -4081,8 +4082,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             if (targetInfo->wholeTargetOutputPath != "")
             {
                 m_sink->diagnose(Diagnostics::DuplicateOutputPathsForTarget{
-                    .target =
-                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(target->getTarget()))});
+                    .target = TypeTextUtil::getCompileTargetName(
+                        SlangCompileTarget(target->getTarget()))});
             }
             else
             {
@@ -4112,8 +4113,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             {
                 m_sink->diagnose(Diagnostics::DuplicateOutputPathsForEntryPointAndTarget{
                     .entry_point = entryPointReq->getName(),
-                    .target =
-                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(target->getTarget()))});
+                    .target = TypeTextUtil::getCompileTargetName(
+                        SlangCompileTarget(target->getTarget()))});
             }
             else
             {
@@ -4157,8 +4158,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 // Get the target name for the warning message
                 UnownedStringSlice targetName =
                     TypeTextUtil::getCompileTargetName(asExternal(rawTarget.format));
-                m_sink->diagnose(Diagnostics::SeparateDebugInfoUnsupportedForTarget{
-                    .target = targetName});
+                m_sink->diagnose(
+                    Diagnostics::SeparateDebugInfoUnsupportedForTarget{.target = targetName});
             }
         }
 
@@ -4170,8 +4171,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 // Get the target name for the warning message
                 UnownedStringSlice targetName =
                     TypeTextUtil::getCompileTargetName(asExternal(m_defaultTarget.format));
-                m_sink->diagnose(Diagnostics::SeparateDebugInfoUnsupportedForTarget{
-                    .target = targetName});
+                m_sink->diagnose(
+                    Diagnostics::SeparateDebugInfoUnsupportedForTarget{.target = targetName});
             }
         }
     }

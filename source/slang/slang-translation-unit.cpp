@@ -200,8 +200,9 @@ SlangResult TranslationUnitRequest::requireSourceFiles()
             if (SLANG_FAILED(res))
             {
                 // Report couldn't load
-                sink->diagnose(
-                    Diagnostics::CannotOpenFile{.path = pathInfo.getName(), .location = SourceLoc()});
+                sink->diagnose(Diagnostics::CannotOpenFile{
+                    .path = pathInfo.getName(),
+                    .location = SourceLoc()});
                 return res;
             }
         }
