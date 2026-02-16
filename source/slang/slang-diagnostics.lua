@@ -352,6 +352,174 @@ err(
     "conflicting stages have been specified for entry point '~entry_point'"
 )
 
+warning(
+    "explicit stage doesnt match implied stage",
+    32,
+    "the stage specified for entry point '~entry_point' ('~specified_stage') does not match the stage implied by the source file name ('~implied_stage')"
+)
+
+err(
+    "stage specification ignored because no entry points",
+    33,
+    "one or more stages were specified, but no entry points were specified with '-entry'"
+)
+
+err(
+    "stage specification ignored because before all entry points",
+    34,
+    "when compiling multiple entry points, any '-stage' options must follow the '-entry' option that they apply to"
+)
+
+err(
+    "no stage specified in pass through mode",
+    35,
+    "no stage was specified for entry point '~entry_point'; when using the '-pass-through' option, stages must be fully specified on the command line"
+)
+
+err(
+    "expecting an integer",
+    36,
+    "expecting an integer value"
+)
+
+warning(
+    "same profile specified more than once",
+    40,
+    "the '~profile' was specified more than once for target '~target'"
+)
+
+err(
+    "conflicting profiles specified for target",
+    41,
+    "conflicting profiles have been specified for target '~target'"
+)
+
+err(
+    "profile specification ignored because no targets",
+    42,
+    "a '-profile' option was specified, but no target was specified with '-target'"
+)
+
+err(
+    "profile specification ignored because before all targets",
+    43,
+    "when using multiple targets, any '-profile' option must follow the '-target' it applies to"
+)
+
+err(
+    "duplicate targets",
+    50,
+    "the target '~target' has been specified more than once"
+)
+
+err(
+    "unhandled language for source embedding",
+    51,
+    "unhandled source language for source embedding"
+)
+
+err(
+    "cannot deduce output format from path",
+    60,
+    "cannot infer an output format from the output path '~path'"
+)
+
+err(
+    "cannot match output file to target",
+    61,
+    "no specified '-target' option matches the output path '~path', which implies the '~format' format"
+)
+
+err(
+    "unknown command line value",
+    62,
+    "unknown value for option. Valid values are '~valid_values'"
+)
+
+err(
+    "unknown help category",
+    63,
+    "unknown help category"
+)
+
+err(
+    "cannot match output file to entry point",
+    70,
+    "the output path '~path' is not associated with any entry point; a '-o' option for a compiled kernel must follow the '-entry' option for its corresponding entry point"
+)
+
+err(
+    "invalid type conformance option string",
+    71,
+    "syntax error in type conformance option '~option'."
+)
+
+err(
+    "invalid type conformance option no type",
+    72,
+    "invalid conformance option '~option', type '~type_name' is not found."
+)
+
+err(
+    "cannot create type conformance",
+    73,
+    "cannot create type conformance '~conformance'."
+)
+
+err(
+    "duplicate output paths for entry point and target",
+    80,
+    "multiple output paths have been specified entry point '~entry_point:Name' on target '~target'"
+)
+
+err(
+    "duplicate output paths for target",
+    81,
+    "multiple output paths have been specified for target '~target'"
+)
+
+err(
+    "duplicate dependency output paths",
+    82,
+    "the -dep argument can only be specified once"
+)
+
+err(
+    "unable to write repro file",
+    82,
+    "unable to write repro file '~path'"
+)
+
+err(
+    "unable to create module container",
+    86,
+    "unable to create module container"
+)
+
+err(
+    "unable to set default downstream compiler",
+    87,
+    "unable to set default downstream compiler for source language '~language' to '~compiler'"
+)
+
+err(
+    "expecting slang riff container",
+    89,
+    "expecting a slang riff container"
+)
+
+err(
+    "incompatible riff semantic version",
+    90,
+    "incompatible riff semantic version ~actual_version expecting ~expected_version"
+)
+
+err(
+    "riff hash mismatch",
+    91,
+    "riff hash mismatch - incompatible riff"
+)
+
 -- Process and validate all diagnostics
 processed_diagnostics, validation_errors = helpers.process_diagnostics(helpers.diagnostics)
 

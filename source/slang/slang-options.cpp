@@ -1826,7 +1826,7 @@ SlangResult OptionsParser::_getValue(
         StringBuilder buf;
         StringUtil::join(names.getBuffer(), names.getCount(), toSlice(", "), buf);
 
-        m_sink->diagnose(arg.loc, Diagnostics::unknownCommandLineValue, buf);
+        m_sink->diagnose(Diagnostics::UnknownCommandLineValue{.valid_values = buf});
         return SLANG_FAIL;
     }
 
@@ -1880,7 +1880,7 @@ SlangResult OptionsParser::_getValue(
     StringBuilder buf;
     StringUtil::join(names.getBuffer(), names.getCount(), toSlice(", "), buf);
 
-    m_sink->diagnose(arg.loc, Diagnostics::unknownCommandLineValue, buf);
+    m_sink->diagnose(Diagnostics::UnknownCommandLineValue{.valid_values = buf});
     return SLANG_FAIL;
 }
 
@@ -1903,7 +1903,7 @@ SlangResult OptionsParser::_expectInt(const CommandLineArg& initArg, Int& outInt
 
     if (SLANG_FAILED(StringUtil::parseInt(arg.value.getUnownedSlice(), outInt)))
     {
-        m_sink->diagnose(arg.loc, Diagnostics::expectingAnInteger);
+        m_sink->diagnose(Diagnostics::ExpectingAnInteger{});
         return SLANG_FAIL;
     }
     return SLANG_OK;
@@ -2093,7 +2093,7 @@ SlangResult OptionsParser::_parseHelp(const CommandLineArg& arg)
 
         if (categoryIndex < 0)
         {
-            m_sink->diagnose(catArg.loc, Diagnostics::unknownHelpCategory);
+            m_sink->diagnose(Diagnostics::UnknownHelpCategory{});
             return SLANG_FAIL;
         }
     }
@@ -2357,8 +2357,17 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         case OptionKind::PreserveParameters:
         case OptionKind::UseMSVCStyleBitfieldPacking:
         case OptionKind::ExperimentalFeature:
+            linkage->m_optionSet.set(optionKind, true);
+            break;
         case OptionKind::EnableRichDiagnostics:
             linkage->m_optionSet.set(optionKind, true);
+            // Update the sink immediately so diagnostics emitted during option parsing
+            // are properly formatted
+            m_sink->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+            if (m_sink->getParentSink())
+            {
+                m_sink->getParentSink()->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+            }
             break;
         case OptionKind::ReportDetailedPerfBenchmark:
             linkage->m_optionSet.set(optionKind, true);
@@ -2369,6 +2378,15 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             linkage->m_optionSet.set(optionKind, true);
             // -enable-machine-readable-diagnostics implies -enable-experimental-rich-diagnostics
             linkage->m_optionSet.set(OptionKind::EnableRichDiagnostics, true);
+            // Update the sink immediately so diagnostics emitted during option parsing
+            // are properly formatted
+            m_sink->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+            m_sink->setFlag(DiagnosticSink::Flag::MachineReadableDiagnostics);
+            if (m_sink->getParentSink())
+            {
+                m_sink->getParentSink()->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+                m_sink->getParentSink()->setFlag(DiagnosticSink::Flag::MachineReadableDiagnostics);
+            }
             break;
         case OptionKind::DiagnosticColor:
             {
@@ -2384,9 +2402,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 else
                 {
                     m_sink->diagnose(
-                        colorArg.loc,
-                        Diagnostics::unknownCommandLineValue,
-                        "always, never, auto");
+                        Diagnostics::UnknownCommandLineValue{.valid_values = "always, never, auto"});
                     return SLANG_FAIL;
                 }
                 linkage->m_optionSet.set(optionKind, (int)colorValue);
@@ -2997,9 +3013,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 }
                 else
                 {
-                    m_sink->diagnose(
-                        dependencyPath.loc,
-                        Diagnostics::duplicateDependencyOutputPaths);
+                    m_sink->diagnose(Diagnostics::DuplicateDependencyOutputPaths{});
                     return SLANG_FAIL;
                 }
                 break;
@@ -3149,11 +3163,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 if (SLANG_FAILED(m_session->setDefaultDownstreamCompiler(sourceLanguage, compiler)))
                 {
-                    m_sink->diagnose(
-                        arg.loc,
-                        Diagnostics::unableToSetDefaultDownstreamCompiler,
-                        compilerArg.value,
-                        sourceLanguageArg.value);
+                    m_sink->diagnose(Diagnostics::UnableToSetDefaultDownstreamCompiler{
+                        .language = sourceLanguageArg.value,
+                        .compiler = compilerArg.value});
                     return SLANG_FAIL;
                 }
                 break;
@@ -3216,7 +3228,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 if (!SourceEmbedUtil::isSupported(
                         (SlangSourceLanguage)m_requestImpl->m_sourceEmbedLanguage))
                 {
-                    m_sink->diagnose(arg.loc, Diagnostics::unhandledLanguageForSourceEmbedding);
+                    m_sink->diagnose(Diagnostics::UnhandledLanguageForSourceEmbedding{});
                     return SLANG_FAIL;
                 }
 
@@ -3506,14 +3518,12 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 if (m_rawEntryPoints.getCount() == 0)
                 {
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::stageSpecificationIgnoredBecauseNoEntryPoints);
+                        Diagnostics::StageSpecificationIgnoredBecauseNoEntryPoints{});
                 }
                 else
                 {
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::stageSpecificationIgnoredBecauseBeforeAllEntryPoints);
+                        Diagnostics::StageSpecificationIgnoredBecauseBeforeAllEntryPoints{});
                 }
             }
         }
@@ -3608,12 +3618,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     rawEntryPoint.stage != Stage::Unknown &&
                     rawTranslationUnit.impliedStage != rawEntryPoint.stage)
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::explicitStageDoesntMatchImpliedStage,
-                        rawEntryPoint.name,
-                        rawEntryPoint.stage,
-                        rawTranslationUnit.impliedStage);
+                    m_sink->diagnose(Diagnostics::ExplicitStageDoesntMatchImpliedStage{
+                        .entry_point = rawEntryPoint.name,
+                        .specified_stage = getStageName(rawEntryPoint.stage),
+                        .implied_stage = getStageName(rawTranslationUnit.impliedStage)});
                 }
             }
         }
@@ -3629,10 +3637,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             {
                 if (rawEntryPoint.stage == Stage::Unknown)
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::noStageSpecifiedInPassThroughMode,
-                        rawEntryPoint.name);
+                    m_sink->diagnose(Diagnostics::NoStageSpecifiedInPassThroughMode{
+                        .entry_point = rawEntryPoint.name});
                 }
             }
         }
@@ -3716,7 +3722,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 if (mapFormatToTargetIndex.containsKey(format))
                 {
-                    m_sink->diagnose(SourceLoc(), Diagnostics::duplicateTargets, format);
+                    m_sink->diagnose(Diagnostics::DuplicateTargets{
+                        .target = TypeTextUtil::getCompileTargetName(SlangCompileTarget(format))});
                 }
                 else
                 {
@@ -3804,15 +3811,12 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     // so we didn't try to infer a target, or if the `-profile` option
                     // somehow didn't imply a target.
                     //
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::profileSpecificationIgnoredBecauseNoTargets);
+                    m_sink->diagnose(Diagnostics::ProfileSpecificationIgnoredBecauseNoTargets{});
                 }
                 else
                 {
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::profileSpecificationIgnoredBecauseBeforeAllTargets);
+                        Diagnostics::ProfileSpecificationIgnoredBecauseBeforeAllTargets{});
                 }
             }
 
@@ -3834,18 +3838,16 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         {
             if (rawTarget.conflictingProfilesSet)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::conflictingProfilesSpecifiedForTarget,
-                    rawTarget.format);
+                m_sink->diagnose(Diagnostics::ConflictingProfilesSpecifiedForTarget{
+                    .target =
+                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(rawTarget.format))});
             }
             else if (rawTarget.redundantProfileSet)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::sameProfileSpecifiedMoreThanOnce,
-                    rawTarget.optionSet.getProfileVersion(),
-                    rawTarget.format);
+                m_sink->diagnose(Diagnostics::SameProfileSpecifiedMoreThanOnce{
+                    .profile = Profile(rawTarget.optionSet.getProfileVersion()).getName(),
+                    .target =
+                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(rawTarget.format))});
             }
         }
 
@@ -3976,9 +3978,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     // (it doesn't have a suffix like `.spv` that tells us what to write).
                     //
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::cannotDeduceOutputFormatFromPath,
-                        rawOutput.path);
+                        Diagnostics::CannotDeduceOutputFormatFromPath{.path = rawOutput.path});
                 }
                 else if (mapFormatToTargetIndex.tryGetValue(rawOutput.impliedFormat, targetIndex))
                 {
@@ -3986,11 +3986,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 }
                 else
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::cannotMatchOutputFileToTarget,
-                        rawOutput.path,
-                        rawOutput.impliedFormat);
+                    m_sink->diagnose(Diagnostics::CannotMatchOutputFileToTarget{
+                        .path = rawOutput.path,
+                        .format = TypeTextUtil::getCompileTargetName(
+                            SlangCompileTarget(rawOutput.impliedFormat))});
                 }
             }
 
@@ -4048,10 +4047,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     default:
                         if (rawOutput.path.getLength() != 0)
                         {
-                            m_sink->diagnose(
-                                SourceLoc(),
-                                Diagnostics::cannotMatchOutputFileToEntryPoint,
-                                rawOutput.path);
+                            m_sink->diagnose(Diagnostics::CannotMatchOutputFileToEntryPoint{
+                                .path = rawOutput.path});
                         }
                         break;
                     }
@@ -4083,10 +4080,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         {
             if (targetInfo->wholeTargetOutputPath != "")
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::duplicateOutputPathsForTarget,
-                    target->getTarget());
+                m_sink->diagnose(Diagnostics::DuplicateOutputPathsForTarget{
+                    .target =
+                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(target->getTarget()))});
             }
             else
             {
@@ -4114,11 +4110,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             // String outputPath;
             if (targetInfo->entryPointOutputPaths.containsKey(entryPointID))
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::duplicateOutputPathsForEntryPointAndTarget,
-                    entryPointReq->getName(),
-                    target->getTarget());
+                m_sink->diagnose(Diagnostics::DuplicateOutputPathsForEntryPointAndTarget{
+                    .entry_point = entryPointReq->getName(),
+                    .target =
+                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(target->getTarget()))});
             }
             else
             {
